@@ -176,6 +176,108 @@ CREATE TABLE IF NOT EXISTS rug_wallets (
   notes TEXT
 );
 
+-- Trade Type enum (for tracking buys AND sells)
+DO $$ BEGIN
+  CREATE TYPE trade_type AS ENUM ('BUY', 'SELL');
+EXCEPTION
+  WHEN duplicate_object THEN null;
+END $$;
+
+-- Token Safety Cache table (Feature 1 & 5)
+CREATE TABLE IF NOT EXISTS token_safety_cache (
+  token_address VARCHAR(64) PRIMARY KEY,
+  mint_authority_enabled BOOLEAN NOT NULL,
+  freeze_authority_enabled BOOLEAN NOT NULL,
+  lp_locked BOOLEAN NOT NULL,
+  lp_lock_duration INTEGER,
+  top10_holder_concentration DECIMAL(5, 2) NOT NULL,
+  deployer_holding DECIMAL(5, 2) NOT NULL,
+  token_age_mins INTEGER NOT NULL,
+  rugcheck_score INTEGER,
+  honeypot_risk BOOLEAN NOT NULL,
+  safety_score INTEGER NOT NULL,
+  flags TEXT[],
+  -- Insider detection fields (Feature 5)
+  same_block_buyers INTEGER DEFAULT 0,
+  deployer_funded_buyers INTEGER DEFAULT 0,
+  suspicious_patterns TEXT[],
+  insider_risk_score INTEGER DEFAULT 0,
+  -- Metadata
+  checked_at TIMESTAMP DEFAULT NOW(),
+  expires_at TIMESTAMP DEFAULT NOW() + INTERVAL '15 minutes'
+);
+
+-- Conviction Signals table (Feature 2)
+CREATE TABLE IF NOT EXISTS conviction_signals (
+  id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+  token_address VARCHAR(64) NOT NULL,
+  kol_id UUID REFERENCES kols(id) ON DELETE CASCADE,
+  wallet_address VARCHAR(64) NOT NULL,
+  kol_name VARCHAR(100) NOT NULL,
+  buy_timestamp TIMESTAMP NOT NULL,
+  sol_amount DECIMAL(20, 10),
+  tx_signature VARCHAR(128),
+  created_at TIMESTAMP DEFAULT NOW()
+);
+
+-- Daily Stats table (Feature 8)
+CREATE TABLE IF NOT EXISTS daily_stats (
+  id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+  date DATE NOT NULL UNIQUE,
+  signals_sent INTEGER DEFAULT 0,
+  winners INTEGER DEFAULT 0,
+  losers INTEGER DEFAULT 0,
+  neutral INTEGER DEFAULT 0,
+  best_performer_token VARCHAR(64),
+  best_performer_ticker VARCHAR(20),
+  best_performer_roi DECIMAL(10, 2),
+  worst_performer_token VARCHAR(64),
+  worst_performer_ticker VARCHAR(20),
+  worst_performer_roi DECIMAL(10, 2),
+  top_kol_handle VARCHAR(100),
+  top_kol_wins INTEGER,
+  top_kol_total INTEGER,
+  simulated_entry_sol DECIMAL(20, 10),
+  simulated_current_sol DECIMAL(20, 10),
+  high_conviction_tokens JSONB,
+  created_at TIMESTAMP DEFAULT NOW(),
+  updated_at TIMESTAMP DEFAULT NOW()
+);
+
+-- Pump.fun Tokens table (Feature 4)
+CREATE TABLE IF NOT EXISTS pumpfun_tokens (
+  token_address VARCHAR(64) PRIMARY KEY,
+  bonding_progress DECIMAL(5, 2) NOT NULL,
+  current_market_cap DECIMAL(20, 2),
+  target_market_cap DECIMAL(20, 2) DEFAULT 69000,
+  estimated_time_to_migration INTEGER,
+  is_migrated BOOLEAN DEFAULT FALSE,
+  migration_detected_at TIMESTAMP,
+  last_alert_progress INTEGER DEFAULT 0,
+  created_at TIMESTAMP DEFAULT NOW(),
+  updated_at TIMESTAMP DEFAULT NOW()
+);
+
+-- KOL Extended Performance table (Feature 7)
+CREATE TABLE IF NOT EXISTS kol_extended_performance (
+  kol_id UUID PRIMARY KEY REFERENCES kols(id) ON DELETE CASCADE,
+  total_trades INTEGER DEFAULT 0,
+  win_rate DECIMAL(5, 4) DEFAULT 0,
+  avg_roi DECIMAL(10, 4) DEFAULT 0,
+  avg_hold_time_hours DECIMAL(10, 2) DEFAULT 0,
+  best_trade_token VARCHAR(64),
+  best_trade_ticker VARCHAR(20),
+  best_trade_roi DECIMAL(10, 4),
+  worst_trade_token VARCHAR(64),
+  worst_trade_ticker VARCHAR(20),
+  worst_trade_roi DECIMAL(10, 4),
+  last_7d_roi DECIMAL(10, 4) DEFAULT 0,
+  last_7d_trades INTEGER DEFAULT 0,
+  last_7d_wins INTEGER DEFAULT 0,
+  consistency_score DECIMAL(5, 2) DEFAULT 0,
+  last_calculated TIMESTAMP DEFAULT NOW()
+);
+
 -- Indexes for performance
 CREATE INDEX IF NOT EXISTS idx_kol_wallets_address ON kol_wallets(address);
 CREATE INDEX IF NOT EXISTS idx_kol_wallets_kol_id ON kol_wallets(kol_id);
@@ -186,6 +288,15 @@ CREATE INDEX IF NOT EXISTS idx_positions_status ON positions(status);
 CREATE INDEX IF NOT EXISTS idx_positions_token ON positions(token_address);
 CREATE INDEX IF NOT EXISTS idx_signal_log_token_time ON signal_log(token_address, sent_at DESC);
 CREATE INDEX IF NOT EXISTS idx_signal_log_sent_at ON signal_log(sent_at DESC);
+
+-- New indexes for feature tables
+CREATE INDEX IF NOT EXISTS idx_token_safety_expires ON token_safety_cache(expires_at);
+CREATE INDEX IF NOT EXISTS idx_conviction_token ON conviction_signals(token_address);
+CREATE INDEX IF NOT EXISTS idx_conviction_kol ON conviction_signals(kol_id);
+CREATE INDEX IF NOT EXISTS idx_conviction_timestamp ON conviction_signals(buy_timestamp DESC);
+CREATE INDEX IF NOT EXISTS idx_daily_stats_date ON daily_stats(date DESC);
+CREATE INDEX IF NOT EXISTS idx_pumpfun_progress ON pumpfun_tokens(bonding_progress DESC);
+CREATE INDEX IF NOT EXISTS idx_pumpfun_migrated ON pumpfun_tokens(is_migrated);
 `;
 
 // ============ DATABASE OPERATIONS ============

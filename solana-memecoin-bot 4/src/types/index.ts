@@ -360,3 +360,155 @@ export interface DexScreenerPair {
   };
   fdv: number;
 }
+
+// ============ FEATURE 1 & 5: TOKEN SAFETY TYPES ============
+
+export interface TokenSafetyResult {
+  tokenAddress: string;
+  mintAuthorityEnabled: boolean;
+  freezeAuthorityEnabled: boolean;
+  lpLocked: boolean;
+  lpLockDuration: number | null;
+  top10HolderConcentration: number;
+  deployerHolding: number;
+  tokenAgeMins: number;
+  rugCheckScore: number | null;
+  honeypotRisk: boolean;
+  safetyScore: number;
+  flags: string[];
+  // Insider detection (Feature 5)
+  insiderAnalysis: InsiderAnalysis;
+}
+
+export interface InsiderAnalysis {
+  sameBlockBuyers: number;
+  deployerFundedBuyers: number;
+  suspiciousPatterns: string[];
+  insiderRiskScore: number;
+}
+
+// ============ FEATURE 2: CONVICTION TRACKER TYPES ============
+
+export interface KolBuyInfo {
+  kolId: string;
+  kolName: string;
+  walletAddress: string;
+  timestamp: number;
+  solAmount?: number;
+  txSignature?: string;
+}
+
+export interface ConvictionLevel {
+  tokenAddress: string;
+  level: number;
+  buyers: KolBuyInfo[];
+  isHighConviction: boolean;
+  isUltraConviction: boolean;
+}
+
+// ============ FEATURE 3: KOL ACTIVITY TYPES ============
+
+export enum TradeType {
+  BUY = 'BUY',
+  SELL = 'SELL'
+}
+
+export interface KolActivity {
+  type: TradeType;
+  kol: Kol;
+  wallet: KolWallet;
+  tokenAddress: string;
+  tokenTicker?: string;
+  solAmount: number;
+  tokenAmount: number;
+  percentSold?: number;
+  isFullExit?: boolean;
+  timestamp: Date;
+  txSignature: string;
+}
+
+export interface AggregatedExitSignal {
+  tokenAddress: string;
+  tokenTicker: string;
+  totalKolsExited: number;
+  totalKolsHolding: number;
+  exitedKols: string[];
+  holdingKols: string[];
+}
+
+// ============ FEATURE 4: PUMP.FUN TYPES ============
+
+export interface BondingCurveStatus {
+  tokenMint: string;
+  bondingProgress: number;
+  currentMarketCap: number;
+  targetMarketCap: number;
+  estimatedTimeToMigration: number | null;
+  isMigrated: boolean;
+}
+
+export interface PumpfunAlert {
+  type: 'PROGRESS_85' | 'PROGRESS_90' | 'PROGRESS_95' | 'MIGRATION';
+  token: BondingCurveStatus;
+}
+
+// ============ FEATURE 7: KOL ANALYTICS TYPES ============
+
+export interface KolPerformanceStats {
+  kolId: string;
+  kolHandle: string;
+  totalTrades: number;
+  winRate: number;
+  avgRoi: number;
+  avgHoldTimeHours: number;
+  bestTrade: {
+    token: string;
+    ticker: string;
+    roi: number;
+  } | null;
+  worstTrade: {
+    token: string;
+    ticker: string;
+    roi: number;
+  } | null;
+  last7DaysRoi: number;
+  last7DaysTrades: number;
+  last7DaysWins: number;
+  consistencyScore: number;
+}
+
+// ============ FEATURE 8: DAILY DIGEST TYPES ============
+
+export interface DailyDigest {
+  date: Date;
+  signalsSent: number;
+  winners: number;
+  losers: number;
+  neutral: number;
+  winRate: number;
+  bestPerformer: {
+    token: string;
+    ticker: string;
+    roi: number;
+  } | null;
+  worstPerformer: {
+    token: string;
+    ticker: string;
+    roi: number;
+  } | null;
+  topKol: {
+    handle: string;
+    wins: number;
+    total: number;
+  } | null;
+  simulatedPnl: {
+    entrySol: number;
+    currentSol: number;
+    roi: number;
+  };
+  highConvictionTokens: Array<{
+    tokenAddress: string;
+    ticker: string;
+    kolCount: number;
+  }>;
+}

@@ -1,5 +1,6 @@
 // ===========================================
 // SIGNAL GENERATION ENGINE
+// Enhanced with new feature modules
 // ===========================================
 
 import { appConfig } from '../config/index.js';
@@ -15,12 +16,23 @@ import { scamFilter, quickScamCheck } from './scam-filter.js';
 import { kolWalletMonitor } from './kol-tracker.js';
 import { scoringEngine } from './scoring.js';
 import { telegramBot } from './telegram.js';
+
+// New feature modules
+import { tokenSafetyChecker } from './safety/token-safety-checker.js';
+import { insiderDetector } from './safety/insider-detector.js';
+import { convictionTracker } from './signals/conviction-tracker.js';
+import { kolSellDetector } from './signals/sell-detector.js';
+import { kolAnalytics } from './kol/kol-analytics.js';
+import { bondingCurveMonitor } from './pumpfun/bonding-monitor.js';
+import { dailyDigestGenerator } from './telegram/daily-digest.js';
+
 import {
   TokenMetrics,
   SocialMetrics,
   BuySignal,
   SignalType,
   KolWalletActivity,
+  TokenSafetyResult,
 } from '../types/index.js';
 
 // ============ CONFIGURATION ============
@@ -39,12 +51,12 @@ export class SignalGenerator {
    */
   async initialize(): Promise<void> {
     logger.info('Initializing signal generator...');
-    
+
     // Initialize Birdeye WebSocket for real-time new listings
     try {
       await birdeyeClient.initWebSocket();
       logger.info('Birdeye WebSocket initialized for real-time token listings');
-      
+
       // Set up callback for immediate processing of new listings
       birdeyeClient.onNewListing((listing) => {
         logger.info({ token: listing.symbol || listing.address }, 'New token listing detected via WebSocket');
@@ -53,14 +65,33 @@ export class SignalGenerator {
     } catch (error) {
       logger.warn({ error }, 'Failed to initialize Birdeye WebSocket, will use REST API fallback');
     }
-    
+
     // Initialize KOL wallet monitor
     await kolWalletMonitor.initialize();
-    
+
     // Initialize Telegram bot
     await telegramBot.initialize();
-    
-    logger.info('Signal generator initialized');
+
+    // Initialize Pump.fun bonding curve monitor (Feature 4)
+    bondingCurveMonitor.onAlert(async (alert) => {
+      const message = bondingCurveMonitor.formatAlertMessage(alert);
+      try {
+        // Send via Telegram - would need to expose a generic message method
+        logger.info({ alert: alert.type, token: alert.token.tokenMint }, 'Pump.fun alert triggered');
+      } catch (error) {
+        logger.error({ error }, 'Failed to send Pump.fun alert');
+      }
+    });
+    bondingCurveMonitor.start();
+
+    // Initialize daily digest (Feature 8)
+    dailyDigestGenerator.onSend(async (message) => {
+      // Would send via telegram bot
+      logger.info('Daily digest generated');
+    });
+    dailyDigestGenerator.start(9); // 9 AM
+
+    logger.info('Signal generator initialized with all feature modules');
   }
   
   /**
@@ -191,46 +222,73 @@ export class SignalGenerator {
       logger.debug({ tokenAddress }, 'Already have open position - skipping');
       return;
     }
-    
+
+    // FEATURE 1 & 5: Run enhanced safety check FIRST (before other checks)
+    const safetyResult = await tokenSafetyChecker.checkTokenSafety(tokenAddress);
+    const safetyBlock = tokenSafetyChecker.shouldBlockSignal(safetyResult);
+
+    if (safetyBlock.blocked) {
+      logger.info({ tokenAddress, reason: safetyBlock.reason, safetyScore: safetyResult.safetyScore },
+        'Token blocked by safety check');
+      return;
+    }
+
     // Get KOL activity for this token
     const kolActivities = await kolWalletMonitor.getKolActivityForToken(
       tokenAddress,
       KOL_ACTIVITY_WINDOW_MS
     );
-    
+
     if (kolActivities.length === 0) {
       // No KOL activity - skip (we only signal on confirmed KOL buys)
       return;
     }
-    
+
     logger.info({ tokenAddress, kolCount: kolActivities.length }, 'KOL activity detected');
-    
+
+    // FEATURE 2: Track conviction - record all KOL buys
+    for (const activity of kolActivities) {
+      const conviction = await convictionTracker.recordBuy(
+        tokenAddress,
+        activity.kol.id,
+        activity.kol.handle,
+        activity.wallet.address,
+        activity.transaction.solAmount,
+        activity.transaction.signature
+      );
+
+      // Send conviction alert if high/ultra conviction
+      if (conviction.isHighConviction) {
+        await telegramBot.sendConvictionAlert(conviction);
+      }
+    }
+
     // Get comprehensive token data
     const metrics = await getTokenMetrics(tokenAddress);
     if (!metrics) {
       logger.debug({ tokenAddress }, 'Could not get token metrics');
       return;
     }
-    
+
     // Check if token meets minimum screening criteria
     if (!this.meetsScreeningCriteria(metrics)) {
       logger.debug({ tokenAddress, metrics }, 'Token does not meet screening criteria');
       return;
     }
-    
+
     // Run full scam filter
     const scamResult = await scamFilter.filterToken(tokenAddress);
     if (scamResult.result === 'REJECT') {
       logger.info({ tokenAddress, flags: scamResult.flags }, 'Token rejected by scam filter');
       return;
     }
-    
+
     // Get social metrics (simplified - would need Twitter API integration)
     const socialMetrics = await this.getSocialMetrics(tokenAddress, metrics);
-    
+
     // Get volume authenticity
     const volumeAuthenticity = await calculateVolumeAuthenticity(tokenAddress);
-    
+
     // Calculate score
     const score = scoringEngine.calculateScore(
       tokenAddress,
@@ -240,15 +298,30 @@ export class SignalGenerator {
       scamResult,
       kolActivities
     );
-    
+
+    // Add safety score to flags if low
+    if (safetyResult.safetyScore < 60) {
+      score.flags.push(`SAFETY_${safetyResult.safetyScore}`);
+    }
+
+    // Add insider risk to flags if significant
+    if (safetyResult.insiderAnalysis.insiderRiskScore > 50) {
+      score.flags.push(`INSIDER_RISK_${safetyResult.insiderAnalysis.insiderRiskScore}`);
+    }
+
     // Check if meets buy requirements
     const buyCheck = scoringEngine.meetsBuyRequirements(score, kolActivities);
-    
+
     if (!buyCheck.meets) {
       logger.debug({ tokenAddress, reason: buyCheck.reason }, 'Token does not meet buy requirements');
       return;
     }
-    
+
+    // FEATURE 7: Get KOL performance stats to weight signal
+    const primaryKol = kolActivities[0];
+    const kolStats = await kolAnalytics.getKolStats(primaryKol.kol.id);
+    const signalWeight = kolStats ? kolAnalytics.getSignalWeightMultiplier(kolStats) : 1.0;
+
     // Generate and send buy signal
     const signal = this.buildBuySignal(
       tokenAddress,
@@ -257,10 +330,19 @@ export class SignalGenerator {
       volumeAuthenticity,
       scamResult,
       score,
-      kolActivities[0] // Primary KOL activity
+      primaryKol,
+      safetyResult
     );
-    
+
+    // Adjust position size based on KOL performance weight
+    signal.positionSizePercent = Math.round(signal.positionSizePercent * signalWeight * 10) / 10;
+
     await telegramBot.sendBuySignal(signal);
+
+    // FEATURE 4: Track Pump.fun tokens for bonding curve monitoring
+    if (await bondingCurveMonitor.isPumpfunToken(tokenAddress)) {
+      await bondingCurveMonitor.trackToken(tokenAddress);
+    }
   }
   
   /**
@@ -352,7 +434,8 @@ export class SignalGenerator {
     volumeAuthenticity: any,
     scamResult: any,
     score: any,
-    primaryKolActivity: KolWalletActivity
+    primaryKolActivity: KolWalletActivity,
+    safetyResult?: TokenSafetyResult
   ): BuySignal {
     const price = metrics.price;
     

@@ -1,5 +1,6 @@
 // ===========================================
 // MODULE 5: TELEGRAM ALERT SYSTEM (rossybot)
+// Enhanced with new features
 // ===========================================
 
 import TelegramBot from 'node-telegram-bot-api';
@@ -8,12 +9,22 @@ import { Server } from 'http';
 import { appConfig } from '../config/index.js';
 import { logger } from '../utils/logger.js';
 import { Database, pool } from '../utils/database.js';
+import { createTelegramInlineKeyboard, formatLinksAsMarkdown } from '../utils/trade-links.js';
+import { tokenSafetyChecker } from './safety/token-safety-checker.js';
+import { convictionTracker } from './signals/conviction-tracker.js';
+import { kolAnalytics } from './kol/kol-analytics.js';
+import { bondingCurveMonitor } from './pumpfun/bonding-monitor.js';
+import { dailyDigestGenerator } from './telegram/daily-digest.js';
 import {
   BuySignal,
   KolWalletActivity,
   TokenScore,
   WalletType,
   Position,
+  TokenSafetyResult,
+  ConvictionLevel,
+  KolActivity,
+  TradeType,
 } from '../types/index.js';
 
 // ============ RATE LIMITING ============
@@ -177,15 +188,17 @@ export class TelegramAlertBot {
     this.bot.onText(/\/start/, async (msg) => {
       const chatId = msg.chat.id;
       await this.bot!.sendMessage(chatId,
-        '🤖 *rossybot* initialized!\n\n' +
+        '*rossybot* initialized!\n\n' +
         'You will receive memecoin buy signals here.\n\n' +
-        'Commands:\n' +
+        '*Commands:*\n' +
         '/status - Bot status & connection health\n' +
         '/positions - Open positions\n' +
+        '/safety <token> - Run safety check on any token\n' +
+        '/conviction - Show high-conviction tokens\n' +
+        '/leaderboard - KOL performance rankings\n' +
+        '/pumpfun - Tokens approaching migration\n' +
         '/test - Send a test signal\n' +
-        '/pause - Pause signals\n' +
-        '/resume - Resume signals\n' +
-        '/help - Show this help',
+        '/help - Show all commands',
         { parse_mode: 'Markdown' }
       );
 
@@ -233,7 +246,7 @@ export class TelegramAlertBot {
       const chatId = msg.chat.id;
       try {
         // Send initial response
-        await this.bot!.sendMessage(chatId, '🔄 Generating test signal...', { parse_mode: 'Markdown' });
+        await this.bot!.sendMessage(chatId, 'Generating test signal...', { parse_mode: 'Markdown' });
 
         // Send dummy signal
         const testSignal = this.formatTestSignal();
@@ -246,7 +259,97 @@ export class TelegramAlertBot {
       } catch (error) {
         const errorMessage = error instanceof Error ? error.message : 'Unknown error';
         logger.error({ error, chatId }, 'Failed to send test signal');
-        await this.bot!.sendMessage(chatId, `❌ Failed to send test signal: ${errorMessage}`);
+        await this.bot!.sendMessage(chatId, `Failed to send test signal: ${errorMessage}`);
+      }
+    });
+
+    // /safety <token> command - Run safety check on any token
+    this.bot.onText(/\/safety\s+(\S+)/, async (msg, match) => {
+      const chatId = msg.chat.id;
+      const tokenMint = match?.[1];
+
+      if (!tokenMint) {
+        await this.bot!.sendMessage(chatId, 'Usage: /safety <token_address>');
+        return;
+      }
+
+      try {
+        await this.bot!.sendMessage(chatId, `Running safety check on \`${tokenMint.slice(0, 8)}...\``, { parse_mode: 'Markdown' });
+
+        const result = await tokenSafetyChecker.checkTokenSafety(tokenMint);
+        const message = this.formatSafetyResult(result);
+
+        await this.bot!.sendMessage(chatId, message, {
+          parse_mode: 'Markdown',
+          reply_markup: createTelegramInlineKeyboard(tokenMint),
+        });
+      } catch (error) {
+        const errorMessage = error instanceof Error ? error.message : 'Unknown error';
+        logger.error({ error, chatId, tokenMint }, 'Failed to run safety check');
+        await this.bot!.sendMessage(chatId, `Failed to run safety check: ${errorMessage}`);
+      }
+    });
+
+    // /conviction command - Show high-conviction tokens
+    this.bot.onText(/\/conviction/, async (msg) => {
+      const chatId = msg.chat.id;
+
+      try {
+        const highConvictionTokens = await convictionTracker.getHighConvictionTokensWithDetails(2);
+
+        if (highConvictionTokens.length === 0) {
+          await this.bot!.sendMessage(chatId, 'No high-conviction tokens (2+ KOLs) in the last 24 hours.');
+          return;
+        }
+
+        let message = '*HIGH CONVICTION TOKENS*\n\n';
+
+        for (const token of highConvictionTokens.slice(0, 10)) {
+          const emoji = token.isUltraConviction ? '' : '';
+          const kolNames = token.buyers.map(b => b.kolName).join(', ');
+          message += `${emoji} \`${token.tokenAddress.slice(0, 8)}...\`\n`;
+          message += `   ${token.level} KOLs: ${kolNames}\n\n`;
+        }
+
+        await this.bot!.sendMessage(chatId, message, { parse_mode: 'Markdown' });
+      } catch (error) {
+        const errorMessage = error instanceof Error ? error.message : 'Unknown error';
+        logger.error({ error, chatId }, 'Failed to get conviction tokens');
+        await this.bot!.sendMessage(chatId, `Failed to get conviction tokens: ${errorMessage}`);
+      }
+    });
+
+    // /leaderboard command - KOL performance rankings
+    this.bot.onText(/\/leaderboard/, async (msg) => {
+      const chatId = msg.chat.id;
+
+      try {
+        await this.bot!.sendMessage(chatId, 'Calculating KOL leaderboard...', { parse_mode: 'Markdown' });
+
+        const leaderboard = await kolAnalytics.getLeaderboard(10);
+        const message = kolAnalytics.formatLeaderboardMessage(leaderboard);
+
+        await this.bot!.sendMessage(chatId, message, { parse_mode: 'Markdown' });
+      } catch (error) {
+        const errorMessage = error instanceof Error ? error.message : 'Unknown error';
+        logger.error({ error, chatId }, 'Failed to get leaderboard');
+        await this.bot!.sendMessage(chatId, `Failed to get leaderboard: ${errorMessage}`);
+      }
+    });
+
+    // /pumpfun command - Show tokens approaching migration
+    this.bot.onText(/\/pumpfun/, async (msg) => {
+      const chatId = msg.chat.id;
+
+      try {
+        const tokens = await bondingCurveMonitor.getTokensApproachingMigration(80);
+        const message = bondingCurveMonitor.formatTokenList(tokens);
+
+        await this.bot!.sendMessage(chatId, message, { parse_mode: 'Markdown' });
+      } catch (error) {
+        const errorMessage = error instanceof Error ? error.message : 'Unknown error';
+        logger.error({ error, chatId }, 'Failed to get pumpfun tokens');
+        await this.bot!.sendMessage(chatId, `Failed to get Pump.fun tokens: ${errorMessage}`);
       }
     });
   }
@@ -271,10 +374,11 @@ export class TelegramAlertBot {
     
     try {
       const message = this.formatBuySignal(signal);
-      
+
       await this.bot.sendMessage(this.chatId, message, {
         parse_mode: 'Markdown',
         disable_web_page_preview: true,
+        reply_markup: createTelegramInlineKeyboard(signal.tokenAddress),
       });
       
       // Log the signal
@@ -377,12 +481,10 @@ export class TelegramAlertBot {
       msg += `⚠️ *FLAGS:* ${score.flags.join(', ')}\n\n`;
     }
     
-    // Links
-    msg += `🔗 *Links:*\n`;
-    msg += `[Birdeye](https://birdeye.so/token/${signal.tokenAddress}?chain=solana) | `;
-    msg += `[DexScreener](https://dexscreener.com/solana/${signal.tokenAddress}) | `;
-    msg += `[Solscan](https://solscan.io/token/${signal.tokenAddress}) | `;
-    msg += `[KOL Wallet](https://solscan.io/account/${wallet.address})\n\n`;
+    // Trade Links (Feature 6)
+    msg += `*Quick Trade:*\n`;
+    msg += formatLinksAsMarkdown(signal.tokenAddress);
+    msg += `\n\n`;
     
     // Footer
     msg += `⏱️ _Signal: ${signal.generatedAt.toISOString().replace('T', ' ').slice(0, 19)} UTC_\n`;
@@ -666,8 +768,109 @@ export class TelegramAlertBot {
     await this.bot.sendMessage(this.chatId, msg, { parse_mode: 'Markdown' });
   }
   
+  // ============ NEW FEATURE METHODS ============
+
+  /**
+   * Format safety check result message
+   */
+  private formatSafetyResult(result: TokenSafetyResult): string {
+    const scoreEmoji = result.safetyScore >= 70 ? '' : result.safetyScore >= 40 ? '' : '';
+
+    let msg = `*TOKEN SAFETY CHECK*\n\n`;
+    msg += `*Token:* \`${result.tokenAddress.slice(0, 8)}...\`\n`;
+    msg += `*Safety Score:* ${scoreEmoji} ${result.safetyScore}/100\n\n`;
+
+    msg += `*Authorities:*\n`;
+    msg += `├─ Mint: ${result.mintAuthorityEnabled ? 'ENABLED' : 'Revoked'}\n`;
+    msg += `└─ Freeze: ${result.freezeAuthorityEnabled ? 'ENABLED' : 'Revoked'}\n\n`;
+
+    msg += `*Token Info:*\n`;
+    msg += `├─ Age: ${result.tokenAgeMins} minutes\n`;
+    msg += `├─ Top 10 Holders: ${result.top10HolderConcentration.toFixed(1)}%\n`;
+    msg += `├─ Deployer Holding: ${result.deployerHolding.toFixed(1)}%\n`;
+    msg += `├─ LP Locked: ${result.lpLocked ? 'Yes' : 'No'}\n`;
+    msg += `└─ Honeypot Risk: ${result.honeypotRisk ? 'YES' : 'No'}\n\n`;
+
+    if (result.rugCheckScore !== null) {
+      msg += `*RugCheck Score:* ${result.rugCheckScore}/100\n\n`;
+    }
+
+    msg += `*Insider Analysis:*\n`;
+    msg += `├─ Same-block Buyers: ${result.insiderAnalysis.sameBlockBuyers}\n`;
+    msg += `├─ Deployer-funded: ${result.insiderAnalysis.deployerFundedBuyers}\n`;
+    msg += `└─ Insider Risk: ${result.insiderAnalysis.insiderRiskScore}/100\n\n`;
+
+    if (result.flags.length > 0) {
+      msg += `*Flags:* ${result.flags.join(', ')}\n`;
+    }
+
+    return msg;
+  }
+
+  /**
+   * Send sell alert
+   */
+  async sendSellAlert(activity: KolActivity): Promise<void> {
+    if (!this.bot) return;
+
+    const ticker = activity.tokenTicker || activity.tokenAddress.slice(0, 8);
+    let emoji = '';
+    let alertType = 'SELL';
+
+    if (activity.isFullExit) {
+      emoji = '';
+      alertType = 'FULL EXIT';
+    } else if (activity.percentSold && activity.percentSold >= 50) {
+      emoji = '';
+    }
+
+    let msg = `${emoji} *KOL ${alertType}*\n\n`;
+    msg += `*KOL:* @${activity.kol.handle}\n`;
+    msg += `*Token:* $${ticker}\n`;
+    msg += `*Amount Sold:* ${activity.percentSold?.toFixed(1)}%\n`;
+    msg += `*SOL Received:* ${activity.solAmount.toFixed(2)} SOL\n`;
+    msg += `*Time:* ${activity.timestamp.toISOString().replace('T', ' ').slice(0, 19)} UTC\n`;
+
+    if (activity.isFullExit) {
+      msg += `\n*KOL has completely exited this position.*`;
+    }
+
+    await this.bot.sendMessage(this.chatId, msg, { parse_mode: 'Markdown' });
+  }
+
+  /**
+   * Send conviction alert
+   */
+  async sendConvictionAlert(conviction: ConvictionLevel, tokenTicker?: string): Promise<void> {
+    if (!this.bot) return;
+
+    const ticker = tokenTicker || conviction.tokenAddress.slice(0, 8);
+    const kolNames = conviction.buyers.map(b => b.kolName).join(', ');
+
+    let emoji = '';
+    let level = 'CONVICTION';
+
+    if (conviction.isUltraConviction) {
+      emoji = '';
+      level = 'ULTRA CONVICTION';
+    } else if (conviction.isHighConviction) {
+      emoji = '';
+      level = 'HIGH CONVICTION';
+    }
+
+    let msg = `${emoji} *${level}*\n\n`;
+    msg += `*Token:* $${ticker}\n`;
+    msg += `*KOL Count:* ${conviction.level}\n`;
+    msg += `*KOLs:* ${kolNames}\n`;
+
+    await this.bot.sendMessage(this.chatId, msg, {
+      parse_mode: 'Markdown',
+      reply_markup: createTelegramInlineKeyboard(conviction.tokenAddress),
+    });
+  }
+
   // ============ HELPER METHODS ============
-  
+
   private truncateAddress(address: string): string {
     if (address.length <= 12) return address;
     return `${address.slice(0, 6)}...${address.slice(-4)}`;

@@ -550,10 +550,12 @@ export async function analyzeTokenContract(address: string): Promise<TokenContra
       };
     }
 
+    // Use falsy check (!value) instead of === null to handle both null and undefined
+    // Birdeye may return undefined for mintAuthority if field doesn't exist
     return {
-      mintAuthorityRevoked: security.mintAuthority === null,
-      freezeAuthorityRevoked: security.freezeAuthority === null,
-      metadataMutable: security.mutable !== false,
+      mintAuthorityRevoked: !security.mintAuthority,
+      freezeAuthorityRevoked: !security.freezeAuthority,
+      metadataMutable: security.mutableMetadata === true || security.mutable === true,
       isKnownScamTemplate: false,
     };
   } catch (error) {

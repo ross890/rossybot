@@ -532,17 +532,15 @@ export async function analyzeTokenContract(address: string): Promise<TokenContra
   try {
     const security = await birdeyeClient.getTokenSecurity(address);
 
-    // Log what Birdeye returned for debugging
-    logger.info({
-      address: address.slice(0, 8),
-      hasSecurityData: !!security,
-      mintAuthority: security?.mintAuthority,
-      freezeAuthority: security?.freezeAuthority,
-    }, 'Birdeye security response');
+    // Log what Birdeye actually returned (raw keys + values)
+    const securityKeys = security ? Object.keys(security).join(',') : 'null';
+    logger.info(
+      `Birdeye security for ${address.slice(0, 8)}: keys=[${securityKeys}] mintAuth=${JSON.stringify(security?.mintAuthority)} freezeAuth=${JSON.stringify(security?.freezeAuthority)}`
+    );
 
     // Handle null/undefined security response
     if (!security) {
-      logger.warn({ address }, 'No security data from Birdeye - skipping check');
+      logger.warn(`No security data from Birdeye for ${address.slice(0, 8)} - letting through`);
       // Return permissive defaults when API returns nothing (let token through)
       return {
         mintAuthorityRevoked: true,

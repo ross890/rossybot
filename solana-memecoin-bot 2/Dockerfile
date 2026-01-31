@@ -1,5 +1,5 @@
-# Build stage
-FROM node:20-alpine AS builder
+# Single-stage build to reduce memory usage
+FROM node:20-alpine
 
 WORKDIR /app
 
@@ -7,8 +7,8 @@ WORKDIR /app
 COPY package*.json ./
 COPY tsconfig.json ./
 
-# Install dependencies (use npm install since we may not have lock file)
-RUN npm install
+# Install ALL dependencies (needed for TypeScript build)
+RUN npm install --legacy-peer-deps
 
 # Copy source code
 COPY src/ ./src/
@@ -17,31 +17,13 @@ COPY scripts/ ./scripts/
 # Build TypeScript
 RUN npm run build
 
-# Production stage
-FROM node:20-alpine AS runner
-
-WORKDIR /app
-
-# Copy package files and install production dependencies only
-COPY package*.json ./
-RUN npm install --omit=dev
-
-# Copy built files
-COPY --from=builder /app/dist ./dist
-COPY --from=builder /app/scripts ./scripts
+# Remove dev dependencies after build
+RUN npm prune --omit=dev
 
 # Create non-root user
-RUN addgroup -g 1001 -S nodejs && \
-    adduser -S nodejs -u 1001
+RUN addgroup -g 1001 -S nodejs && adduser -S nodejs -u 1001
+RUN chown -R nodejs:nodejs /app
+USER nodejs
 
-    # Set ownership
-    RUN chown -R nodejs:nodejs /app
-
-    USER nodejs
-
-    # Health check
-    HEALTHCHECK --interval=30s --timeout=10s --start-period=5s --retries=3 \
-      CMD node -e "console.log('healthy')" || exit 1
-
-      # Start the bot
-      CMD ["node", "dist/index.js"]
+# Start the bot
+CMD ["node", "dist/index.js"]

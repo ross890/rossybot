@@ -41,7 +41,9 @@ export enum ScamFilterResult {
 export enum SignalType {
   BUY = 'BUY',
   WATCH = 'WATCH',
-  ALERT = 'ALERT'
+  ALERT = 'ALERT',
+  DISCOVERY = 'DISCOVERY',        // Metrics-based early signal (no KOL required)
+  KOL_VALIDATION = 'KOL_VALIDATION' // Follow-up when KOL buys a discovered token
 }
 
 export enum RiskLevel {
@@ -511,4 +513,69 @@ export interface DailyDigest {
     ticker: string;
     kolCount: number;
   }>;
+}
+
+// ============ MOONSHOT ASSESSMENT TYPES ============
+// Based on patterns from memecoins that reached $5M+ MC within 2 weeks
+
+export interface MoonshotAssessment {
+  score: number; // 0-100
+  grade: 'A' | 'B' | 'C' | 'D' | 'F';
+  factors: MoonshotFactors;
+  matchedPatterns: string[];
+  estimatedPotential: 'HIGH' | 'MEDIUM' | 'LOW';
+}
+
+export interface MoonshotFactors {
+  // Early momentum (critical for moonshots)
+  volumeVelocity: number;         // Volume growth rate in first hours
+  holderGrowthRate: number;       // Holder acquisition speed
+
+  // Token structure (successful tokens tend to have these)
+  liquidityRatio: number;         // Liquidity as % of mcap (healthy = 5-15%)
+  holderDistribution: number;     // How well distributed (lower top10 = better)
+
+  // Narrative strength
+  narrativeScore: number;         // Theme alignment with current meta
+  memeticPotential: number;       // Name/ticker viral potential
+
+  // Safety baseline
+  contractSafety: number;         // Renounced, no honeypot, etc.
+
+  // Timing
+  ageOptimality: number;          // Sweet spot is 30min - 4hrs old
+}
+
+// ============ DISCOVERY SIGNAL TYPES ============
+
+export interface DiscoverySignal {
+  id: string;
+  tokenAddress: string;
+  tokenTicker: string;
+  tokenName: string;
+
+  // Core metrics
+  score: TokenScore;
+  tokenMetrics: TokenMetrics;
+  volumeAuthenticity: VolumeAuthenticityScore;
+  scamFilter: ScamFilterOutput;
+  safetyResult: TokenSafetyResult;
+
+  // Moonshot assessment
+  moonshotAssessment: MoonshotAssessment;
+
+  // NO KOL activity required
+  kolActivity: KolWalletActivity | null;
+
+  // Suggested action (more conservative than BuySignal)
+  suggestedPositionSize: number;  // Typically 50% of normal
+  riskWarnings: string[];
+
+  // Metadata
+  generatedAt: Date;
+  signalType: SignalType.DISCOVERY;
+
+  // For tracking KOL follow-up
+  discoveredAt: Date;
+  kolValidatedAt: Date | null;
 }

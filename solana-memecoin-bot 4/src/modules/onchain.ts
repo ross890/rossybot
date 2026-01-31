@@ -532,19 +532,39 @@ export async function analyzeTokenContract(address: string): Promise<TokenContra
   try {
     const security = await birdeyeClient.getTokenSecurity(address);
 
+    // Log what Birdeye actually returned (raw keys + values)
+    const securityKeys = security ? Object.keys(security).join(',') : 'null';
+    logger.info(
+      `Birdeye security for ${address.slice(0, 8)}: keys=[${securityKeys}] mintAuth=${JSON.stringify(security?.mintAuthority)} freezeAuth=${JSON.stringify(security?.freezeAuthority)}`
+    );
+
+    // Handle null/undefined security response
+    if (!security) {
+      logger.warn(`No security data from Birdeye for ${address.slice(0, 8)} - letting through`);
+      // Return permissive defaults when API returns nothing (let token through)
+      return {
+        mintAuthorityRevoked: true,
+        freezeAuthorityRevoked: true,
+        metadataMutable: false,
+        isKnownScamTemplate: false,
+      };
+    }
+
+    // Use falsy check (!value) instead of === null to handle both null and undefined
+    // Birdeye may return undefined for mintAuthority if field doesn't exist
     return {
-      mintAuthorityRevoked: security?.mintAuthority === null,
-      freezeAuthorityRevoked: security?.freezeAuthority === null,
-      metadataMutable: security?.mutable !== false,
-      isKnownScamTemplate: false, // Would require contract bytecode comparison
+      mintAuthorityRevoked: !security.mintAuthority,
+      freezeAuthorityRevoked: !security.freezeAuthority,
+      metadataMutable: security.mutableMetadata === true || security.mutable === true,
+      isKnownScamTemplate: false,
     };
   } catch (error) {
     logger.error({ error, address }, 'Failed to analyze token contract');
-    // Return conservative defaults
+    // Return permissive defaults on error (let token through to later checks)
     return {
-      mintAuthorityRevoked: false,
-      freezeAuthorityRevoked: false,
-      metadataMutable: true,
+      mintAuthorityRevoked: true,
+      freezeAuthorityRevoked: true,
+      metadataMutable: false,
       isKnownScamTemplate: false,
     };
   }

@@ -265,22 +265,26 @@ export async function quickScamCheck(tokenAddress: string): Promise<{
   try {
     // Just check contract basics
     const contractAnalysis = await analyzeTokenContract(tokenAddress);
-    
+
     if (!contractAnalysis.mintAuthorityRevoked) {
+      logger.info({ tokenAddress }, 'Quick check FAIL: Mint authority not revoked');
       return { pass: false, reason: 'Mint authority not revoked' };
     }
-    
+
     if (!contractAnalysis.freezeAuthorityRevoked) {
+      logger.info({ tokenAddress }, 'Quick check FAIL: Freeze authority not revoked');
       return { pass: false, reason: 'Freeze authority not revoked' };
     }
-    
+
     if (contractAnalysis.isKnownScamTemplate) {
+      logger.info({ tokenAddress }, 'Quick check FAIL: Known scam template');
       return { pass: false, reason: 'Known scam contract template' };
     }
-    
+
+    logger.info({ tokenAddress }, 'Quick check PASS');
     return { pass: true };
   } catch (error) {
-    logger.error({ error, tokenAddress }, 'Quick scam check failed');
+    logger.error({ error, tokenAddress }, 'Quick scam check failed with exception');
     return { pass: false, reason: 'Check failed - treating as suspicious' };
   }
 }

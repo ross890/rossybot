@@ -20,6 +20,7 @@ import {
 
 // ============ SCORING WEIGHTS ============
 
+// Original weights (used for KOL-validated signals)
 const FACTOR_WEIGHTS = {
   onChainHealth: 0.20,
   socialMomentum: 0.15,
@@ -28,13 +29,33 @@ const FACTOR_WEIGHTS = {
   scamRiskInverse: 0.25,
 } as const;
 
+// Discovery weights (used for metrics-only signals without KOL)
+// Redistributes KOL weight to other factors
+const DISCOVERY_WEIGHTS = {
+  onChainHealth: 0.35,      // Increased from 0.20
+  socialMomentum: 0.25,     // Increased from 0.15
+  scamRiskInverse: 0.40,    // Increased from 0.25
+} as const;
+
+// KOL multiplier configuration
+const KOL_MULTIPLIER = {
+  NO_KOL: 1.0,              // Base score with no KOL
+  SINGLE_SIDE_WALLET: 1.15, // Single side wallet buy
+  SINGLE_MAIN_WALLET: 1.25, // Single main wallet buy
+  MULTI_SIDE_WALLET: 1.30,  // Multiple side wallet buys
+  MULTI_MAIN_WALLET: 1.45,  // Multiple main wallet buys
+  MIXED_WALLETS: 1.40,      // Both main and side wallets
+  HIGH_CONVICTION: 1.60,    // 3+ KOLs with main wallets
+} as const;
+
 // ============ SCORING THRESHOLDS ============
 
 const THRESHOLDS = {
   // Score requirements
   MIN_SCORE_BUY: appConfig.trading.minScoreBuySignal,
   MIN_SCORE_WATCH: appConfig.trading.minScoreWatchSignal,
-  
+  MIN_SCORE_DISCOVERY: 55,  // Minimum score for discovery signals (no KOL)
+
   // Risk levels
   RISK_VERY_LOW_MAX_SCORE: 85,
   RISK_LOW_MAX_SCORE: 75,
@@ -128,7 +149,227 @@ export class ScoringEngine {
       riskLevel,
     };
   }
-  
+
+  /**
+   * Calculate discovery score (metrics-only, no KOL required)
+   * Used for discovery signals that identify promising tokens early
+   */
+  calculateDiscoveryScore(
+    tokenAddress: string,
+    metrics: TokenMetrics,
+    socialMetrics: SocialMetrics,
+    volumeAuthenticity: VolumeAuthenticityScore,
+    scamFilter: ScamFilterOutput
+  ): TokenScore {
+    // Calculate factors (KOL factors will be 0)
+    const factors: ScoreFactors = {
+      onChainHealth: this.calculateOnChainHealth(metrics, volumeAuthenticity),
+      socialMomentum: this.calculateSocialMomentum(socialMetrics),
+      kolConvictionMain: 0, // No KOL for discovery
+      kolConvictionSide: 0, // No KOL for discovery
+      scamRiskInverse: this.calculateScamRiskInverse(scamFilter),
+      narrativeBonus: this.calculateNarrativeBonus(metrics, socialMetrics),
+      timingBonus: this.calculateTimingBonus(metrics),
+    };
+
+    // Calculate weighted composite using discovery weights (no KOL component)
+    const baseScore =
+      (factors.onChainHealth * DISCOVERY_WEIGHTS.onChainHealth) +
+      (factors.socialMomentum * DISCOVERY_WEIGHTS.socialMomentum) +
+      (factors.scamRiskInverse * DISCOVERY_WEIGHTS.scamRiskInverse);
+
+    // Add bonuses
+    const compositeScore = Math.min(100, baseScore + factors.narrativeBonus + factors.timingBonus);
+
+    // Determine confidence (adjusted for no KOL data)
+    const { confidence, confidenceBand, flags } = this.determineDiscoveryConfidence(
+      metrics,
+      scamFilter
+    );
+
+    // Determine risk level (higher base risk without KOL validation)
+    const riskLevel = this.determineDiscoveryRiskLevel(compositeScore, scamFilter);
+
+    logger.debug('Discovery score calculated', {
+      token: tokenAddress,
+      score: Math.round(compositeScore),
+      factors,
+    });
+
+    return {
+      tokenAddress,
+      compositeScore: Math.round(compositeScore),
+      factors,
+      confidence,
+      confidenceBand,
+      flags: [...flags, 'DISCOVERY_SIGNAL'],
+      riskLevel,
+    };
+  }
+
+  /**
+   * Calculate KOL multiplier based on activity
+   * Returns a multiplier to apply to discovery scores when KOL buys
+   */
+  calculateKolMultiplier(kolActivities: KolWalletActivity[]): number {
+    if (kolActivities.length === 0) {
+      return KOL_MULTIPLIER.NO_KOL;
+    }
+
+    const mainWalletActivities = kolActivities.filter(a => a.wallet.walletType === WalletType.MAIN);
+    const sideWalletActivities = kolActivities.filter(a => a.wallet.walletType === WalletType.SIDE);
+
+    // High conviction: 3+ KOLs with main wallets
+    if (mainWalletActivities.length >= 3) {
+      return KOL_MULTIPLIER.HIGH_CONVICTION;
+    }
+
+    // Multiple main wallet buys
+    if (mainWalletActivities.length >= 2) {
+      return KOL_MULTIPLIER.MULTI_MAIN_WALLET;
+    }
+
+    // Mixed: both main and side wallets
+    if (mainWalletActivities.length > 0 && sideWalletActivities.length > 0) {
+      return KOL_MULTIPLIER.MIXED_WALLETS;
+    }
+
+    // Multiple side wallet buys
+    if (sideWalletActivities.length >= 2) {
+      return KOL_MULTIPLIER.MULTI_SIDE_WALLET;
+    }
+
+    // Single main wallet
+    if (mainWalletActivities.length === 1) {
+      return KOL_MULTIPLIER.SINGLE_MAIN_WALLET;
+    }
+
+    // Single side wallet
+    return KOL_MULTIPLIER.SINGLE_SIDE_WALLET;
+  }
+
+  /**
+   * Apply KOL multiplier to a discovery score to get KOL-validated score
+   */
+  applyKolMultiplier(
+    discoveryScore: TokenScore,
+    kolActivities: KolWalletActivity[]
+  ): TokenScore {
+    const multiplier = this.calculateKolMultiplier(kolActivities);
+    const boostedScore = Math.min(150, discoveryScore.compositeScore * multiplier);
+
+    // Update factors with KOL conviction
+    const updatedFactors: ScoreFactors = {
+      ...discoveryScore.factors,
+      kolConvictionMain: this.calculateKolConviction(kolActivities, WalletType.MAIN),
+      kolConvictionSide: this.calculateKolConviction(kolActivities, WalletType.SIDE),
+    };
+
+    // Remove discovery flag and add validation flag
+    const updatedFlags = discoveryScore.flags
+      .filter(f => f !== 'DISCOVERY_SIGNAL')
+      .concat(['KOL_VALIDATED']);
+
+    // Potentially improve confidence with KOL validation
+    let confidence = discoveryScore.confidence;
+    if (kolActivities.some(a => a.wallet.walletType === WalletType.MAIN)) {
+      if (confidence === 'LOW') confidence = 'MEDIUM';
+      else if (confidence === 'MEDIUM') confidence = 'HIGH';
+    }
+
+    // Re-evaluate risk with KOL data
+    const riskLevel = this.determineRiskLevel(boostedScore,
+      { result: 'PASS' as ScamFilterResult, flags: [], contractAnalysis: {} as any, bundleAnalysis: {} as any, devBehaviour: null, rugHistoryWallets: 0 },
+      kolActivities
+    );
+
+    return {
+      tokenAddress: discoveryScore.tokenAddress,
+      compositeScore: Math.round(boostedScore),
+      factors: updatedFactors,
+      confidence,
+      confidenceBand: discoveryScore.confidenceBand,
+      flags: updatedFlags,
+      riskLevel,
+    };
+  }
+
+  /**
+   * Determine confidence for discovery signals (no KOL data)
+   */
+  private determineDiscoveryConfidence(
+    metrics: TokenMetrics,
+    scamFilter: ScamFilterOutput
+  ): { confidence: 'HIGH' | 'MEDIUM' | 'LOW'; confidenceBand: number; flags: string[] } {
+    const flags: string[] = [];
+    let confidence: 'HIGH' | 'MEDIUM' | 'LOW' = 'MEDIUM'; // Start at MEDIUM for discovery (no KOL validation)
+    let confidenceBand = 12;
+
+    // Check data quality factors
+    if (metrics.tokenAge < 60) {
+      flags.push('VERY_NEW_TOKEN');
+      confidence = 'LOW';
+      confidenceBand = 20;
+    } else if (metrics.tokenAge < 120) {
+      flags.push('NEW_TOKEN');
+      confidenceBand = 15;
+    }
+
+    if (metrics.liquidityPool < 25000) {
+      flags.push('LOW_LIQUIDITY');
+      if (confidence !== 'LOW') confidence = 'MEDIUM';
+      confidenceBand = Math.max(confidenceBand, 15);
+    }
+
+    if (metrics.holderCount < 100) {
+      flags.push('LOW_HOLDER_COUNT');
+      // Note: Discovery signals start at MEDIUM, so no need to check for HIGH
+    }
+
+    // Add scam filter flags
+    if (scamFilter.result === ScamFilterResult.FLAG) {
+      flags.push(...scamFilter.flags.map(f => `SCAM_FLAG: ${f}`));
+    }
+
+    return { confidence, confidenceBand, flags };
+  }
+
+  /**
+   * Determine risk level for discovery signals (higher base risk)
+   */
+  private determineDiscoveryRiskLevel(
+    score: number,
+    scamFilter: ScamFilterOutput
+  ): RiskLevel {
+    // Discovery signals start with higher risk threshold
+    // Shift thresholds down by 5 points for discovery
+    let risk: RiskLevel;
+
+    if (score >= THRESHOLDS.RISK_VERY_LOW_MAX_SCORE + 5) {
+      risk = RiskLevel.VERY_LOW;
+    } else if (score >= THRESHOLDS.RISK_LOW_MAX_SCORE + 5) {
+      risk = RiskLevel.LOW;
+    } else if (score >= THRESHOLDS.RISK_MEDIUM_MAX_SCORE) {
+      risk = RiskLevel.MEDIUM;
+    } else if (score >= THRESHOLDS.RISK_HIGH_MAX_SCORE - 5) {
+      risk = RiskLevel.HIGH;
+    } else {
+      risk = RiskLevel.VERY_HIGH;
+    }
+
+    // Discovery signals without KOL are at minimum MEDIUM risk
+    if (risk < RiskLevel.MEDIUM) {
+      risk = RiskLevel.MEDIUM;
+    }
+
+    // Increase risk for flagged tokens
+    if (scamFilter.result === ScamFilterResult.FLAG && risk < RiskLevel.HIGH) {
+      risk = RiskLevel.HIGH;
+    }
+
+    return risk;
+  }
+
   /**
    * Calculate on-chain health score (0-100)
    */
@@ -422,6 +663,37 @@ export class ScoringEngine {
     
     return { meets: true };
   }
+
+  /**
+   * Check if a token score meets discovery signal requirements (no KOL needed)
+   */
+  meetsDiscoveryRequirements(
+    score: TokenScore,
+    scamFilter: ScamFilterOutput
+  ): { meets: boolean; reason?: string } {
+    // Score threshold for discovery
+    if (score.compositeScore < THRESHOLDS.MIN_SCORE_DISCOVERY) {
+      return {
+        meets: false,
+        reason: `Score ${score.compositeScore} below discovery minimum ${THRESHOLDS.MIN_SCORE_DISCOVERY}`,
+      };
+    }
+
+    // Safety is non-negotiable even for discovery
+    if (scamFilter.result === ScamFilterResult.REJECT) {
+      return { meets: false, reason: 'Failed safety checks' };
+    }
+
+    // Contract must have revoked authorities
+    if (!scamFilter.contractAnalysis.mintAuthorityRevoked) {
+      return { meets: false, reason: 'Mint authority not revoked' };
+    }
+    if (!scamFilter.contractAnalysis.freezeAuthorityRevoked) {
+      return { meets: false, reason: 'Freeze authority not revoked' };
+    }
+
+    return { meets: true };
+  }
 }
 
 // ============ EXPORTS ============
@@ -432,6 +704,8 @@ export default {
   ScoringEngine,
   scoringEngine,
   FACTOR_WEIGHTS,
+  DISCOVERY_WEIGHTS,
+  KOL_MULTIPLIER,
   THRESHOLDS,
   CURRENT_META_THEMES,
 };

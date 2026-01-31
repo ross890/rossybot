@@ -120,7 +120,7 @@ class HeliusClient {
 
 class BirdeyeClient {
   private client: AxiosInstance;
-  private ws: WebSocket | null = null;
+  private ws: any = null;
   private newListingsBuffer: any[] = [];
   private wsConnected = false;
   private reconnectAttempts = 0;
@@ -205,7 +205,7 @@ class BirdeyeClient {
         this.scheduleReconnect();
       });
       
-      this.ws.on('error', (error) => {
+      this.ws.on('error', (error: Error) => {
         logger.error({ error }, 'Birdeye WebSocket error');
         this.wsConnected = false;
       });
@@ -268,59 +268,55 @@ class BirdeyeClient {
   isWebSocketConnected(): boolean {
     return this.wsConnected;
   }
-  
+
   async getTokenOverview(address: string): Promise<BirdeyeTokenOverview | null> {
     try {
       const response = await this.client.get(`/defi/token_overview`, {
         params: { address },
       });
-      
       return response.data.data;
     } catch (error) {
       logger.error({ error, address }, 'Failed to get token overview from Birdeye');
       return null;
     }
   }
-  
+
   async getTokenSecurity(address: string): Promise<any> {
     try {
       const response = await this.client.get(`/defi/token_security`, {
         params: { address },
       });
-      
       return response.data.data;
     } catch (error) {
       logger.error({ error, address }, 'Failed to get token security from Birdeye');
       return null;
     }
   }
-  
+
   async getTokenCreationInfo(address: string): Promise<any> {
     try {
       const response = await this.client.get(`/defi/token_creation_info`, {
         params: { address },
       });
-      
       return response.data.data;
     } catch (error) {
       logger.error({ error, address }, 'Failed to get token creation info from Birdeye');
       return null;
     }
   }
-  
+
   async getTokenTradeData(address: string, timeframe = '24h'): Promise<any> {
     try {
       const response = await this.client.get(`/defi/v3/token/trade-data/single`, {
         params: { address, type: timeframe },
       });
-      
       return response.data.data;
     } catch (error) {
       logger.error({ error, address }, 'Failed to get token trade data from Birdeye');
       return null;
     }
   }
-  
+
   async getNewListings(limit = 50): Promise<any[]> {
     // First try to get from WebSocket buffer (real-time data)
     if (this.wsConnected && this.newListingsBuffer.length > 0) {
@@ -333,7 +329,6 @@ class BirdeyeClient {
       const response = await this.client.get(`/defi/v2/tokens/new_listing`, {
         params: { limit },
       });
-      
       return response.data.data?.items || [];
     } catch (error) {
       logger.warn({ error }, 'Failed to get new listings from Birdeye REST API');
@@ -345,14 +340,14 @@ class BirdeyeClient {
 
 class DexScreenerClient {
   private client: AxiosInstance;
-  
+
   constructor() {
     this.client = axios.create({
       baseURL: 'https://api.dexscreener.com',
       timeout: 10000,
     });
   }
-  
+
   async getTokenPairs(address: string): Promise<DexScreenerPair[]> {
     try {
       const response = await this.client.get(`/latest/dex/tokens/${address}`);
@@ -362,7 +357,7 @@ class DexScreenerClient {
       return [];
     }
   }
-  
+
   async searchTokens(query: string): Promise<DexScreenerPair[]> {
     try {
       const response = await this.client.get(`/latest/dex/search`, {
@@ -374,7 +369,7 @@ class DexScreenerClient {
       return [];
     }
   }
-  
+
   /**
    * Get new/trending Solana token pairs from DexScreener
    * This is a free alternative to Birdeye's new_listing endpoint
@@ -407,7 +402,7 @@ class DexScreenerClient {
       }
     }
   }
-  
+
   /**
    * Get trending tokens on Solana via DexScreener search
    */
@@ -453,41 +448,30 @@ export async function getTokenMetrics(address: string): Promise<TokenMetrics | n
       dexScreenerClient.getTokenPairs(address),
       heliusClient.getTokenHolders(address),
     ]);
-    
+
     if (!birdeyeData && dexPairs.length === 0) {
       logger.warn({ address }, 'No data found for token');
       return null;
     }
-    
+
     // Use DexScreener as primary for price/volume, Birdeye for holder data
     const primaryPair = dexPairs[0];
-    
-    const price = primaryPair
-      ? parseFloat(primaryPair.priceUsd)
-      : (birdeyeData?.price || 0);
-    
-    const marketCap = primaryPair
-      ? primaryPair.fdv
-      : (birdeyeData?.mc || 0);
-    
-    const volume24h = primaryPair
-      ? primaryPair.volume.h24
-      : (birdeyeData?.v24h || 0);
-    
-    const liquidity = primaryPair
-      ? primaryPair.liquidity.usd
-      : (birdeyeData?.liquidity || 0);
-    
+    const price = primaryPair ? parseFloat(primaryPair.priceUsd) : (birdeyeData?.price || 0);
+    const marketCap = primaryPair ? primaryPair.fdv : (birdeyeData?.mc || 0);
+    const volume24h = primaryPair ? primaryPair.volume.h24 : (birdeyeData?.v24h || 0);
+    const liquidity = primaryPair ? primaryPair.liquidity.usd : (birdeyeData?.liquidity || 0);
+
     // Calculate top 10 concentration
     const top10Concentration = holderData.topHolders.reduce(
-      (sum, h) => sum + h.percentage, 0
+      (sum, h) => sum + h.percentage,
+      0
     );
-    
+
     // Get token creation time for age calculation
     const creationInfo = await birdeyeClient.getTokenCreationInfo(address);
     const creationTimestamp = creationInfo?.createdTime || Date.now();
     const ageMinutes = (Date.now() - creationTimestamp) / (1000 * 60);
-    
+
     return {
       address,
       ticker: primaryPair?.baseToken.symbol || birdeyeData?.symbol || 'UNKNOWN',
@@ -513,7 +497,7 @@ export async function getTokenMetrics(address: string): Promise<TokenMetrics | n
 export async function analyzeTokenContract(address: string): Promise<TokenContractAnalysis> {
   try {
     const security = await birdeyeClient.getTokenSecurity(address);
-    
+
     return {
       mintAuthorityRevoked: security?.mintAuthority === null,
       freezeAuthorityRevoked: security?.freezeAuthority === null,
@@ -547,15 +531,15 @@ export async function analyzeBundles(address: string): Promise<BundleAnalysis> {
         riskLevel: 'LOW',
       };
     }
-    
+
     // Get first transactions after token creation
     const txs = await heliusClient.getRecentTransactions(address, 50);
-    
+
     // Analyze for bundles - simplified implementation
     // In production, you'd do more sophisticated block-level analysis
     const earlyBuyers: string[] = [];
     const seenBlocks = new Map<number, string[]>();
-    
+
     for (const tx of txs.slice(0, 20)) {
       const blockSlot = tx.slot;
       if (!seenBlocks.has(blockSlot)) {
@@ -564,7 +548,7 @@ export async function analyzeBundles(address: string): Promise<BundleAnalysis> {
       // Would need to parse transaction to get buyer address
       // This is simplified
     }
-    
+
     // Check for clustered buys in same block
     let clusteredCount = 0;
     for (const [_block, addresses] of seenBlocks) {
@@ -572,7 +556,7 @@ export async function analyzeBundles(address: string): Promise<BundleAnalysis> {
         clusteredCount += addresses.length;
       }
     }
-    
+
     // Check if any early buyers are in rug database
     let hasRugHistory = false;
     for (const buyer of earlyBuyers) {
@@ -581,12 +565,14 @@ export async function analyzeBundles(address: string): Promise<BundleAnalysis> {
         break;
       }
     }
-    
+
     const bundledSupplyPercent = 0; // Would require holder analysis
-    const riskLevel = 
-      hasRugHistory || bundledSupplyPercent > 25 ? 'HIGH' :
-      bundledSupplyPercent > 10 || clusteredCount > 5 ? 'MEDIUM' : 'LOW';
-    
+    const riskLevel = hasRugHistory || bundledSupplyPercent > 25
+      ? 'HIGH'
+      : bundledSupplyPercent > 10 || clusteredCount > 5
+        ? 'MEDIUM'
+        : 'LOW';
+
     return {
       bundleDetected: clusteredCount > 5,
       bundledSupplyPercent,
@@ -615,22 +601,22 @@ export async function analyzeDevWallet(address: string): Promise<DevWalletBehavi
     if (!creationInfo?.creator) {
       return null;
     }
-    
+
     const deployerAddress = creationInfo.creator;
-    
+
     // Get deployer's recent transactions
     const txs = await heliusClient.getRecentTransactions(deployerAddress, 50);
-    
+
     // Analyze for CEX transfers (simplified - in production, maintain CEX address list)
     const knownCexAddresses: string[] = [
       // Binance hot wallets, OKX, etc. would go here
     ];
-    
+
     const cexTransfers = txs.filter((tx: any) => {
       // Would need to parse transaction destinations
       return false; // Placeholder
     });
-    
+
     return {
       deployerAddress,
       soldPercent48h: 0, // Would require sell analysis
@@ -647,7 +633,7 @@ export async function analyzeDevWallet(address: string): Promise<DevWalletBehavi
 export async function calculateVolumeAuthenticity(address: string): Promise<VolumeAuthenticityScore> {
   try {
     const tradeData = await birdeyeClient.getTokenTradeData(address);
-    
+
     if (!tradeData) {
       return {
         score: 50, // Default medium score
@@ -657,26 +643,24 @@ export async function calculateVolumeAuthenticity(address: string): Promise<Volu
         isWashTradingSuspected: false,
       };
     }
-    
+
     // Calculate unique wallet ratio
     const uniqueBuyers = tradeData.uniqueBuy24h || 0;
     const uniqueSellers = tradeData.uniqueSell24h || 0;
     const totalTrades = (tradeData.buy24h || 0) + (tradeData.sell24h || 0);
-    const uniqueWalletRatio = totalTrades > 0 
-      ? (uniqueBuyers + uniqueSellers) / totalTrades 
-      : 0.5;
-    
+    const uniqueWalletRatio = totalTrades > 0 ? (uniqueBuyers + uniqueSellers) / totalTrades : 0.5;
+
     // Simplified scoring - in production, would analyze actual trade sizes
     const sizeDistributionScore = 60; // Placeholder
     const temporalPatternScore = 60; // Placeholder
-    
+
     // VAS = (Unique Wallet Ratio × 40) + (Size Distribution × 30) + (Temporal Pattern × 30)
     const score = Math.round(
       (uniqueWalletRatio * 40) +
       (sizeDistributionScore * 0.3) +
       (temporalPatternScore * 0.3)
     );
-    
+
     return {
       score: Math.min(100, Math.max(0, score)),
       uniqueWalletRatio,

@@ -323,23 +323,23 @@ class BirdeyeClient {
   
   async getNewListings(limit = 50): Promise<any[]> {
     // First try to get from WebSocket buffer (real-time data)
+    // This is the primary source - WebSocket provides SUBSCRIBE_TOKEN_NEW_LISTING
     if (this.wsConnected && this.newListingsBuffer.length > 0) {
       logger.debug({ count: this.newListingsBuffer.length }, 'Returning listings from WebSocket buffer');
       return this.newListingsBuffer.slice(0, limit);
     }
-    
-    // Fallback to REST API
-    try {
-      const response = await this.client.get(`/defi/v2/tokens/new_listing`, {
-        params: { limit },
-      });
-      
-      return response.data.data?.items || [];
-    } catch (error) {
-      logger.warn({ error }, 'Failed to get new listings from Birdeye REST API');
-      // Return buffer even if empty as last resort
+
+    // WebSocket not connected or buffer empty - return buffer as fallback
+    // Note: Birdeye's REST API for new listings is deprecated in favor of WebSocket
+    // DexScreener is used as primary fallback via dexScreenerClient.getNewSolanaPairs()
+    if (this.newListingsBuffer.length > 0) {
+      logger.debug({ count: this.newListingsBuffer.length }, 'Returning cached listings from buffer (WebSocket disconnected)');
       return this.newListingsBuffer.slice(0, limit);
     }
+
+    // Buffer empty - return empty array (DexScreener fallback handled at caller level)
+    logger.debug('No listings in buffer, WebSocket may still be connecting');
+    return [];
   }
 }
 

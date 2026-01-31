@@ -2,26 +2,26 @@
 // SIGNAL GENERATION ENGINE
 // ===========================================
 
-import { appConfig } from '../config/index.js';
-import { logger } from '../utils/logger.js';
-import { Database } from '../utils/database.js';
+import { appConfig } from '../../config/index.js';
+import { logger } from '../../utils/logger.js';
+import { Database } from '../../utils/database.js';
 import {
   getTokenMetrics,
   calculateVolumeAuthenticity,
   birdeyeClient,
   dexScreenerClient,
 } from './onchain.js';
-import { scamFilter, quickScamCheck } from './scam-filter.js';
-import { kolWalletMonitor } from './kol-tracker.js';
-import { scoringEngine } from './scoring.js';
-import { telegramBot } from './telegram.js';
+import { scamFilter, quickScamCheck } from '../scam-filter.js';
+import { kolWalletMonitor } from '../kol-tracker.js';
+import { scoringEngine } from '../scoring.js';
+import { telegramBot } from '../telegram.js';
 import {
   TokenMetrics,
   SocialMetrics,
   BuySignal,
   SignalType,
   KolWalletActivity,
-} from '../types/index.js';
+} from '../../types/index.js';
 
 // ============ CONFIGURATION ============
 

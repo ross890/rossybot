@@ -3,8 +3,8 @@
 // ===========================================
 
 import axios, { AxiosInstance } from 'axios';
-import { appConfig } from '../config/index.js';
-import { logger } from '../utils/logger.js';
+import { appConfig } from '../../config/index.js';
+import { logger } from '../../utils/logger.js';
 import {
   TokenMetrics,
   TokenContractAnalysis,
@@ -13,8 +13,8 @@ import {
   VolumeAuthenticityScore,
   BirdeyeTokenOverview,
   DexScreenerPair,
-} from '../types/index.js';
-import { Database } from '../utils/database.js';
+} from '../../types/index.js';
+import { Database } from '../../utils/database.js';
 
 // ============ API CLIENTS ============
 
@@ -480,7 +480,7 @@ export async function getTokenMetrics(address: string): Promise<TokenMetrics | n
     
     // Calculate top 10 concentration
     const top10Concentration = holderData.topHolders.reduce(
-      (sum, h) => sum + h.percentage, 0
+      (sum: number, h: { address: string; amount: number; percentage: number }) => sum + h.percentage, 0
     );
     
     // Get token creation time for age calculation

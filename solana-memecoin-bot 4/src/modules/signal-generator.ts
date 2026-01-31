@@ -147,11 +147,9 @@ export class SignalGenerator {
       }
 
       // Diagnostic logging - show pipeline stats every cycle
-      logger.info({
-        candidates: candidates.length,
-        passedQuickFilter: preFiltered.length,
-        failedQuickFilter: quickFilterFails,
-      }, 'Scan cycle: pre-filter complete');
+      logger.info(
+        `Scan cycle: pre-filter complete | candidates=${candidates.length} passed=${preFiltered.length} failed=${quickFilterFails}`
+      );
 
       // Step 3: Check for KOL activity on each token
       let safetyBlocked = 0;
@@ -181,16 +179,9 @@ export class SignalGenerator {
       }
 
       // Show where tokens are dropping off
-      logger.info({
-        evaluated: preFiltered.length,
-        safetyBlocked,
-        noKolActivity,
-        noMetrics,
-        screeningFailed,
-        scamRejected,
-        scoringFailed,
-        signalsGenerated,
-      }, 'Scan cycle: evaluation complete');
+      logger.info(
+        `Scan cycle: evaluation complete | evaluated=${preFiltered.length} safetyBlocked=${safetyBlocked} noKolActivity=${noKolActivity} noMetrics=${noMetrics} screeningFailed=${screeningFailed} scamRejected=${scamRejected} scoringFailed=${scoringFailed} signals=${signalsGenerated}`
+      );
     } catch (error) {
       logger.error({ error }, 'Error in scan cycle');
     }

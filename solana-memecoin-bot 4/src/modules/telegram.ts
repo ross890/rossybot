@@ -3,6 +3,8 @@
 // ===========================================
 
 import TelegramBot from 'node-telegram-bot-api';
+import express, { Express, Request, Response } from 'express';
+import { Server } from 'http';
 import { appConfig } from '../config/index.js';
 import { logger } from '../utils/logger.js';
 import { Database, pool } from '../utils/database.js';
@@ -27,10 +29,13 @@ const RATE_LIMITS = {
 
 export class TelegramAlertBot {
   private bot: TelegramBot | null = null;
+  private app: Express | null = null;
+  private server: Server | null = null;
   private chatId: string;
   private signalQueue: BuySignal[] = [];
   private lastKolSignalTime: Map<string, number> = new Map();
   private startTime: Date | null = null;
+  private isWebhookMode: boolean = false;
 
   constructor() {
     this.chatId = appConfig.telegramChatId;
@@ -44,14 +49,122 @@ export class TelegramAlertBot {
       logger.warn('Telegram bot token not configured - alerts disabled');
       return;
     }
-    
-    this.bot = new TelegramBot(appConfig.telegramBotToken, { polling: true });
+
+    const PORT = parseInt(process.env.PORT || '3000', 10);
+    const RAILWAY_PUBLIC_DOMAIN = process.env.RAILWAY_PUBLIC_DOMAIN;
+
+    // Use webhook mode in production (Railway), polling in development
+    if (RAILWAY_PUBLIC_DOMAIN) {
+      await this.initializeWebhookMode(PORT, RAILWAY_PUBLIC_DOMAIN);
+    } else {
+      await this.initializePollingMode();
+    }
+
     this.startTime = new Date();
 
     // Set up command handlers
     this.setupCommands();
 
-    logger.info('Telegram bot (rossybot) initialized');
+    logger.info({ mode: this.isWebhookMode ? 'webhook' : 'polling' }, 'Telegram bot (rossybot) initialized');
+  }
+
+  /**
+   * Initialize bot in webhook mode (production)
+   * This prevents 409 Conflict errors by not polling
+   */
+  private async initializeWebhookMode(port: number, domain: string): Promise<void> {
+    const webhookUrl = `https://${domain}/webhook`;
+
+    // Create bot without polling
+    this.bot = new TelegramBot(appConfig.telegramBotToken, { polling: false });
+
+    // Set up Express server
+    this.app = express();
+    this.app.use(express.json());
+
+    // Health check endpoint
+    this.app.get('/health', (_req: Request, res: Response) => {
+      res.status(200).json({
+        status: 'ok',
+        mode: 'webhook',
+        uptime: this.startTime ? Date.now() - this.startTime.getTime() : 0,
+      });
+    });
+
+    // Root endpoint
+    this.app.get('/', (_req: Request, res: Response) => {
+      res.status(200).json({
+        name: 'rossybot',
+        status: 'running',
+        mode: 'webhook',
+      });
+    });
+
+    // Webhook endpoint for Telegram
+    this.app.post('/webhook', (req: Request, res: Response) => {
+      if (this.bot) {
+        this.bot.processUpdate(req.body);
+      }
+      res.sendStatus(200);
+    });
+
+    // Start Express server
+    this.server = this.app.listen(port, () => {
+      logger.info({ port, webhookUrl }, 'Express server started for webhook');
+    });
+
+    // Set webhook with Telegram
+    try {
+      await this.bot.setWebHook(webhookUrl);
+      logger.info({ webhookUrl }, 'Telegram webhook set successfully');
+      this.isWebhookMode = true;
+    } catch (error) {
+      logger.error({ error, webhookUrl }, 'Failed to set Telegram webhook');
+      throw error;
+    }
+  }
+
+  /**
+   * Initialize bot in polling mode (local development)
+   */
+  private async initializePollingMode(): Promise<void> {
+    this.bot = new TelegramBot(appConfig.telegramBotToken, { polling: true });
+    this.isWebhookMode = false;
+    logger.info('Telegram bot started in polling mode (development)');
+  }
+
+  /**
+   * Stop the bot gracefully
+   */
+  async stop(): Promise<void> {
+    logger.info('Stopping Telegram bot...');
+
+    if (this.bot) {
+      if (this.isWebhookMode) {
+        // Remove webhook before stopping
+        try {
+          await this.bot.deleteWebHook();
+          logger.info('Telegram webhook removed');
+        } catch (error) {
+          logger.error({ error }, 'Failed to remove webhook');
+        }
+      } else {
+        // Stop polling
+        this.bot.stopPolling();
+      }
+    }
+
+    // Close Express server
+    if (this.server) {
+      await new Promise<void>((resolve) => {
+        this.server!.close(() => {
+          logger.info('Express server stopped');
+          resolve();
+        });
+      });
+    }
+
+    logger.info('Telegram bot stopped');
   }
   
   /**

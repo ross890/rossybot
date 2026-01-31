@@ -15,6 +15,7 @@ import { convictionTracker } from './signals/conviction-tracker.js';
 import { kolAnalytics } from './kol/kol-analytics.js';
 import { bondingCurveMonitor } from './pumpfun/bonding-monitor.js';
 import { dailyDigestGenerator } from './telegram/daily-digest.js';
+import { macroGannAnalyzer } from './macro/index.js';
 import {
   BuySignal,
   KolWalletActivity,
@@ -190,14 +191,19 @@ export class TelegramAlertBot {
       await this.bot!.sendMessage(chatId,
         '*rossybot* initialized!\n\n' +
         'You will receive memecoin buy signals here.\n\n' +
-        '*Commands:*\n' +
+        '*Memecoin Commands:*\n' +
         '/status - Bot status & connection health\n' +
         '/positions - Open positions\n' +
         '/safety <token> - Run safety check on any token\n' +
         '/conviction - Show high-conviction tokens\n' +
         '/leaderboard - KOL performance rankings\n' +
         '/pumpfun - Tokens approaching migration\n' +
-        '/test - Send a test signal\n' +
+        '/test - Send a test signal\n\n' +
+        '*Macro Commands (Informational):*\n' +
+        '/macro - Latest macro signal (Gann analysis)\n' +
+        '/macro levels - Gann support/resistance levels\n' +
+        '/macro cycles - Active time cycles\n' +
+        '/macro metrics - Current market metrics\n\n' +
         '/help - Show all commands',
         { parse_mode: 'Markdown' }
       );
@@ -223,13 +229,19 @@ export class TelegramAlertBot {
       const chatId = msg.chat.id;
       await this.bot!.sendMessage(chatId,
         '📖 *rossybot Help*\n\n' +
-        '*Commands:*\n' +
+        '*Memecoin Commands:*\n' +
         '/status - Bot status, uptime & connection health\n' +
         '/positions - List all open positions with P&L\n' +
-        '/test - Send a test signal to verify bot is working\n' +
-        '/pause - Temporarily stop receiving signals\n' +
-        '/resume - Resume signal delivery\n' +
-        '/help - Show this message\n\n' +
+        '/safety <token> - Safety check on any token\n' +
+        '/conviction - High conviction tokens (2+ KOLs)\n' +
+        '/leaderboard - KOL performance rankings\n' +
+        '/pumpfun - Tokens approaching migration\n' +
+        '/test - Send a test signal\n\n' +
+        '*Macro Commands (Informational):*\n' +
+        '/macro - Latest Gann macro signal\n' +
+        '/macro levels - Support/resistance levels\n' +
+        '/macro cycles - Active time cycles\n' +
+        '/macro metrics - Market metrics snapshot\n\n' +
         '*Signal Format:*\n' +
         'Each buy signal includes:\n' +
         '• Token details and metrics\n' +
@@ -350,6 +362,93 @@ export class TelegramAlertBot {
         const errorMessage = error instanceof Error ? error.message : 'Unknown error';
         logger.error({ error, chatId }, 'Failed to get pumpfun tokens');
         await this.bot!.sendMessage(chatId, `Failed to get Pump.fun tokens: ${errorMessage}`);
+      }
+    });
+
+    // =============================================
+    // MACRO COMMANDS (Informational Only)
+    // =============================================
+
+    // /macro command - Latest macro signal
+    this.bot.onText(/\/macro$/, async (msg) => {
+      const chatId = msg.chat.id;
+
+      try {
+        const signal = macroGannAnalyzer.getFormattedSignal();
+
+        if (!signal) {
+          await this.bot!.sendMessage(chatId, 'Macro analyzer not ready. Please wait a moment and try again.');
+          return;
+        }
+
+        await this.bot!.sendMessage(chatId, signal, {
+          parse_mode: 'Markdown',
+          disable_web_page_preview: true,
+        });
+      } catch (error) {
+        const errorMessage = error instanceof Error ? error.message : 'Unknown error';
+        logger.error({ error, chatId }, 'Failed to get macro signal');
+        await this.bot!.sendMessage(chatId, `Failed to get macro signal: ${errorMessage}`);
+      }
+    });
+
+    // /macro levels - Gann support/resistance levels
+    this.bot.onText(/\/macro levels/, async (msg) => {
+      const chatId = msg.chat.id;
+
+      try {
+        const levels = macroGannAnalyzer.getFormattedLevels();
+
+        if (!levels) {
+          await this.bot!.sendMessage(chatId, 'Macro analyzer not ready. Please wait a moment and try again.');
+          return;
+        }
+
+        await this.bot!.sendMessage(chatId, levels, { parse_mode: 'Markdown' });
+      } catch (error) {
+        const errorMessage = error instanceof Error ? error.message : 'Unknown error';
+        logger.error({ error, chatId }, 'Failed to get macro levels');
+        await this.bot!.sendMessage(chatId, `Failed to get macro levels: ${errorMessage}`);
+      }
+    });
+
+    // /macro cycles - Active time cycles
+    this.bot.onText(/\/macro cycles/, async (msg) => {
+      const chatId = msg.chat.id;
+
+      try {
+        const cycles = macroGannAnalyzer.getFormattedCycles();
+
+        if (!cycles) {
+          await this.bot!.sendMessage(chatId, 'Macro analyzer not ready. Please wait a moment and try again.');
+          return;
+        }
+
+        await this.bot!.sendMessage(chatId, cycles, { parse_mode: 'Markdown' });
+      } catch (error) {
+        const errorMessage = error instanceof Error ? error.message : 'Unknown error';
+        logger.error({ error, chatId }, 'Failed to get macro cycles');
+        await this.bot!.sendMessage(chatId, `Failed to get macro cycles: ${errorMessage}`);
+      }
+    });
+
+    // /macro metrics - Current market metrics
+    this.bot.onText(/\/macro metrics/, async (msg) => {
+      const chatId = msg.chat.id;
+
+      try {
+        const metrics = macroGannAnalyzer.getFormattedMetrics();
+
+        if (!metrics) {
+          await this.bot!.sendMessage(chatId, 'Macro analyzer not ready. Please wait a moment and try again.');
+          return;
+        }
+
+        await this.bot!.sendMessage(chatId, metrics, { parse_mode: 'Markdown' });
+      } catch (error) {
+        const errorMessage = error instanceof Error ? error.message : 'Unknown error';
+        logger.error({ error, chatId }, 'Failed to get macro metrics');
+        await this.bot!.sendMessage(chatId, `Failed to get macro metrics: ${errorMessage}`);
       }
     });
   }

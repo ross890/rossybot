@@ -6,6 +6,7 @@ import { appConfig } from './config/index.js';
 import { logger } from './utils/logger.js';
 import { pool, SCHEMA_SQL } from './utils/database.js';
 import { signalGenerator } from './modules/signal-generator.js';
+import { telegramBot } from './modules/telegram.js';
 
 // ============ STARTUP ============
 
@@ -43,10 +44,11 @@ async function main(): Promise<void> {
   // Handle graceful shutdown
   const shutdown = async (signal: string) => {
     logger.info({ signal }, 'Shutdown signal received');
-    
+
     signalGenerator.stop();
+    await telegramBot.stop();
     await pool.end();
-    
+
     logger.info('Shutdown complete');
     process.exit(0);
   };

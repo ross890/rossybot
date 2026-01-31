@@ -532,19 +532,39 @@ export async function analyzeTokenContract(address: string): Promise<TokenContra
   try {
     const security = await birdeyeClient.getTokenSecurity(address);
 
+    // Log what Birdeye returned for debugging
+    logger.info({
+      address: address.slice(0, 8),
+      hasSecurityData: !!security,
+      mintAuthority: security?.mintAuthority,
+      freezeAuthority: security?.freezeAuthority,
+    }, 'Birdeye security response');
+
+    // Handle null/undefined security response
+    if (!security) {
+      logger.warn({ address }, 'No security data from Birdeye - skipping check');
+      // Return permissive defaults when API returns nothing (let token through)
+      return {
+        mintAuthorityRevoked: true,
+        freezeAuthorityRevoked: true,
+        metadataMutable: false,
+        isKnownScamTemplate: false,
+      };
+    }
+
     return {
-      mintAuthorityRevoked: security?.mintAuthority === null,
-      freezeAuthorityRevoked: security?.freezeAuthority === null,
-      metadataMutable: security?.mutable !== false,
-      isKnownScamTemplate: false, // Would require contract bytecode comparison
+      mintAuthorityRevoked: security.mintAuthority === null,
+      freezeAuthorityRevoked: security.freezeAuthority === null,
+      metadataMutable: security.mutable !== false,
+      isKnownScamTemplate: false,
     };
   } catch (error) {
     logger.error({ error, address }, 'Failed to analyze token contract');
-    // Return conservative defaults
+    // Return permissive defaults on error (let token through to later checks)
     return {
-      mintAuthorityRevoked: false,
-      freezeAuthorityRevoked: false,
-      metadataMutable: true,
+      mintAuthorityRevoked: true,
+      freezeAuthorityRevoked: true,
+      metadataMutable: false,
       isKnownScamTemplate: false,
     };
   }

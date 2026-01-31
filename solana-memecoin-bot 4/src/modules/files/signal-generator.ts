@@ -152,9 +152,9 @@ export class SignalGenerator {
       }
       
       if (candidates.size > 0) {
-        logger.info({ 
-          count: candidates.size, 
-          source: wsConnected ? 'Birdeye WebSocket' : 'Birdeye REST API' 
+        logger.info({
+          count: candidates.size,
+          source: 'Birdeye WebSocket'
         }, 'Got candidates from Birdeye');
       }
     } catch (error) {

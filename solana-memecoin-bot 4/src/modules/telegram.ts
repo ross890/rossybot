@@ -5,7 +5,7 @@
 import TelegramBot from 'node-telegram-bot-api';
 import { appConfig } from '../config/index.js';
 import { logger } from '../utils/logger.js';
-import { Database } from '../utils/database.js';
+import { Database, pool } from '../utils/database.js';
 import {
   BuySignal,
   KolWalletActivity,
@@ -30,7 +30,8 @@ export class TelegramAlertBot {
   private chatId: string;
   private signalQueue: BuySignal[] = [];
   private lastKolSignalTime: Map<string, number> = new Map();
-  
+  private startTime: Date | null = null;
+
   constructor() {
     this.chatId = appConfig.telegramChatId;
   }
@@ -45,10 +46,11 @@ export class TelegramAlertBot {
     }
     
     this.bot = new TelegramBot(appConfig.telegramBotToken, { polling: true });
-    
+    this.startTime = new Date();
+
     // Set up command handlers
     this.setupCommands();
-    
+
     logger.info('Telegram bot (rossybot) initialized');
   }
   
@@ -61,18 +63,19 @@ export class TelegramAlertBot {
     // /start command
     this.bot.onText(/\/start/, async (msg) => {
       const chatId = msg.chat.id;
-      await this.bot!.sendMessage(chatId, 
+      await this.bot!.sendMessage(chatId,
         '🤖 *rossybot* initialized!\n\n' +
         'You will receive memecoin buy signals here.\n\n' +
         'Commands:\n' +
-        '/status - Current portfolio status\n' +
+        '/status - Bot status & connection health\n' +
         '/positions - Open positions\n' +
+        '/test - Send a test signal\n' +
         '/pause - Pause signals\n' +
         '/resume - Resume signals\n' +
         '/help - Show this help',
         { parse_mode: 'Markdown' }
       );
-      
+
       // Log chat ID for configuration
       logger.info({ chatId }, 'User started bot - save this chat_id');
     });
@@ -95,8 +98,9 @@ export class TelegramAlertBot {
       await this.bot!.sendMessage(chatId,
         '📖 *rossybot Help*\n\n' +
         '*Commands:*\n' +
-        '/status - Portfolio summary and queued signals\n' +
+        '/status - Bot status, uptime & connection health\n' +
         '/positions - List all open positions with P&L\n' +
+        '/test - Send a test signal to verify bot is working\n' +
         '/pause - Temporarily stop receiving signals\n' +
         '/resume - Resume signal delivery\n' +
         '/help - Show this message\n\n' +
@@ -109,6 +113,28 @@ export class TelegramAlertBot {
         '⚠️ DYOR. Not financial advice.',
         { parse_mode: 'Markdown' }
       );
+    });
+
+    // /test command - sends a dummy signal to verify bot is working
+    this.bot.onText(/\/test/, async (msg) => {
+      const chatId = msg.chat.id;
+      try {
+        // Send initial response
+        await this.bot!.sendMessage(chatId, '🔄 Generating test signal...', { parse_mode: 'Markdown' });
+
+        // Send dummy signal
+        const testSignal = this.formatTestSignal();
+        await this.bot!.sendMessage(chatId, testSignal, {
+          parse_mode: 'Markdown',
+          disable_web_page_preview: true,
+        });
+
+        logger.info({ chatId }, 'Test signal sent successfully');
+      } catch (error) {
+        const errorMessage = error instanceof Error ? error.message : 'Unknown error';
+        logger.error({ error, chatId }, 'Failed to send test signal');
+        await this.bot!.sendMessage(chatId, `❌ Failed to send test signal: ${errorMessage}`);
+      }
     });
   }
   
@@ -248,10 +274,40 @@ export class TelegramAlertBot {
     // Footer
     msg += `⏱️ _Signal: ${signal.generatedAt.toISOString().replace('T', ' ').slice(0, 19)} UTC_\n`;
     msg += `⚠️ _DYOR. Not financial advice. KOL buys ≠ guaranteed profits._`;
-    
+
     return msg;
   }
-  
+
+  /**
+   * Format test signal message
+   */
+  private formatTestSignal(): string {
+    const now = new Date();
+
+    let msg = `🚀 *NEW SIGNAL - TEST*\n\n`;
+    msg += `*Token:* DUMMY/SOL\n`;
+    msg += `*CA:* \`DuMMyTokenContractAddressHere111111111111\`\n\n`;
+
+    msg += `📊 *Signal Details:*\n`;
+    msg += `├─ Action: *BUY*\n`;
+    msg += `├─ Entry: $0.00001234\n`;
+    msg += `├─ Target: $0.00002468 (+100%)\n`;
+    msg += `└─ Stop Loss: $0.00000617 (-50%)\n\n`;
+
+    msg += `💰 *Market Data:*\n`;
+    msg += `├─ Market Cap: $50,000\n`;
+    msg += `├─ Liquidity: $25,000\n`;
+    msg += `└─ 24h Volume: $10,000\n\n`;
+
+    msg += `👛 *Triggered by:* Test Wallet\n`;
+    msg += `📈 *KOL Win Rate:* 75%\n\n`;
+
+    msg += `⚠️ _This is a TEST signal - not real trading advice_\n`;
+    msg += `⏱️ _Generated: ${now.toISOString().replace('T', ' ').slice(0, 19)} UTC_`;
+
+    return msg;
+  }
+
   /**
    * Check rate limits before sending
    */
@@ -294,27 +350,133 @@ export class TelegramAlertBot {
    */
   async sendStatusUpdate(chatId: string): Promise<void> {
     if (!this.bot) return;
-    
-    const hourlyCount = await Database.getRecentSignalCount(1);
-    const dailyCount = await Database.getRecentSignalCount(24);
-    const openPositions = await Database.getOpenPositions();
-    
-    let msg = `📊 *ROSSYBOT STATUS*\n\n`;
-    msg += `*Signals Today:* ${dailyCount}/${RATE_LIMITS.MAX_SIGNALS_PER_DAY}\n`;
-    msg += `*Signals This Hour:* ${hourlyCount}/${RATE_LIMITS.MAX_SIGNALS_PER_HOUR}\n`;
-    msg += `*Queued Signals:* ${this.signalQueue.length}\n`;
-    msg += `*Open Positions:* ${openPositions.length}\n\n`;
-    
-    if (openPositions.length > 0) {
-      msg += `*Current Holdings:*\n`;
-      for (const pos of openPositions.slice(0, 5)) {
-        const pnl = ((pos.currentPrice - pos.entryPrice) / pos.entryPrice) * 100;
-        const emoji = pnl >= 0 ? '🟢' : '🔴';
-        msg += `${emoji} $${pos.tokenTicker}: ${pnl >= 0 ? '+' : ''}${pnl.toFixed(1)}%\n`;
+
+    try {
+      const hourlyCount = await Database.getRecentSignalCount(1);
+      const dailyCount = await Database.getRecentSignalCount(24);
+      const openPositions = await Database.getOpenPositions();
+      const trackedWallets = await Database.getAllTrackedWallets();
+      const connectionStatus = await this.checkConnections();
+
+      // Calculate uptime
+      const uptime = this.startTime ? this.formatUptime(Date.now() - this.startTime.getTime()) : 'Unknown';
+
+      // Get last signal time
+      const lastSignalResult = await pool.query(
+        'SELECT sent_at FROM signal_log ORDER BY sent_at DESC LIMIT 1'
+      );
+      const lastSignalTime = lastSignalResult.rows.length > 0
+        ? this.formatTimeAgo(lastSignalResult.rows[0].sent_at)
+        : 'Never';
+
+      let msg = `📊 *ROSSYBOT STATUS*\n\n`;
+
+      // System info
+      msg += `⏱️ *System Info:*\n`;
+      msg += `├─ Uptime: ${uptime}\n`;
+      msg += `├─ Wallets Tracked: ${trackedWallets.length}\n`;
+      msg += `└─ Last Signal: ${lastSignalTime}\n\n`;
+
+      // Connection statuses
+      msg += `🔌 *Connections:*\n`;
+      msg += `├─ Database: ${connectionStatus.database ? '🟢 Connected' : '🔴 Disconnected'}\n`;
+      msg += `├─ Helius: ${connectionStatus.helius ? '🟢 Connected' : '🔴 Disconnected'}\n`;
+      msg += `└─ Birdeye: ${connectionStatus.birdeye ? '🟢 Connected' : '🔴 Disconnected'}\n\n`;
+
+      // Signal stats
+      msg += `📈 *Signal Stats:*\n`;
+      msg += `├─ Signals Today: ${dailyCount}/${RATE_LIMITS.MAX_SIGNALS_PER_DAY}\n`;
+      msg += `├─ Signals This Hour: ${hourlyCount}/${RATE_LIMITS.MAX_SIGNALS_PER_HOUR}\n`;
+      msg += `├─ Queued Signals: ${this.signalQueue.length}\n`;
+      msg += `└─ Open Positions: ${openPositions.length}\n`;
+
+      if (openPositions.length > 0) {
+        msg += `\n*Current Holdings:*\n`;
+        for (const pos of openPositions.slice(0, 5)) {
+          const pnl = ((pos.currentPrice - pos.entryPrice) / pos.entryPrice) * 100;
+          const emoji = pnl >= 0 ? '🟢' : '🔴';
+          msg += `${emoji} $${pos.tokenTicker}: ${pnl >= 0 ? '+' : ''}${pnl.toFixed(1)}%\n`;
+        }
       }
+
+      await this.bot.sendMessage(chatId, msg, { parse_mode: 'Markdown' });
+    } catch (error) {
+      const errorMessage = error instanceof Error ? error.message : 'Unknown error';
+      logger.error({ error, chatId }, 'Failed to get status');
+      await this.bot.sendMessage(chatId, `❌ Failed to get status: ${errorMessage}`);
     }
-    
-    await this.bot.sendMessage(chatId, msg, { parse_mode: 'Markdown' });
+  }
+
+  /**
+   * Check connection statuses for external services
+   */
+  private async checkConnections(): Promise<{ database: boolean; helius: boolean; birdeye: boolean }> {
+    const results = { database: false, helius: false, birdeye: false };
+
+    // Check database
+    try {
+      await pool.query('SELECT 1');
+      results.database = true;
+    } catch {
+      results.database = false;
+    }
+
+    // Check Helius
+    try {
+      const response = await fetch(`${appConfig.heliusRpcUrl}`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'getHealth' }),
+        signal: AbortSignal.timeout(5000),
+      });
+      results.helius = response.ok;
+    } catch {
+      results.helius = false;
+    }
+
+    // Check Birdeye
+    try {
+      const response = await fetch('https://public-api.birdeye.so/defi/tokenlist?sort_by=v24hUSD&sort_type=desc&offset=0&limit=1', {
+        headers: { 'X-API-KEY': appConfig.birdeyeApiKey },
+        signal: AbortSignal.timeout(5000),
+      });
+      results.birdeye = response.ok;
+    } catch {
+      results.birdeye = false;
+    }
+
+    return results;
+  }
+
+  /**
+   * Format uptime duration
+   */
+  private formatUptime(ms: number): string {
+    const seconds = Math.floor(ms / 1000);
+    const minutes = Math.floor(seconds / 60);
+    const hours = Math.floor(minutes / 60);
+    const days = Math.floor(hours / 24);
+
+    if (days > 0) return `${days}d ${hours % 24}h ${minutes % 60}m`;
+    if (hours > 0) return `${hours}h ${minutes % 60}m`;
+    if (minutes > 0) return `${minutes}m ${seconds % 60}s`;
+    return `${seconds}s`;
+  }
+
+  /**
+   * Format time ago
+   */
+  private formatTimeAgo(date: Date): string {
+    const now = new Date();
+    const diffMs = now.getTime() - new Date(date).getTime();
+    const diffMins = Math.floor(diffMs / 60000);
+
+    if (diffMins < 1) return 'Just now';
+    if (diffMins < 60) return `${diffMins}m ago`;
+    const diffHours = Math.floor(diffMins / 60);
+    if (diffHours < 24) return `${diffHours}h ago`;
+    const diffDays = Math.floor(diffHours / 24);
+    return `${diffDays}d ago`;
   }
   
   /**

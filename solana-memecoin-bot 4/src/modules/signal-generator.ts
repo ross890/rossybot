@@ -131,32 +131,66 @@ export class SignalGenerator {
    */
   private async runScanCycle(): Promise<void> {
     try {
-      logger.debug('Starting scan cycle');
-      
       // Step 1: Get candidate tokens (new listings + active tokens)
       const candidates = await this.getCandidateTokens();
-      logger.debug({ count: candidates.length }, 'Found candidate tokens');
-      
+
       // Step 2: Quick pre-filter (contract checks)
       const preFiltered: string[] = [];
+      let quickFilterFails = 0;
       for (const address of candidates) {
         const quickCheck = await quickScamCheck(address);
         if (quickCheck.pass) {
           preFiltered.push(address);
+        } else {
+          quickFilterFails++;
         }
       }
-      logger.debug({ count: preFiltered.length }, 'Tokens passed quick filter');
-      
+
+      // Diagnostic logging - show pipeline stats every cycle
+      logger.info({
+        candidates: candidates.length,
+        passedQuickFilter: preFiltered.length,
+        failedQuickFilter: quickFilterFails,
+      }, 'Scan cycle: pre-filter complete');
+
       // Step 3: Check for KOL activity on each token
+      let safetyBlocked = 0;
+      let noKolActivity = 0;
+      let noMetrics = 0;
+      let screeningFailed = 0;
+      let scamRejected = 0;
+      let scoringFailed = 0;
+      let signalsGenerated = 0;
+
       for (const tokenAddress of preFiltered) {
         try {
-          await this.evaluateToken(tokenAddress);
+          const result = await this.evaluateTokenWithDiagnostics(tokenAddress);
+          switch (result) {
+            case 'SAFETY_BLOCKED': safetyBlocked++; break;
+            case 'NO_KOL_ACTIVITY': noKolActivity++; break;
+            case 'NO_METRICS': noMetrics++; break;
+            case 'SCREENING_FAILED': screeningFailed++; break;
+            case 'SCAM_REJECTED': scamRejected++; break;
+            case 'SCORING_FAILED': scoringFailed++; break;
+            case 'SIGNAL_SENT': signalsGenerated++; break;
+            case 'SKIPPED': break; // Already have position
+          }
         } catch (error) {
           logger.error({ error, tokenAddress }, 'Error evaluating token');
         }
       }
-      
-      logger.debug('Scan cycle complete');
+
+      // Show where tokens are dropping off
+      logger.info({
+        evaluated: preFiltered.length,
+        safetyBlocked,
+        noKolActivity,
+        noMetrics,
+        screeningFailed,
+        scamRejected,
+        scoringFailed,
+        signalsGenerated,
+      }, 'Scan cycle: evaluation complete');
     } catch (error) {
       logger.error({ error }, 'Error in scan cycle');
     }
@@ -214,13 +248,26 @@ export class SignalGenerator {
   }
   
   /**
-   * Fully evaluate a single token
+   * Evaluation result types for diagnostics
    */
-  private async evaluateToken(tokenAddress: string): Promise<void> {
+  private static readonly EVAL_RESULTS = {
+    SKIPPED: 'SKIPPED',
+    SAFETY_BLOCKED: 'SAFETY_BLOCKED',
+    NO_KOL_ACTIVITY: 'NO_KOL_ACTIVITY',
+    NO_METRICS: 'NO_METRICS',
+    SCREENING_FAILED: 'SCREENING_FAILED',
+    SCAM_REJECTED: 'SCAM_REJECTED',
+    SCORING_FAILED: 'SCORING_FAILED',
+    SIGNAL_SENT: 'SIGNAL_SENT',
+  } as const;
+
+  /**
+   * Fully evaluate a single token with diagnostic return value
+   */
+  private async evaluateTokenWithDiagnostics(tokenAddress: string): Promise<string> {
     // Check if we already have an open position
     if (await Database.hasOpenPosition(tokenAddress)) {
-      logger.debug({ tokenAddress }, 'Already have open position - skipping');
-      return;
+      return SignalGenerator.EVAL_RESULTS.SKIPPED;
     }
 
     // FEATURE 1 & 5: Run enhanced safety check FIRST (before other checks)
@@ -228,9 +275,7 @@ export class SignalGenerator {
     const safetyBlock = tokenSafetyChecker.shouldBlockSignal(safetyResult);
 
     if (safetyBlock.blocked) {
-      logger.info({ tokenAddress, reason: safetyBlock.reason, safetyScore: safetyResult.safetyScore },
-        'Token blocked by safety check');
-      return;
+      return SignalGenerator.EVAL_RESULTS.SAFETY_BLOCKED;
     }
 
     // Get KOL activity for this token
@@ -241,7 +286,7 @@ export class SignalGenerator {
 
     if (kolActivities.length === 0) {
       // No KOL activity - skip (we only signal on confirmed KOL buys)
-      return;
+      return SignalGenerator.EVAL_RESULTS.NO_KOL_ACTIVITY;
     }
 
     logger.info({ tokenAddress, kolCount: kolActivities.length }, 'KOL activity detected');
@@ -266,21 +311,19 @@ export class SignalGenerator {
     // Get comprehensive token data
     const metrics = await getTokenMetrics(tokenAddress);
     if (!metrics) {
-      logger.debug({ tokenAddress }, 'Could not get token metrics');
-      return;
+      return SignalGenerator.EVAL_RESULTS.NO_METRICS;
     }
 
     // Check if token meets minimum screening criteria
     if (!this.meetsScreeningCriteria(metrics)) {
-      logger.debug({ tokenAddress, metrics }, 'Token does not meet screening criteria');
-      return;
+      return SignalGenerator.EVAL_RESULTS.SCREENING_FAILED;
     }
 
     // Run full scam filter
     const scamResult = await scamFilter.filterToken(tokenAddress);
     if (scamResult.result === 'REJECT') {
       logger.info({ tokenAddress, flags: scamResult.flags }, 'Token rejected by scam filter');
-      return;
+      return SignalGenerator.EVAL_RESULTS.SCAM_REJECTED;
     }
 
     // Get social metrics (simplified - would need Twitter API integration)
@@ -313,8 +356,12 @@ export class SignalGenerator {
     const buyCheck = scoringEngine.meetsBuyRequirements(score, kolActivities);
 
     if (!buyCheck.meets) {
-      logger.debug({ tokenAddress, reason: buyCheck.reason }, 'Token does not meet buy requirements');
-      return;
+      logger.info({
+        tokenAddress,
+        compositeScore: score.compositeScore,
+        reason: buyCheck.reason,
+      }, 'Token scored but did not meet buy requirements');
+      return SignalGenerator.EVAL_RESULTS.SCORING_FAILED;
     }
 
     // FEATURE 7: Get KOL performance stats to weight signal
@@ -343,6 +390,15 @@ export class SignalGenerator {
     if (await bondingCurveMonitor.isPumpfunToken(tokenAddress)) {
       await bondingCurveMonitor.trackToken(tokenAddress);
     }
+
+    return SignalGenerator.EVAL_RESULTS.SIGNAL_SENT;
+  }
+
+  /**
+   * Fully evaluate a single token (legacy wrapper)
+   */
+  private async evaluateToken(tokenAddress: string): Promise<void> {
+    await this.evaluateTokenWithDiagnostics(tokenAddress);
   }
   
   /**

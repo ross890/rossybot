@@ -381,59 +381,92 @@ class DexScreenerClient {
    */
   async getNewSolanaPairs(limit = 50): Promise<any[]> {
     try {
-      // Get latest Solana pairs using the token-boosts or profiles endpoint
+      // Get latest Solana pairs using the token-boosts endpoint
       const response = await this.client.get('/token-boosts/latest/v1');
       const allPairs = response.data || [];
-      
+
       // Filter for Solana pairs
       const solanaPairs = allPairs
         .filter((p: any) => p.chainId === 'solana')
         .slice(0, limit);
-      
-      logger.info({ count: solanaPairs.length }, 'Fetched new Solana pairs from DexScreener');
+
+      logger.info({ count: solanaPairs.length }, 'Fetched new Solana pairs from DexScreener token-boosts');
       return solanaPairs;
-    } catch (error) {
-      logger.debug({ error }, 'token-boosts endpoint not available, trying trending');
-      
-      // Fallback: try to get trending pairs
+    } catch (error: any) {
+      logger.debug({ error: error?.message, status: error?.response?.status }, 'token-boosts endpoint failed, trying token-profiles');
+
+      // Fallback: try token-profiles endpoint
       try {
-        const response = await this.client.get('/latest/dex/pairs/solana');
-        const pairs = response.data?.pairs || [];
-        logger.info({ count: pairs.length }, 'Fetched Solana pairs from DexScreener');
-        return pairs.slice(0, limit);
-      } catch (fallbackError) {
-        logger.error({ error: fallbackError }, 'Failed to get new pairs from DexScreener');
+        const response = await this.client.get('/token-profiles/latest/v1');
+        const allProfiles = response.data || [];
+
+        // Filter for Solana tokens
+        const solanaTokens = allProfiles
+          .filter((p: any) => p.chainId === 'solana')
+          .slice(0, limit);
+
+        logger.info({ count: solanaTokens.length }, 'Fetched Solana tokens from DexScreener token-profiles');
+        return solanaTokens;
+      } catch (fallbackError: any) {
+        logger.warn({
+          error: fallbackError?.message,
+          status: fallbackError?.response?.status
+        }, 'Failed to get new pairs from DexScreener - all endpoints failed');
         return [];
       }
     }
   }
   
   /**
-   * Get trending tokens on Solana via DexScreener search
+   * Get trending tokens on Solana via DexScreener
+   * Uses token-boosts and token-profiles endpoints as the /latest/dex/pairs/solana endpoint no longer exists
    */
   async getTrendingSolanaTokens(limit = 50): Promise<string[]> {
+    const addresses: string[] = [];
+
     try {
-      // Search for recently active Solana tokens
-      const response = await this.client.get('/latest/dex/pairs/solana', {
-        params: { sort: 'h24Volume', order: 'desc' }
-      });
-      
-      const pairs = response.data?.pairs || [];
-      const addresses: string[] = [];
-      
-      for (const pair of pairs) {
-        if (pair.baseToken?.address && !addresses.includes(pair.baseToken.address)) {
-          addresses.push(pair.baseToken.address);
+      // Primary: Get boosted tokens (these are actively promoted/trending)
+      const boostsResponse = await this.client.get('/token-boosts/latest/v1');
+      const boosts = boostsResponse.data || [];
+
+      for (const token of boosts) {
+        if (token.chainId === 'solana' && token.tokenAddress && !addresses.includes(token.tokenAddress)) {
+          addresses.push(token.tokenAddress);
           if (addresses.length >= limit) break;
         }
       }
-      
-      logger.info({ count: addresses.length }, 'Fetched trending Solana token addresses');
-      return addresses;
-    } catch (error) {
-      logger.error({ error }, 'Failed to get trending Solana tokens');
-      return [];
+
+      logger.info({ count: addresses.length }, 'Fetched trending Solana token addresses from token-boosts');
+
+      // If we have enough, return early
+      if (addresses.length >= limit) {
+        return addresses;
+      }
+    } catch (error: any) {
+      logger.debug({ error: error?.message, status: error?.response?.status }, 'token-boosts endpoint failed for trending tokens');
     }
+
+    // Fallback: Try token-profiles endpoint
+    try {
+      const profilesResponse = await this.client.get('/token-profiles/latest/v1');
+      const profiles = profilesResponse.data || [];
+
+      for (const token of profiles) {
+        if (token.chainId === 'solana' && token.tokenAddress && !addresses.includes(token.tokenAddress)) {
+          addresses.push(token.tokenAddress);
+          if (addresses.length >= limit) break;
+        }
+      }
+
+      logger.info({ count: addresses.length }, 'Fetched trending Solana token addresses (combined)');
+    } catch (error: any) {
+      logger.warn({
+        error: error?.message,
+        status: error?.response?.status
+      }, 'Failed to get trending Solana tokens - all endpoints failed');
+    }
+
+    return addresses;
   }
 }
 

@@ -25,6 +25,8 @@ import {
   ConvictionLevel,
   KolActivity,
   TradeType,
+  DiscoverySignal,
+  SignalType,
 } from '../types/index.js';
 
 // ============ RATE LIMITING ============
@@ -867,6 +869,267 @@ export class TelegramAlertBot {
       parse_mode: 'Markdown',
       reply_markup: createTelegramInlineKeyboard(conviction.tokenAddress),
     });
+  }
+
+  /**
+   * Send discovery signal (no KOL - metrics based)
+   */
+  async sendDiscoverySignal(signal: DiscoverySignal): Promise<boolean> {
+    if (!this.bot) {
+      logger.warn('Bot not initialized - cannot send discovery signal');
+      return false;
+    }
+
+    try {
+      const message = this.formatDiscoverySignal(signal);
+
+      await this.bot.sendMessage(this.chatId, message, {
+        parse_mode: 'Markdown',
+        disable_web_page_preview: true,
+        reply_markup: createTelegramInlineKeyboard(signal.tokenAddress),
+      });
+
+      // Log the signal
+      await Database.logSignal(
+        signal.tokenAddress,
+        SignalType.DISCOVERY,
+        signal.score.compositeScore,
+        'DISCOVERY'
+      );
+
+      logger.info({
+        tokenAddress: signal.tokenAddress,
+        ticker: signal.tokenTicker,
+        score: signal.score.compositeScore,
+        moonshotGrade: signal.moonshotAssessment.grade,
+      }, 'Discovery signal sent');
+
+      return true;
+    } catch (error) {
+      logger.error({ error, signal: signal.tokenAddress }, 'Failed to send discovery signal');
+      return false;
+    }
+  }
+
+  /**
+   * Format discovery signal message
+   */
+  private formatDiscoverySignal(signal: DiscoverySignal): string {
+    const { score, tokenMetrics, moonshotAssessment, safetyResult, scamFilter } = signal;
+
+    let msg = `🔍 *ROSSYBOT DISCOVERY SIGNAL*\n\n`;
+
+    // Token info
+    msg += `*Token:* \`$${signal.tokenTicker}\` (${this.truncateAddress(signal.tokenAddress)})\n`;
+    msg += `*Name:* ${signal.tokenName}\n`;
+    msg += `*Chain:* Solana\n\n`;
+
+    // Discovery metrics
+    msg += `📊 *DISCOVERY METRICS*\n`;
+    msg += `├─ Score: *${score.compositeScore}/100*\n`;
+    msg += `├─ Confidence: *${score.confidence}*\n`;
+    msg += `├─ Risk Level: *${score.riskLevel}/5*\n`;
+    msg += `└─ Signal Type: METRICS\\_DISCOVERY\n\n`;
+
+    // Moonshot assessment
+    const gradeEmoji = moonshotAssessment.grade === 'A' ? '🔥' :
+                       moonshotAssessment.grade === 'B' ? '✨' :
+                       moonshotAssessment.grade === 'C' ? '📈' : '📊';
+    msg += `🚀 *MOONSHOT ASSESSMENT*\n`;
+    msg += `├─ Grade: ${gradeEmoji} *${moonshotAssessment.grade}* (${moonshotAssessment.score}/100)\n`;
+    msg += `├─ Potential: *${moonshotAssessment.estimatedPotential}*\n`;
+    msg += `├─ Volume Velocity: ${moonshotAssessment.factors.volumeVelocity.toFixed(0)}/100\n`;
+    msg += `├─ Holder Growth: ${moonshotAssessment.factors.holderGrowthRate.toFixed(0)}/100\n`;
+    msg += `├─ Narrative: ${moonshotAssessment.factors.narrativeScore.toFixed(0)}/100\n`;
+    msg += `└─ Contract Safety: ${moonshotAssessment.factors.contractSafety.toFixed(0)}/100\n\n`;
+
+    // Matched patterns
+    if (moonshotAssessment.matchedPatterns.length > 0) {
+      msg += `✅ *Matched Patterns:* ${moonshotAssessment.matchedPatterns.slice(0, 5).join(', ')}\n\n`;
+    }
+
+    // On-chain data
+    msg += `📈 *ON-CHAIN DATA*\n`;
+    msg += `├─ Price: $${this.formatPrice(tokenMetrics.price)}\n`;
+    msg += `├─ Market Cap: $${this.formatNumber(tokenMetrics.marketCap)}\n`;
+    msg += `├─ 24h Volume: $${this.formatNumber(tokenMetrics.volume24h)}\n`;
+    msg += `├─ Vol/MCap: ${(tokenMetrics.volumeMarketCapRatio * 100).toFixed(1)}%\n`;
+    msg += `├─ Holders: ${tokenMetrics.holderCount} (${tokenMetrics.holderChange1h >= 0 ? '+' : ''}${tokenMetrics.holderChange1h}% 1h)\n`;
+    msg += `├─ Top 10: ${tokenMetrics.top10Concentration.toFixed(1)}%\n`;
+    msg += `├─ Liquidity: $${this.formatNumber(tokenMetrics.liquidityPool)}\n`;
+    msg += `├─ Token Age: ${tokenMetrics.tokenAge} min\n`;
+    msg += `└─ LP Locked: ${tokenMetrics.lpLocked ? '✅ Yes' : '❌ No'}\n\n`;
+
+    // Safety check
+    msg += `🛡️ *SAFETY CHECK*\n`;
+    msg += `├─ Safety Score: ${safetyResult.safetyScore}/100\n`;
+    msg += `├─ Mint Authority: ${safetyResult.mintAuthorityEnabled ? '⚠️ ENABLED' : '✅ Revoked'}\n`;
+    msg += `├─ Freeze Authority: ${safetyResult.freezeAuthorityEnabled ? '⚠️ ENABLED' : '✅ Revoked'}\n`;
+    msg += `├─ Insider Risk: ${safetyResult.insiderAnalysis.insiderRiskScore}/100\n`;
+    msg += `└─ Bundle Risk: ${scamFilter.bundleAnalysis.riskLevel === 'LOW' ? '🟢 CLEAR' : scamFilter.bundleAnalysis.riskLevel === 'MEDIUM' ? '🟡 FLAGGED' : '🔴 HIGH'}\n\n`;
+
+    // KOL Status
+    msg += `👛 *KOL STATUS*\n`;
+    msg += `└─ ⏳ NO KOL ACTIVITY YET\n`;
+    msg += `   _Waiting for KOL validation..._\n\n`;
+
+    // Suggested action
+    msg += `⚡ *SUGGESTED ACTION*\n`;
+    msg += `├─ Position Size: ${signal.suggestedPositionSize}% (reduced for discovery)\n`;
+    msg += `└─ Status: WATCH\\_LIST (await KOL or DYOR)\n\n`;
+
+    // Risk warnings
+    if (signal.riskWarnings.length > 0) {
+      msg += `⚠️ *RISK WARNINGS:*\n`;
+      for (const warning of signal.riskWarnings) {
+        msg += `• ${warning}\n`;
+      }
+      msg += `\n`;
+    }
+
+    // Flags
+    if (score.flags.length > 0) {
+      msg += `🏷️ *FLAGS:* ${score.flags.join(', ')}\n\n`;
+    }
+
+    // Trade Links
+    msg += `*Quick Trade:*\n`;
+    msg += formatLinksAsMarkdown(signal.tokenAddress);
+    msg += `\n\n`;
+
+    // Footer
+    msg += `⏱️ _Discovery: ${signal.generatedAt.toISOString().replace('T', ' ').slice(0, 19)} UTC_\n`;
+    msg += `⚠️ _DISCOVERY SIGNAL: No KOL validation. Higher risk. DYOR._`;
+
+    return msg;
+  }
+
+  /**
+   * Send KOL validation signal (KOL bought a previously discovered token)
+   */
+  async sendKolValidationSignal(signal: BuySignal, previousDiscovery: DiscoverySignal): Promise<boolean> {
+    if (!this.bot) {
+      logger.warn('Bot not initialized - cannot send KOL validation signal');
+      return false;
+    }
+
+    try {
+      const message = this.formatKolValidationSignal(signal, previousDiscovery);
+
+      await this.bot.sendMessage(this.chatId, message, {
+        parse_mode: 'Markdown',
+        disable_web_page_preview: true,
+        reply_markup: createTelegramInlineKeyboard(signal.tokenAddress),
+      });
+
+      // Log the signal
+      await Database.logSignal(
+        signal.tokenAddress,
+        SignalType.KOL_VALIDATION,
+        signal.score.compositeScore,
+        signal.kolActivity.kol.handle
+      );
+
+      // Update KOL cooldown
+      this.lastKolSignalTime.set(signal.kolActivity.kol.handle, Date.now());
+
+      logger.info({
+        tokenAddress: signal.tokenAddress,
+        ticker: signal.tokenTicker,
+        originalScore: previousDiscovery.score.compositeScore,
+        boostedScore: signal.score.compositeScore,
+        kol: signal.kolActivity.kol.handle,
+      }, 'KOL validation signal sent');
+
+      return true;
+    } catch (error) {
+      logger.error({ error, signal: signal.tokenAddress }, 'Failed to send KOL validation signal');
+      return false;
+    }
+  }
+
+  /**
+   * Format KOL validation signal message
+   */
+  private formatKolValidationSignal(signal: BuySignal, previousDiscovery: DiscoverySignal): string {
+    const { kolActivity, score, tokenMetrics, scamFilter } = signal;
+    const wallet = kolActivity.wallet;
+    const tx = kolActivity.transaction;
+    const perf = kolActivity.performance;
+
+    // Calculate time since discovery
+    const timeSinceDiscovery = Math.round(
+      (Date.now() - previousDiscovery.discoveredAt.getTime()) / (1000 * 60)
+    );
+
+    let msg = `🎯 *KOL VALIDATION SIGNAL*\n\n`;
+
+    // Discovery recap
+    msg += `📍 *PREVIOUSLY DISCOVERED*\n`;
+    msg += `├─ Discovery Time: ${timeSinceDiscovery} min ago\n`;
+    msg += `├─ Original Score: ${previousDiscovery.score.compositeScore}/100\n`;
+    msg += `├─ Moonshot Grade: ${previousDiscovery.moonshotAssessment.grade}\n`;
+    msg += `└─ Now: *KOL VALIDATED* ✅\n\n`;
+
+    // Token info
+    msg += `*Token:* \`$${signal.tokenTicker}\` (${this.truncateAddress(signal.tokenAddress)})\n`;
+    msg += `*Chain:* Solana\n\n`;
+
+    // Score boost
+    const scoreBoost = signal.score.compositeScore - previousDiscovery.score.compositeScore;
+    msg += `📊 *SIGNAL METRICS (BOOSTED)*\n`;
+    msg += `├─ Original Score: ${previousDiscovery.score.compositeScore}/100\n`;
+    msg += `├─ *Boosted Score: ${score.compositeScore}/100* (+${scoreBoost})\n`;
+    msg += `├─ Confidence: *${score.confidence}*\n`;
+    msg += `├─ Risk Level: *${score.riskLevel}/5*\n`;
+    msg += `└─ Signal Type: KOL\\_VALIDATION\n\n`;
+
+    // KOL Wallet Activity
+    msg += `👛 *KOL WALLET ACTIVITY*\n`;
+    msg += `├─ Status: ✅ KOL BUY CONFIRMED\n`;
+    msg += `├─ KOL: @${kolActivity.kol.handle}\n`;
+    msg += `├─ KOL Tier: ${kolActivity.kol.tier}\n`;
+    msg += `├─ *Wallet Type: ${wallet.walletType === WalletType.MAIN ? '🟢 MAIN WALLET' : '🟡 SIDE WALLET'}*\n`;
+    msg += `├─ Wallet: \`${this.truncateAddress(wallet.address)}\`\n`;
+    msg += `├─ Buy Amount: ${tx.solAmount.toFixed(2)} SOL ($${tx.usdValue.toFixed(0)})\n`;
+    msg += `├─ Tokens: ${this.formatNumber(tx.tokensAcquired)} (${tx.supplyPercent.toFixed(2)}%)\n`;
+    msg += `├─ TX: \`${this.truncateAddress(tx.signature)}\`\n`;
+    msg += `├─ Time: ${tx.timestamp.toISOString().replace('T', ' ').slice(0, 19)} UTC\n`;
+    msg += `└─ KOL Accuracy: ${(perf.winRate * 100).toFixed(0)}% (${perf.totalTrades} trades)\n\n`;
+
+    // On-chain data
+    msg += `📈 *ON-CHAIN DATA*\n`;
+    msg += `├─ Price: $${this.formatPrice(tokenMetrics.price)}\n`;
+    msg += `├─ Market Cap: $${this.formatNumber(tokenMetrics.marketCap)}\n`;
+    msg += `├─ 24h Volume: $${this.formatNumber(tokenMetrics.volume24h)}\n`;
+    msg += `├─ Holders: ${tokenMetrics.holderCount}\n`;
+    msg += `├─ Top 10: ${tokenMetrics.top10Concentration.toFixed(1)}%\n`;
+    msg += `└─ Bundle Risk: ${scamFilter.bundleAnalysis.riskLevel === 'LOW' ? '🟢 CLEAR' : scamFilter.bundleAnalysis.riskLevel === 'MEDIUM' ? '🟡 FLAGGED' : '🔴 HIGH'}\n\n`;
+
+    // Suggested action
+    msg += `⚡ *SUGGESTED ACTION*\n`;
+    msg += `├─ Entry Zone: $${this.formatPrice(signal.entryZone.low)} - $${this.formatPrice(signal.entryZone.high)}\n`;
+    msg += `├─ Position Size: ${signal.positionSizePercent}% of portfolio\n`;
+    msg += `├─ Stop Loss: $${this.formatPrice(signal.stopLoss.price)} (-${signal.stopLoss.percent}%)\n`;
+    msg += `├─ Take Profit 1: $${this.formatPrice(signal.takeProfit1.price)} (+${signal.takeProfit1.percent}%)\n`;
+    msg += `├─ Take Profit 2: $${this.formatPrice(signal.takeProfit2.price)} (+${signal.takeProfit2.percent}%)\n`;
+    msg += `└─ Time Limit: ${signal.timeLimitHours}h max hold\n\n`;
+
+    // Flags
+    if (score.flags.length > 0) {
+      msg += `⚠️ *FLAGS:* ${score.flags.join(', ')}\n\n`;
+    }
+
+    // Trade Links
+    msg += `*Quick Trade:*\n`;
+    msg += formatLinksAsMarkdown(signal.tokenAddress);
+    msg += `\n\n`;
+
+    // Footer
+    msg += `⏱️ _Signal: ${signal.generatedAt.toISOString().replace('T', ' ').slice(0, 19)} UTC_\n`;
+    msg += `✅ _KOL validated our discovery! Higher confidence entry._`;
+
+    return msg;
   }
 
   // ============ HELPER METHODS ============

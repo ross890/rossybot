@@ -25,6 +25,7 @@ import { kolSellDetector } from './signals/sell-detector.js';
 import { kolAnalytics } from './kol/kol-analytics.js';
 import { bondingCurveMonitor } from './pumpfun/bonding-monitor.js';
 import { dailyDigestGenerator } from './telegram/daily-digest.js';
+import { moonshotAssessor } from './moonshot-assessor.js';
 
 import {
   TokenMetrics,
@@ -33,18 +34,24 @@ import {
   SignalType,
   KolWalletActivity,
   TokenSafetyResult,
+  DiscoverySignal,
+  MoonshotAssessment,
 } from '../types/index.js';
 
 // ============ CONFIGURATION ============
 
 const SCAN_INTERVAL_MS = 60 * 1000; // 1 minute
 const KOL_ACTIVITY_WINDOW_MS = 2 * 60 * 60 * 1000; // 2 hours
+const DISCOVERY_SIGNAL_EXPIRY_MS = 24 * 60 * 60 * 1000; // Track discovery for 24 hours
 
 // ============ SIGNAL GENERATOR CLASS ============
 
 export class SignalGenerator {
   private isRunning = false;
   private scanTimer: NodeJS.Timeout | null = null;
+
+  // Track discovery signals for KOL follow-up alerts
+  private discoverySignals: Map<string, DiscoverySignal> = new Map();
   
   /**
    * Initialize the signal generator
@@ -151,26 +158,30 @@ export class SignalGenerator {
         `Scan cycle: pre-filter complete | candidates=${candidates.length} passed=${preFiltered.length} failed=${quickFilterFails}`
       );
 
-      // Step 3: Check for KOL activity on each token
+      // Step 3: Evaluate each token (KOL signals + discovery signals)
       let safetyBlocked = 0;
-      let noKolActivity = 0;
       let noMetrics = 0;
       let screeningFailed = 0;
       let scamRejected = 0;
       let scoringFailed = 0;
       let signalsGenerated = 0;
+      let discoverySignals = 0;
+      let kolValidationSignals = 0;
+      let discoveryFailed = 0;
 
       for (const tokenAddress of preFiltered) {
         try {
           const result = await this.evaluateTokenWithDiagnostics(tokenAddress);
           switch (result) {
             case 'SAFETY_BLOCKED': safetyBlocked++; break;
-            case 'NO_KOL_ACTIVITY': noKolActivity++; break;
             case 'NO_METRICS': noMetrics++; break;
             case 'SCREENING_FAILED': screeningFailed++; break;
             case 'SCAM_REJECTED': scamRejected++; break;
             case 'SCORING_FAILED': scoringFailed++; break;
             case 'SIGNAL_SENT': signalsGenerated++; break;
+            case 'DISCOVERY_SENT': discoverySignals++; break;
+            case 'KOL_VALIDATION_SENT': kolValidationSignals++; break;
+            case 'DISCOVERY_FAILED': discoveryFailed++; break;
             case 'SKIPPED': break; // Already have position
           }
         } catch (error) {
@@ -178,9 +189,12 @@ export class SignalGenerator {
         }
       }
 
+      // Clean up expired discovery signals
+      this.cleanupExpiredDiscoveries();
+
       // Show where tokens are dropping off
       logger.info(
-        `Scan cycle: evaluation complete | evaluated=${preFiltered.length} safetyBlocked=${safetyBlocked} noKolActivity=${noKolActivity} noMetrics=${noMetrics} screeningFailed=${screeningFailed} scamRejected=${scamRejected} scoringFailed=${scoringFailed} signals=${signalsGenerated}`
+        `Scan cycle: evaluation complete | evaluated=${preFiltered.length} safetyBlocked=${safetyBlocked} noMetrics=${noMetrics} screeningFailed=${screeningFailed} scamRejected=${scamRejected} scoringFailed=${scoringFailed} buySignals=${signalsGenerated} discoveries=${discoverySignals} kolValidations=${kolValidationSignals} discoveryFailed=${discoveryFailed}`
       );
     } catch (error) {
       logger.error({ error }, 'Error in scan cycle');
@@ -244,16 +258,19 @@ export class SignalGenerator {
   private static readonly EVAL_RESULTS = {
     SKIPPED: 'SKIPPED',
     SAFETY_BLOCKED: 'SAFETY_BLOCKED',
-    NO_KOL_ACTIVITY: 'NO_KOL_ACTIVITY',
     NO_METRICS: 'NO_METRICS',
     SCREENING_FAILED: 'SCREENING_FAILED',
     SCAM_REJECTED: 'SCAM_REJECTED',
     SCORING_FAILED: 'SCORING_FAILED',
     SIGNAL_SENT: 'SIGNAL_SENT',
+    DISCOVERY_SENT: 'DISCOVERY_SENT',        // New: Discovery signal (no KOL)
+    KOL_VALIDATION_SENT: 'KOL_VALIDATION_SENT', // New: KOL bought discovered token
+    DISCOVERY_FAILED: 'DISCOVERY_FAILED',    // New: Didn't meet discovery threshold
   } as const;
 
   /**
    * Fully evaluate a single token with diagnostic return value
+   * Now supports both KOL-triggered and discovery-triggered signals
    */
   private async evaluateTokenWithDiagnostics(tokenAddress: string): Promise<string> {
     // Check if we already have an open position
@@ -269,37 +286,7 @@ export class SignalGenerator {
       return SignalGenerator.EVAL_RESULTS.SAFETY_BLOCKED;
     }
 
-    // Get KOL activity for this token
-    const kolActivities = await kolWalletMonitor.getKolActivityForToken(
-      tokenAddress,
-      KOL_ACTIVITY_WINDOW_MS
-    );
-
-    if (kolActivities.length === 0) {
-      // No KOL activity - skip (we only signal on confirmed KOL buys)
-      return SignalGenerator.EVAL_RESULTS.NO_KOL_ACTIVITY;
-    }
-
-    logger.info({ tokenAddress, kolCount: kolActivities.length }, 'KOL activity detected');
-
-    // FEATURE 2: Track conviction - record all KOL buys
-    for (const activity of kolActivities) {
-      const conviction = await convictionTracker.recordBuy(
-        tokenAddress,
-        activity.kol.id,
-        activity.kol.handle,
-        activity.wallet.address,
-        activity.transaction.solAmount,
-        activity.transaction.signature
-      );
-
-      // Send conviction alert if high/ultra conviction
-      if (conviction.isHighConviction) {
-        await telegramBot.sendConvictionAlert(conviction);
-      }
-    }
-
-    // Get comprehensive token data
+    // Get comprehensive token data first (needed for both paths)
     const metrics = await getTokenMetrics(tokenAddress);
     if (!metrics) {
       return SignalGenerator.EVAL_RESULTS.NO_METRICS;
@@ -317,13 +304,154 @@ export class SignalGenerator {
       return SignalGenerator.EVAL_RESULTS.SCAM_REJECTED;
     }
 
-    // Get social metrics (simplified - would need Twitter API integration)
+    // Get social metrics
     const socialMetrics = await this.getSocialMetrics(tokenAddress, metrics);
 
     // Get volume authenticity
     const volumeAuthenticity = await calculateVolumeAuthenticity(tokenAddress);
 
-    // Calculate score
+    // Get KOL activity for this token
+    const kolActivities = await kolWalletMonitor.getKolActivityForToken(
+      tokenAddress,
+      KOL_ACTIVITY_WINDOW_MS
+    );
+
+    // Check if this is a previously discovered token that now has KOL activity
+    const previousDiscovery = this.discoverySignals.get(tokenAddress);
+
+    // ============ PATH A: KOL ACTIVITY DETECTED ============
+    if (kolActivities.length > 0) {
+      logger.info({ tokenAddress, kolCount: kolActivities.length }, 'KOL activity detected');
+
+      // FEATURE 2: Track conviction - record all KOL buys
+      for (const activity of kolActivities) {
+        const conviction = await convictionTracker.recordBuy(
+          tokenAddress,
+          activity.kol.id,
+          activity.kol.handle,
+          activity.wallet.address,
+          activity.transaction.solAmount,
+          activity.transaction.signature
+        );
+
+        // Send conviction alert if high/ultra conviction
+        if (conviction.isHighConviction) {
+          await telegramBot.sendConvictionAlert(conviction);
+        }
+      }
+
+      // Check if this was previously discovered - if so, send KOL_VALIDATION signal
+      if (previousDiscovery) {
+        return await this.handleKolValidation(
+          tokenAddress,
+          metrics,
+          socialMetrics,
+          volumeAuthenticity,
+          scamResult,
+          kolActivities,
+          safetyResult,
+          previousDiscovery
+        );
+      }
+
+      // Standard KOL-triggered signal path
+      return await this.handleKolSignal(
+        tokenAddress,
+        metrics,
+        socialMetrics,
+        volumeAuthenticity,
+        scamResult,
+        kolActivities,
+        safetyResult
+      );
+    }
+
+    // ============ PATH B: NO KOL - EVALUATE FOR DISCOVERY ============
+    // Calculate discovery score (no KOL component)
+    const discoveryScore = scoringEngine.calculateDiscoveryScore(
+      tokenAddress,
+      metrics,
+      socialMetrics,
+      volumeAuthenticity,
+      scamResult
+    );
+
+    // Calculate moonshot assessment
+    const moonshotAssessment = moonshotAssessor.assess(
+      metrics,
+      safetyResult,
+      volumeAuthenticity,
+      socialMetrics
+    );
+
+    // Add safety and moonshot info to flags
+    if (safetyResult.safetyScore < 60) {
+      discoveryScore.flags.push(`SAFETY_${safetyResult.safetyScore}`);
+    }
+    if (safetyResult.insiderAnalysis.insiderRiskScore > 50) {
+      discoveryScore.flags.push(`INSIDER_RISK_${safetyResult.insiderAnalysis.insiderRiskScore}`);
+    }
+
+    // Check if meets discovery requirements
+    const discoveryCheck = scoringEngine.meetsDiscoveryRequirements(discoveryScore, scamResult);
+    const moonshotCheck = moonshotAssessor.meetsDiscoveryThreshold(moonshotAssessment);
+
+    if (!discoveryCheck.meets || !moonshotCheck) {
+      logger.debug({
+        tokenAddress,
+        score: discoveryScore.compositeScore,
+        moonshotScore: moonshotAssessment.score,
+        moonshotGrade: moonshotAssessment.grade,
+        reason: discoveryCheck.reason || 'Moonshot threshold not met',
+      }, 'Token did not meet discovery requirements');
+      return SignalGenerator.EVAL_RESULTS.DISCOVERY_FAILED;
+    }
+
+    // Generate and send discovery signal
+    const discoverySignal = this.buildDiscoverySignal(
+      tokenAddress,
+      metrics,
+      discoveryScore,
+      volumeAuthenticity,
+      scamResult,
+      safetyResult,
+      moonshotAssessment
+    );
+
+    // Track for KOL follow-up
+    this.discoverySignals.set(tokenAddress, discoverySignal);
+
+    // Send discovery alert
+    await telegramBot.sendDiscoverySignal(discoverySignal);
+
+    logger.info({
+      tokenAddress,
+      ticker: metrics.ticker,
+      score: discoveryScore.compositeScore,
+      moonshotGrade: moonshotAssessment.grade,
+    }, 'Discovery signal sent');
+
+    // FEATURE 4: Track Pump.fun tokens
+    if (await bondingCurveMonitor.isPumpfunToken(tokenAddress)) {
+      await bondingCurveMonitor.trackToken(tokenAddress);
+    }
+
+    return SignalGenerator.EVAL_RESULTS.DISCOVERY_SENT;
+  }
+
+  /**
+   * Handle standard KOL-triggered buy signal
+   */
+  private async handleKolSignal(
+    tokenAddress: string,
+    metrics: TokenMetrics,
+    socialMetrics: SocialMetrics,
+    volumeAuthenticity: any,
+    scamResult: any,
+    kolActivities: KolWalletActivity[],
+    safetyResult: TokenSafetyResult
+  ): Promise<string> {
+    // Calculate score with KOL activity
     const score = scoringEngine.calculateScore(
       tokenAddress,
       metrics,
@@ -333,12 +461,10 @@ export class SignalGenerator {
       kolActivities
     );
 
-    // Add safety score to flags if low
+    // Add safety flags
     if (safetyResult.safetyScore < 60) {
       score.flags.push(`SAFETY_${safetyResult.safetyScore}`);
     }
-
-    // Add insider risk to flags if significant
     if (safetyResult.insiderAnalysis.insiderRiskScore > 50) {
       score.flags.push(`INSIDER_RISK_${safetyResult.insiderAnalysis.insiderRiskScore}`);
     }
@@ -377,12 +503,153 @@ export class SignalGenerator {
 
     await telegramBot.sendBuySignal(signal);
 
-    // FEATURE 4: Track Pump.fun tokens for bonding curve monitoring
+    // FEATURE 4: Track Pump.fun tokens
     if (await bondingCurveMonitor.isPumpfunToken(tokenAddress)) {
       await bondingCurveMonitor.trackToken(tokenAddress);
     }
 
     return SignalGenerator.EVAL_RESULTS.SIGNAL_SENT;
+  }
+
+  /**
+   * Handle KOL validation of previously discovered token
+   */
+  private async handleKolValidation(
+    tokenAddress: string,
+    metrics: TokenMetrics,
+    socialMetrics: SocialMetrics,
+    volumeAuthenticity: any,
+    scamResult: any,
+    kolActivities: KolWalletActivity[],
+    safetyResult: TokenSafetyResult,
+    previousDiscovery: DiscoverySignal
+  ): Promise<string> {
+    // Apply KOL multiplier to the discovery score
+    const boostedScore = scoringEngine.applyKolMultiplier(
+      previousDiscovery.score,
+      kolActivities
+    );
+
+    logger.info({
+      tokenAddress,
+      ticker: metrics.ticker,
+      originalScore: previousDiscovery.score.compositeScore,
+      boostedScore: boostedScore.compositeScore,
+      kolCount: kolActivities.length,
+    }, 'KOL validation for previously discovered token');
+
+    // FEATURE 7: Get KOL performance stats
+    const primaryKol = kolActivities[0];
+    const kolStats = await kolAnalytics.getKolStats(primaryKol.kol.id);
+    const signalWeight = kolStats ? kolAnalytics.getSignalWeightMultiplier(kolStats) : 1.0;
+
+    // Build enhanced buy signal with KOL_VALIDATION type
+    const signal = this.buildBuySignal(
+      tokenAddress,
+      metrics,
+      socialMetrics,
+      volumeAuthenticity,
+      scamResult,
+      boostedScore,
+      primaryKol,
+      safetyResult
+    );
+
+    // Mark as KOL_VALIDATION signal
+    signal.signalType = SignalType.KOL_VALIDATION;
+    signal.positionSizePercent = Math.round(signal.positionSizePercent * signalWeight * 10) / 10;
+
+    // Send the validation signal
+    await telegramBot.sendKolValidationSignal(signal, previousDiscovery);
+
+    // Remove from discovery tracking (it's now validated)
+    this.discoverySignals.delete(tokenAddress);
+
+    // FEATURE 4: Track Pump.fun tokens
+    if (await bondingCurveMonitor.isPumpfunToken(tokenAddress)) {
+      await bondingCurveMonitor.trackToken(tokenAddress);
+    }
+
+    return SignalGenerator.EVAL_RESULTS.KOL_VALIDATION_SENT;
+  }
+
+  /**
+   * Build a discovery signal (no KOL required)
+   */
+  private buildDiscoverySignal(
+    tokenAddress: string,
+    metrics: TokenMetrics,
+    score: any,
+    volumeAuthenticity: any,
+    scamResult: any,
+    safetyResult: TokenSafetyResult,
+    moonshotAssessment: MoonshotAssessment
+  ): DiscoverySignal {
+    // Calculate suggested position size (50% of normal for discovery)
+    let positionSize = appConfig.trading.defaultPositionSizePercent * 0.5;
+
+    // Adjust based on moonshot grade
+    if (moonshotAssessment.grade === 'A') positionSize *= 1.25;
+    else if (moonshotAssessment.grade === 'B') positionSize *= 1.0;
+    else if (moonshotAssessment.grade === 'C') positionSize *= 0.75;
+
+    // Apply score modifiers
+    if (score.flags.includes('LOW_LIQUIDITY')) positionSize *= 0.5;
+    if (score.flags.includes('NEW_TOKEN')) positionSize *= 0.75;
+
+    positionSize = Math.min(positionSize, 1.5); // Cap at 1.5% for discovery
+
+    // Build risk warnings
+    const riskWarnings: string[] = [
+      'DISCOVERY_SIGNAL: No KOL validation yet - higher risk',
+    ];
+    if (metrics.tokenAge < 60) riskWarnings.push('Token is less than 1 hour old');
+    if (metrics.liquidityPool < 25000) riskWarnings.push('Low liquidity pool');
+    if (safetyResult.insiderAnalysis.insiderRiskScore > 30) {
+      riskWarnings.push(`Insider risk detected: ${safetyResult.insiderAnalysis.insiderRiskScore}%`);
+    }
+    if (moonshotAssessment.estimatedPotential !== 'HIGH') {
+      riskWarnings.push(`Moonshot potential: ${moonshotAssessment.estimatedPotential}`);
+    }
+
+    return {
+      id: `disc_${Date.now()}_${tokenAddress.slice(0, 8)}`,
+      tokenAddress,
+      tokenTicker: metrics.ticker,
+      tokenName: metrics.name,
+
+      score,
+      tokenMetrics: metrics,
+      volumeAuthenticity,
+      scamFilter: scamResult,
+      safetyResult,
+
+      moonshotAssessment,
+
+      kolActivity: null, // No KOL for discovery
+
+      suggestedPositionSize: Math.round(positionSize * 10) / 10,
+      riskWarnings,
+
+      generatedAt: new Date(),
+      signalType: SignalType.DISCOVERY,
+
+      discoveredAt: new Date(),
+      kolValidatedAt: null,
+    };
+  }
+
+  /**
+   * Clean up expired discovery signals
+   */
+  private cleanupExpiredDiscoveries(): void {
+    const now = Date.now();
+    for (const [address, signal] of this.discoverySignals) {
+      if (now - signal.discoveredAt.getTime() > DISCOVERY_SIGNAL_EXPIRY_MS) {
+        this.discoverySignals.delete(address);
+        logger.debug({ address }, 'Expired discovery signal removed');
+      }
+    }
   }
 
   /**

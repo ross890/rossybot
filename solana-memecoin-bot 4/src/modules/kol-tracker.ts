@@ -22,21 +22,21 @@ const MAIN_WALLET_WEIGHT = 1.0;
 const SIDE_WALLET_WEIGHT = 0.7;
 
 const CONFIDENCE_WEIGHTS: Record<AttributionConfidence, number> = {
-  HIGH: 0.85,
-  MEDIUM_HIGH: 0.70,
-  MEDIUM: 0.50,
-  LOW_MEDIUM: 0.30,
-  LOW: 0.10,
+  [AttributionConfidence.HIGH]: 0.85,
+  [AttributionConfidence.MEDIUM_HIGH]: 0.70,
+  [AttributionConfidence.MEDIUM]: 0.50,
+  [AttributionConfidence.LOW_MEDIUM]: 0.30,
+  [AttributionConfidence.LOW]: 0.10,
 };
 
 const TIER_WEIGHTS: Record<KolTier, number> = {
-  TIER_1: 1.0,
-  TIER_2: 0.7,
-  TIER_3: 0.4,
+  [KolTier.TIER_1]: 1.0,
+  [KolTier.TIER_2]: 0.7,
+  [KolTier.TIER_3]: 0.4,
 };
 
 // Minimum confidence level to generate signals
-const MIN_SIGNAL_CONFIDENCE: AttributionConfidence = 'MEDIUM';
+const MIN_SIGNAL_CONFIDENCE: AttributionConfidence = AttributionConfidence.MEDIUM;
 
 // Time window for detecting KOL activity (in milliseconds)
 const ACTIVITY_WINDOW_MS = 2 * 60 * 60 * 1000; // 2 hours
@@ -251,7 +251,7 @@ export class KolWalletMonitor {
     
     // Side wallets must meet minimum confidence
     const confidenceLevels: AttributionConfidence[] = [
-      'HIGH', 'MEDIUM_HIGH', 'MEDIUM', 'LOW_MEDIUM', 'LOW'
+      AttributionConfidence.HIGH, AttributionConfidence.MEDIUM_HIGH, AttributionConfidence.MEDIUM, AttributionConfidence.LOW_MEDIUM, AttributionConfidence.LOW
     ];
     
     const minIndex = confidenceLevels.indexOf(MIN_SIGNAL_CONFIDENCE);
@@ -358,19 +358,19 @@ export class SideWalletDetector {
       // Determine confidence level
       let confidence: AttributionConfidence;
       if (finalScore > 0.7 && data.correlationCount > 10) {
-        confidence = 'HIGH';
+        confidence = AttributionConfidence.HIGH;
       } else if (finalScore > 0.5 && data.correlationCount > 5) {
-        confidence = 'MEDIUM_HIGH';
+        confidence = AttributionConfidence.MEDIUM_HIGH;
       } else if (finalScore > 0.3 && data.correlationCount >= 3) {
-        confidence = 'MEDIUM';
+        confidence = AttributionConfidence.MEDIUM;
       } else if (data.correlationCount >= 2) {
-        confidence = 'LOW_MEDIUM';
+        confidence = AttributionConfidence.LOW_MEDIUM;
       } else {
-        confidence = 'LOW';
+        confidence = AttributionConfidence.LOW;
       }
       
       // Skip LOW confidence (not useful for signals)
-      if (confidence === 'LOW') continue;
+      if (confidence === AttributionConfidence.LOW) continue;
       
       // Determine primary link method
       const linkMethod = data.linkMethods.includes(LinkMethod.FUNDING_CLUSTER)

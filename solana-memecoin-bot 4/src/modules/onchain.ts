@@ -42,7 +42,7 @@ class HeliusClient {
 
     // Log the base URL (without full API key for security)
     const maskedUrl = this.rpcUrl.replace(/api-key=([^&]+)/, `api-key=${this.apiKey.slice(0, 4)}...`);
-    logger.info({ heliusUrl: maskedUrl }, 'Helius client initialized');
+    logger.info(`Helius client initialized with URL: ${maskedUrl}`);
 
     this.client = axios.create({
       baseURL: this.rpcUrl,
@@ -88,8 +88,9 @@ class HeliusClient {
       };
     } catch (error: any) {
       const status = error?.response?.status;
-      const message = error?.response?.data?.error || error?.message;
-      logger.error({ mintAddress, status, message }, 'Failed to get token holders from Helius');
+      const errorData = error?.response?.data;
+      const message = errorData?.error?.message || errorData?.error || error?.message;
+      logger.error(`Failed to get token holders from Helius: status=${status} error=${message} url=${this.rpcUrl.replace(/api-key=([^&]+)/, 'api-key=***')}`);
       throw error;
     }
   }

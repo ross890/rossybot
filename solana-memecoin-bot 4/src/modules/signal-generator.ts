@@ -9,6 +9,7 @@ import {
   getTokenMetrics,
   calculateVolumeAuthenticity,
   birdeyeClient,
+  dexScreenerClient,
 } from './onchain.js';
 import { scamFilter, quickScamCheck } from './scam-filter.js';
 import { kolWalletMonitor } from './kol-tracker.js';
@@ -38,6 +39,20 @@ export class SignalGenerator {
    */
   async initialize(): Promise<void> {
     logger.info('Initializing signal generator...');
+    
+    // Initialize Birdeye WebSocket for real-time new listings
+    try {
+      await birdeyeClient.initWebSocket();
+      logger.info('Birdeye WebSocket initialized for real-time token listings');
+      
+      // Set up callback for immediate processing of new listings
+      birdeyeClient.onNewListing((listing) => {
+        logger.info({ token: listing.symbol || listing.address }, 'New token listing detected via WebSocket');
+        // Could trigger immediate evaluation here if desired
+      });
+    } catch (error) {
+      logger.warn({ error }, 'Failed to initialize Birdeye WebSocket, will use REST API fallback');
+    }
     
     // Initialize KOL wallet monitor
     await kolWalletMonitor.initialize();
@@ -122,8 +137,12 @@ export class SignalGenerator {
   private async getCandidateTokens(): Promise<string[]> {
     const candidates: Set<string> = new Set();
     
+    // Check WebSocket connection status
+    const wsConnected = birdeyeClient.isWebSocketConnected();
+    logger.debug({ wsConnected }, 'Birdeye WebSocket status');
+    
+    // Try Birdeye first (will use WebSocket buffer if connected, REST API otherwise)
     try {
-      // Get new listings from Birdeye
       const newListings = await birdeyeClient.getNewListings(50);
       
       for (const listing of newListings) {
@@ -131,8 +150,30 @@ export class SignalGenerator {
           candidates.add(listing.address);
         }
       }
+      
+      if (candidates.size > 0) {
+        logger.info({ 
+          count: candidates.size, 
+          source: wsConnected ? 'Birdeye WebSocket' : 'Birdeye REST API' 
+        }, 'Got candidates from Birdeye');
+      }
     } catch (error) {
-      logger.error({ error }, 'Failed to get new listings');
+      logger.warn({ error }, 'Birdeye new listings failed, using DexScreener fallback');
+    }
+    
+    // Use DexScreener as fallback/supplement
+    if (candidates.size < 20) {
+      try {
+        const dexTokens = await dexScreenerClient.getTrendingSolanaTokens(50);
+        
+        for (const address of dexTokens) {
+          candidates.add(address);
+        }
+        
+        logger.info({ count: candidates.size }, 'Supplemented with DexScreener candidates');
+      } catch (error) {
+        logger.error({ error }, 'DexScreener fallback also failed');
+      }
     }
     
     // Also check tokens that KOLs have recently interacted with

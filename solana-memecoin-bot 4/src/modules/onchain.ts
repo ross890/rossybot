@@ -120,6 +120,12 @@ class HeliusClient {
 
 class BirdeyeClient {
   private client: AxiosInstance;
+  private ws: WebSocket | null = null;
+  private newListingsBuffer: any[] = [];
+  private wsConnected = false;
+  private reconnectAttempts = 0;
+  private maxReconnectAttempts = 5;
+  private onNewListingCallback: ((listing: any) => void) | null = null;
   
   constructor() {
     this.client = axios.create({
@@ -130,6 +136,137 @@ class BirdeyeClient {
         'x-chain': 'solana',
       },
     });
+  }
+  
+  /**
+   * Initialize WebSocket connection for real-time new token listings
+   */
+  async initWebSocket(): Promise<void> {
+    const wsUrl = `wss://public-api.birdeye.so/socket/solana?x-api-key=${appConfig.birdeyeApiKey}`;
+    
+    try {
+      // Dynamic import for ws package (Node.js WebSocket)
+      const WebSocket = (await import('ws')).default;
+      
+      this.ws = new WebSocket(wsUrl);
+      
+      this.ws.on('open', () => {
+        logger.info('Birdeye WebSocket connected');
+        this.wsConnected = true;
+        this.reconnectAttempts = 0;
+        
+        // Subscribe to new token listings
+        const subscriptionMsg = {
+          type: 'SUBSCRIBE_TOKEN_NEW_LISTING',
+          meme_platform_enabled: true, // Include pump.fun tokens
+          min_liquidity: 1000, // Minimum $1000 liquidity
+        };
+        
+        this.ws?.send(JSON.stringify(subscriptionMsg));
+        logger.info('Subscribed to SUBSCRIBE_TOKEN_NEW_LISTING');
+      });
+      
+      this.ws.on('message', (data: Buffer) => {
+        try {
+          const message = JSON.parse(data.toString());
+          
+          if (message.type === 'TOKEN_NEW_LISTING' || message.data) {
+            const listing = message.data || message;
+            
+            // Add to buffer for batch processing
+            this.newListingsBuffer.push({
+              address: listing.address || listing.mint,
+              name: listing.name,
+              symbol: listing.symbol,
+              liquidity: listing.liquidity,
+              timestamp: Date.now(),
+            });
+            
+            // Keep buffer size manageable
+            if (this.newListingsBuffer.length > 100) {
+              this.newListingsBuffer = this.newListingsBuffer.slice(-100);
+            }
+            
+            // Trigger callback if set
+            if (this.onNewListingCallback) {
+              this.onNewListingCallback(listing);
+            }
+            
+            logger.debug({ listing: listing.symbol || listing.address }, 'New token listing received');
+          }
+        } catch (error) {
+          logger.debug({ error, data: data.toString().slice(0, 100) }, 'Failed to parse WebSocket message');
+        }
+      });
+      
+      this.ws.on('close', () => {
+        logger.warn('Birdeye WebSocket disconnected');
+        this.wsConnected = false;
+        this.scheduleReconnect();
+      });
+      
+      this.ws.on('error', (error) => {
+        logger.error({ error }, 'Birdeye WebSocket error');
+        this.wsConnected = false;
+      });
+      
+      // Setup ping-pong for connection health
+      this.ws.on('ping', () => {
+        this.ws?.pong();
+      });
+      
+    } catch (error) {
+      logger.error({ error }, 'Failed to initialize Birdeye WebSocket');
+      this.scheduleReconnect();
+    }
+  }
+  
+  /**
+   * Schedule WebSocket reconnection with exponential backoff
+   */
+  private scheduleReconnect(): void {
+    if (this.reconnectAttempts >= this.maxReconnectAttempts) {
+      logger.error('Max WebSocket reconnect attempts reached');
+      return;
+    }
+    
+    const delay = Math.min(1000 * Math.pow(2, this.reconnectAttempts), 30000);
+    this.reconnectAttempts++;
+    
+    logger.info({ delay, attempt: this.reconnectAttempts }, 'Scheduling WebSocket reconnect');
+    
+    setTimeout(() => {
+      this.initWebSocket();
+    }, delay);
+  }
+  
+  /**
+   * Set callback for new token listings
+   */
+  onNewListing(callback: (listing: any) => void): void {
+    this.onNewListingCallback = callback;
+  }
+  
+  /**
+   * Get buffered new listings (from WebSocket)
+   */
+  getBufferedListings(): any[] {
+    const listings = [...this.newListingsBuffer];
+    return listings;
+  }
+  
+  /**
+   * Clear the listings buffer
+   */
+  clearListingsBuffer(): void {
+    this.newListingsBuffer = [];
+  }
+  
+  /**
+   * Check if WebSocket is connected
+   */
+  isWebSocketConnected(): boolean {
+    return this.wsConnected;
   }
   
   async getTokenOverview(address: string): Promise<BirdeyeTokenOverview | null> {
@@ -185,6 +322,13 @@ class BirdeyeClient {
   }
   
   async getNewListings(limit = 50): Promise<any[]> {
+    // First try to get from WebSocket buffer (real-time data)
+    if (this.wsConnected && this.newListingsBuffer.length > 0) {
+      logger.debug({ count: this.newListingsBuffer.length }, 'Returning listings from WebSocket buffer');
+      return this.newListingsBuffer.slice(0, limit);
+    }
+    
+    // Fallback to REST API
     try {
       const response = await this.client.get(`/defi/v2/tokens/new_listing`, {
         params: { limit },
@@ -192,8 +336,9 @@ class BirdeyeClient {
       
       return response.data.data?.items || [];
     } catch (error) {
-      logger.error({ error }, 'Failed to get new listings from Birdeye');
-      return [];
+      logger.warn({ error }, 'Failed to get new listings from Birdeye REST API');
+      // Return buffer even if empty as last resort
+      return this.newListingsBuffer.slice(0, limit);
     }
   }
 }
@@ -203,14 +348,14 @@ class DexScreenerClient {
   
   constructor() {
     this.client = axios.create({
-      baseURL: 'https://api.dexscreener.com/latest',
+      baseURL: 'https://api.dexscreener.com',
       timeout: 10000,
     });
   }
   
   async getTokenPairs(address: string): Promise<DexScreenerPair[]> {
     try {
-      const response = await this.client.get(`/dex/tokens/${address}`);
+      const response = await this.client.get(`/latest/dex/tokens/${address}`);
       return response.data.pairs?.filter((p: any) => p.chainId === 'solana') || [];
     } catch (error) {
       logger.error({ error, address }, 'Failed to get pairs from DexScreener');
@@ -220,12 +365,73 @@ class DexScreenerClient {
   
   async searchTokens(query: string): Promise<DexScreenerPair[]> {
     try {
-      const response = await this.client.get(`/dex/search`, {
+      const response = await this.client.get(`/latest/dex/search`, {
         params: { q: query },
       });
       return response.data.pairs?.filter((p: any) => p.chainId === 'solana') || [];
     } catch (error) {
       logger.error({ error, query }, 'Failed to search tokens on DexScreener');
+      return [];
+    }
+  }
+  
+  /**
+   * Get new/trending Solana token pairs from DexScreener
+   * This is a free alternative to Birdeye's new_listing endpoint
+   */
+  async getNewSolanaPairs(limit = 50): Promise<any[]> {
+    try {
+      // Get latest Solana pairs using the token-boosts or profiles endpoint
+      const response = await this.client.get('/token-boosts/latest/v1');
+      const allPairs = response.data || [];
+      
+      // Filter for Solana pairs
+      const solanaPairs = allPairs
+        .filter((p: any) => p.chainId === 'solana')
+        .slice(0, limit);
+      
+      logger.info({ count: solanaPairs.length }, 'Fetched new Solana pairs from DexScreener');
+      return solanaPairs;
+    } catch (error) {
+      logger.debug({ error }, 'token-boosts endpoint not available, trying trending');
+      
+      // Fallback: try to get trending pairs
+      try {
+        const response = await this.client.get('/latest/dex/pairs/solana');
+        const pairs = response.data?.pairs || [];
+        logger.info({ count: pairs.length }, 'Fetched Solana pairs from DexScreener');
+        return pairs.slice(0, limit);
+      } catch (fallbackError) {
+        logger.error({ error: fallbackError }, 'Failed to get new pairs from DexScreener');
+        return [];
+      }
+    }
+  }
+  
+  /**
+   * Get trending tokens on Solana via DexScreener search
+   */
+  async getTrendingSolanaTokens(limit = 50): Promise<string[]> {
+    try {
+      // Search for recently active Solana tokens
+      const response = await this.client.get('/latest/dex/pairs/solana', {
+        params: { sort: 'h24Volume', order: 'desc' }
+      });
+      
+      const pairs = response.data?.pairs || [];
+      const addresses: string[] = [];
+      
+      for (const pair of pairs) {
+        if (pair.baseToken?.address && !addresses.includes(pair.baseToken.address)) {
+          addresses.push(pair.baseToken.address);
+          if (addresses.length >= limit) break;
+        }
+      }
+      
+      logger.info({ count: addresses.length }, 'Fetched trending Solana token addresses');
+      return addresses;
+    } catch (error) {
+      logger.error({ error }, 'Failed to get trending Solana tokens');
       return [];
     }
   }

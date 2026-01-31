@@ -323,7 +323,7 @@ export class ScoringEngine {
 
     if (metrics.holderCount < 100) {
       flags.push('LOW_HOLDER_COUNT');
-      if (confidence === 'HIGH') confidence = 'MEDIUM';
+      // Note: Discovery signals start at MEDIUM, so no need to check for HIGH
     }
 
     // Add scam filter flags

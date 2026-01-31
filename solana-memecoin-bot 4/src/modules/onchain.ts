@@ -20,23 +20,46 @@ import { Database } from '../utils/database.js';
 
 class HeliusClient {
   private client: AxiosInstance;
-  
+  private rpcUrl: string;
+  private apiKey: string;
+
   constructor() {
+    this.apiKey = appConfig.heliusApiKey;
+
+    // Validate API key is present
+    if (!this.apiKey || this.apiKey.length < 10) {
+      logger.error('HELIUS_API_KEY is missing or invalid');
+    }
+
+    // Ensure the RPC URL includes the API key
+    // Helius RPC URL format: https://mainnet.helius-rpc.com/?api-key=YOUR_KEY
+    let rpcUrl = appConfig.heliusRpcUrl;
+    if (!rpcUrl.includes('api-key=')) {
+      const separator = rpcUrl.includes('?') ? '&' : '?';
+      rpcUrl = `${rpcUrl}${separator}api-key=${this.apiKey}`;
+    }
+    this.rpcUrl = rpcUrl;
+
+    // Log the base URL (without full API key for security)
+    const maskedUrl = this.rpcUrl.replace(/api-key=([^&]+)/, `api-key=${this.apiKey.slice(0, 4)}...`);
+    logger.info({ heliusUrl: maskedUrl }, 'Helius client initialized');
+
     this.client = axios.create({
-      baseURL: appConfig.heliusRpcUrl,
+      baseURL: this.rpcUrl,
       timeout: 30000,
       headers: {
         'Content-Type': 'application/json',
       },
     });
   }
-  
+
   async getTokenHolders(mintAddress: string): Promise<{
     total: number;
     topHolders: { address: string; amount: number; percentage: number }[];
   }> {
     try {
-      // Use Helius DAS API for token holders
+      // Use Helius RPC endpoint with DAS API method
+      // The RPC URL should already include api-key from constructor
       const response = await this.client.post('', {
         jsonrpc: '2.0',
         id: 'holders-request',
@@ -63,8 +86,10 @@ class HeliusClient {
         total: accounts.length,
         topHolders: top10,
       };
-    } catch (error) {
-      logger.error({ error, mintAddress }, 'Failed to get token holders from Helius');
+    } catch (error: any) {
+      const status = error?.response?.status;
+      const message = error?.response?.data?.error || error?.message;
+      logger.error({ mintAddress, status, message }, 'Failed to get token holders from Helius');
       throw error;
     }
   }

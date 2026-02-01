@@ -10,6 +10,7 @@ import { botWallet } from '../trading/wallet.js';
 import { tradeExecutor, SignalCategory } from '../trading/trade-executor.js';
 import { positionManager } from '../trading/position-manager.js';
 import { createTelegramInlineKeyboard } from '../../utils/trade-links.js';
+import { thresholdOptimizer } from '../performance/threshold-optimizer.js';
 
 // ============ TYPES ============
 
@@ -54,6 +55,8 @@ export const BOT_COMMANDS: TelegramBot.BotCommand[] = [
   // Performance
   { command: 'stats', description: 'Trading stats (win rate, P&L)' },
   { command: 'history', description: 'Recent trade history' },
+  { command: 'thresholds', description: 'View signal thresholds' },
+  { command: 'reset_thresholds', description: 'Reset thresholds to defaults' },
 
   // System
   { command: 'status', description: 'Bot status' },
@@ -197,6 +200,16 @@ export class TradingCommands {
     // /history
     this.bot.onText(/\/history/, async (msg) => {
       await this.handleHistory(msg.chat.id);
+    });
+
+    // /thresholds - View current signal thresholds
+    this.bot.onText(/\/thresholds/, async (msg) => {
+      await this.handleThresholds(msg.chat.id);
+    });
+
+    // /reset_thresholds - Reset to defaults
+    this.bot.onText(/\/reset_thresholds/, async (msg) => {
+      await this.handleResetThresholds(msg.chat.id);
     });
 
     // ============ SYSTEM COMMANDS ============
@@ -610,6 +623,95 @@ export class TradingCommands {
       } else {
         await this.bot.sendMessage(chatId, 'Failed to get history');
       }
+    }
+  }
+
+  private async handleThresholds(chatId: number): Promise<void> {
+    try {
+      const current = thresholdOptimizer.getCurrentThresholds();
+      const defaults = thresholdOptimizer.getDefaultThresholds();
+
+      let message = '*SIGNAL THRESHOLDS*\n\n';
+      message += '*Current Values:*\n';
+      message += `• Min Momentum Score: ${current.minMomentumScore}`;
+      if (current.minMomentumScore !== defaults.minMomentumScore) {
+        message += ` (default: ${defaults.minMomentumScore})`;
+      }
+      message += '\n';
+
+      message += `• Min OnChain Score: ${current.minOnChainScore}`;
+      if (current.minOnChainScore !== defaults.minOnChainScore) {
+        message += ` (default: ${defaults.minOnChainScore})`;
+      }
+      message += '\n';
+
+      message += `• Min Safety Score: ${current.minSafetyScore}`;
+      if (current.minSafetyScore !== defaults.minSafetyScore) {
+        message += ` (default: ${defaults.minSafetyScore})`;
+      }
+      message += '\n';
+
+      message += `• Max Bundle Risk: ${current.maxBundleRiskScore}`;
+      if (current.maxBundleRiskScore !== defaults.maxBundleRiskScore) {
+        message += ` (default: ${defaults.maxBundleRiskScore})`;
+      }
+      message += '\n';
+
+      message += `• Min Liquidity: $${current.minLiquidity.toLocaleString()}`;
+      if (current.minLiquidity !== defaults.minLiquidity) {
+        message += ` (default: $${defaults.minLiquidity.toLocaleString()})`;
+      }
+      message += '\n';
+
+      message += `• Max Top10 Concentration: ${current.maxTop10Concentration}%`;
+      if (current.maxTop10Concentration !== defaults.maxTop10Concentration) {
+        message += ` (default: ${defaults.maxTop10Concentration}%)`;
+      }
+      message += '\n\n';
+
+      // Check if any threshold differs from default
+      const hasChanges =
+        current.minMomentumScore !== defaults.minMomentumScore ||
+        current.minOnChainScore !== defaults.minOnChainScore ||
+        current.minSafetyScore !== defaults.minSafetyScore ||
+        current.maxBundleRiskScore !== defaults.maxBundleRiskScore ||
+        current.minLiquidity !== defaults.minLiquidity ||
+        current.maxTop10Concentration !== defaults.maxTop10Concentration;
+
+      if (hasChanges) {
+        message += '⚠️ Thresholds have been modified from defaults.\n';
+        message += 'Use `/reset_thresholds` to restore defaults.\n\n';
+      } else {
+        message += '✅ Using default thresholds.\n\n';
+      }
+
+      message += '_Higher min scores = stricter filtering (fewer signals)_\n';
+      message += '_Lower max scores = stricter filtering (fewer signals)_';
+
+      await this.bot.sendMessage(chatId, message, { parse_mode: 'Markdown' });
+    } catch (error) {
+      logger.error({ error }, 'Failed to get thresholds');
+      await this.bot.sendMessage(chatId, 'Failed to get thresholds');
+    }
+  }
+
+  private async handleResetThresholds(chatId: number): Promise<void> {
+    try {
+      const defaults = await thresholdOptimizer.resetThresholds();
+
+      let message = '✅ *THRESHOLDS RESET TO DEFAULTS*\n\n';
+      message += `• Min Momentum Score: ${defaults.minMomentumScore}\n`;
+      message += `• Min OnChain Score: ${defaults.minOnChainScore}\n`;
+      message += `• Min Safety Score: ${defaults.minSafetyScore}\n`;
+      message += `• Max Bundle Risk: ${defaults.maxBundleRiskScore}\n`;
+      message += `• Min Liquidity: $${defaults.minLiquidity.toLocaleString()}\n`;
+      message += `• Max Top10 Concentration: ${defaults.maxTop10Concentration}%\n\n`;
+      message += '_Signal filtering restored to original settings._';
+
+      await this.bot.sendMessage(chatId, message, { parse_mode: 'Markdown' });
+    } catch (error) {
+      logger.error({ error }, 'Failed to reset thresholds');
+      await this.bot.sendMessage(chatId, 'Failed to reset thresholds');
     }
   }
 

@@ -256,54 +256,64 @@ export class OnChainScoringEngine {
   private calculateMarketStructureScore(metrics: TokenMetrics): number {
     let score = 0;
 
-    // Liquidity score (0-35 points)
+    // Performance data analysis:
+    // - Holder Count: +0.37 correlation (STRONGEST - increase weight)
+    // - Liquidity: -0.23 correlation (higher liquidity = worse, adjust scoring)
+    // - Top10 Concentration: +0.01 (neutral)
+
+    // Liquidity score (0-20 points) - REDUCED from 35
+    // Higher liquidity correlates with lower returns, so we want "adequate" not "high"
     const liquidityRatio = metrics.liquidityPool / Math.max(1, metrics.marketCap);
-    if (liquidityRatio >= THRESHOLDS.IDEAL_LIQUIDITY_RATIO) {
-      score += 35;
-    } else if (liquidityRatio >= 0.05) {
-      score += 25;
-    } else if (liquidityRatio >= 0.03) {
+    if (metrics.liquidityPool >= THRESHOLDS.MIN_LIQUIDITY_USD && metrics.liquidityPool <= 30000) {
+      // Sweet spot: adequate liquidity but not over-established
+      score += 20;
+    } else if (metrics.liquidityPool > 30000 && metrics.liquidityPool <= 100000) {
+      // Higher liquidity - still ok but less upside potential
       score += 15;
-    } else {
-      score += Math.round(liquidityRatio / 0.03 * 15);
+    } else if (metrics.liquidityPool > 100000) {
+      // Very high liquidity - established token, limited upside
+      score += 10;
+    } else if (metrics.liquidityPool >= THRESHOLDS.MIN_LIQUIDITY_USD * 0.5) {
+      // Below minimum but not critically low
+      score += 8;
     }
+    // Below 50% of minimum liquidity = 0 points (risky)
 
-    // Absolute liquidity bonus
-    if (metrics.liquidityPool >= 50000) {
-      score += 5;
-    } else if (metrics.liquidityPool < THRESHOLDS.MIN_LIQUIDITY_USD) {
-      score -= 10;
-    }
-
-    // Holder distribution (0-30 points)
-    if (metrics.top10Concentration <= THRESHOLDS.IDEAL_TOP10_CONCENTRATION) {
-      score += 30;
-    } else if (metrics.top10Concentration <= 35) {
-      score += 22;
-    } else if (metrics.top10Concentration <= THRESHOLDS.MAX_TOP10_CONCENTRATION) {
-      score += 12;
-    } else {
-      // Too concentrated
-      score -= 10;
-    }
-
-    // Holder count (0-25 points)
+    // Holder count (0-40 points) - INCREASED from 25 (strongest positive correlation)
     if (metrics.holderCount >= THRESHOLDS.IDEAL_HOLDER_COUNT) {
-      score += 25;
+      score += 40;
     } else if (metrics.holderCount >= 300) {
+      score += 35;
+    } else if (metrics.holderCount >= 150) {
+      score += 28;
+    } else if (metrics.holderCount >= 75) {
       score += 20;
     } else if (metrics.holderCount >= THRESHOLDS.MIN_HOLDER_COUNT) {
       score += 12;
-    } else if (metrics.holderCount >= 50) {
+    } else if (metrics.holderCount >= 10) {
       score += 5;
     }
 
-    // Volume/MCap ratio (0-10 points)
+    // Holder distribution (0-25 points)
+    if (metrics.top10Concentration <= THRESHOLDS.IDEAL_TOP10_CONCENTRATION) {
+      score += 25;
+    } else if (metrics.top10Concentration <= 50) {
+      score += 20;
+    } else if (metrics.top10Concentration <= THRESHOLDS.MAX_TOP10_CONCENTRATION) {
+      score += 12;
+    } else {
+      // Too concentrated - risky
+      score += 0;
+    }
+
+    // Volume/MCap ratio (0-15 points)
     if (metrics.volumeMarketCapRatio >= 0.5) {
-      score += 10;
+      score += 15;
     } else if (metrics.volumeMarketCapRatio >= 0.2) {
-      score += 7;
+      score += 12;
     } else if (metrics.volumeMarketCapRatio >= 0.1) {
+      score += 8;
+    } else if (metrics.volumeMarketCapRatio >= 0.05) {
       score += 4;
     }
 
@@ -311,37 +321,46 @@ export class OnChainScoringEngine {
   }
 
   private calculateTimingScore(ageMinutes: number): number {
-    // Optimal entry window: 30 minutes to 4 hours
-    // Peak window: 45 minutes to 2 hours
+    // Performance data shows older tokens perform better (+0.16 correlation)
+    // Revised to favor tokens with proven track record over brand new ones
 
     if (ageMinutes < THRESHOLDS.TOO_EARLY_MIN) {
-      // Too early - high risk, low score
-      return Math.round(20 + (ageMinutes / THRESHOLDS.TOO_EARLY_MIN) * 30);
+      // Too early - very high risk, unproven
+      return Math.round(30 + (ageMinutes / THRESHOLDS.TOO_EARLY_MIN) * 20);
     }
 
     if (ageMinutes < THRESHOLDS.OPTIMAL_AGE_MIN) {
-      // Getting better but still early
-      return Math.round(50 + ((ageMinutes - THRESHOLDS.TOO_EARLY_MIN) / (THRESHOLDS.OPTIMAL_AGE_MIN - THRESHOLDS.TOO_EARLY_MIN)) * 30);
+      // Early but gaining traction (15-30 min)
+      return Math.round(50 + ((ageMinutes - THRESHOLDS.TOO_EARLY_MIN) / (THRESHOLDS.OPTIMAL_AGE_MIN - THRESHOLDS.TOO_EARLY_MIN)) * 20);
     }
 
-    if (ageMinutes <= 120) {
-      // Peak window: 30 min to 2 hours
-      return 100;
+    if (ageMinutes < 120) {
+      // 30 min - 2 hours: proving itself
+      return 75;
     }
 
     if (ageMinutes <= THRESHOLDS.OPTIMAL_AGE_MAX) {
-      // Good window: 2 to 4 hours
-      return Math.round(90 - ((ageMinutes - 120) / (THRESHOLDS.OPTIMAL_AGE_MAX - 120)) * 20);
+      // 2-4 hours: strong track record
+      return 90;
+    }
+
+    if (ageMinutes <= 720) {
+      // 4-12 hours: proven survivor, optimal window
+      return 100;
     }
 
     if (ageMinutes <= THRESHOLDS.TOO_LATE_HOURS * 60) {
-      // Getting late: 4 to 24 hours
-      const hoursOver = (ageMinutes - THRESHOLDS.OPTIMAL_AGE_MAX) / 60;
-      return Math.round(70 - hoursOver * 3);
+      // 12-24 hours: established, still good
+      return 85;
     }
 
-    // Too late - already established or dead
-    return 20;
+    if (ageMinutes <= 4320) {
+      // 1-3 days: mature token, lower upside but reliable
+      return 70;
+    }
+
+    // > 3 days - established, steady
+    return 60;
   }
 
   // ============ ASSESSMENT HELPERS ============

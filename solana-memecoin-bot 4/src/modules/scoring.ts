@@ -373,29 +373,30 @@ export class ScoringEngine {
 
   /**
    * Calculate on-chain health score (0-100)
+   * Performance data: Holder Count has +0.37 correlation (strongest factor)
    */
   private calculateOnChainHealth(
     metrics: TokenMetrics,
     volumeAuthenticity: VolumeAuthenticityScore
   ): number {
     let score = 0;
-    
-    // Volume/MCap ratio (0-25 points)
-    const volumeRatioScore = Math.min(25, (metrics.volumeMarketCapRatio / THRESHOLDS.IDEAL_VOLUME_MCAP_RATIO) * 25);
+
+    // Volume/MCap ratio (0-20 points) - reduced from 25
+    const volumeRatioScore = Math.min(20, (metrics.volumeMarketCapRatio / THRESHOLDS.IDEAL_VOLUME_MCAP_RATIO) * 20);
     score += volumeRatioScore;
-    
-    // Holder count (0-25 points)
-    const holderScore = Math.min(25, (metrics.holderCount / THRESHOLDS.IDEAL_HOLDER_COUNT) * 25);
+
+    // Holder count (0-40 points) - INCREASED from 25 (strongest correlation)
+    const holderScore = Math.min(40, (metrics.holderCount / THRESHOLDS.IDEAL_HOLDER_COUNT) * 40);
     score += holderScore;
-    
-    // Top 10 concentration (0-25 points) - lower is better
-    const concentrationScore = Math.max(0, 25 - ((metrics.top10Concentration - THRESHOLDS.IDEAL_TOP10_CONCENTRATION) / 2));
+
+    // Top 10 concentration (0-20 points) - lower is better
+    const concentrationScore = Math.max(0, 20 - ((metrics.top10Concentration - THRESHOLDS.IDEAL_TOP10_CONCENTRATION) / 2));
     score += concentrationScore;
-    
-    // Volume authenticity (0-25 points)
-    const authenticityScore = volumeAuthenticity.score * 0.25;
+
+    // Volume authenticity (0-20 points) - reduced from 25
+    const authenticityScore = volumeAuthenticity.score * 0.20;
     score += authenticityScore;
-    
+
     return Math.min(100, Math.max(0, score));
   }
   
@@ -553,22 +554,28 @@ export class ScoringEngine {
   
   /**
    * Calculate timing bonus (0-20)
-   * Earlier in lifecycle = higher bonus
+   * Performance data shows older tokens do better (+0.16 correlation)
+   * Balanced approach: reward tokens with proven track record
    */
   private calculateTimingBonus(metrics: TokenMetrics): number {
     const ageMinutes = metrics.tokenAge;
-    
-    if (ageMinutes < 60) {
-      return 20; // < 1 hour
+
+    // Very new tokens: minimal bonus (high risk, unproven)
+    if (ageMinutes < 30) {
+      return 5; // < 30 min - too new, risky
+    } else if (ageMinutes < 60) {
+      return 8; // 30-60 min - still early
     } else if (ageMinutes < 180) {
-      return 15; // 1-3 hours
-    } else if (ageMinutes < 360) {
-      return 10; // 3-6 hours
+      return 12; // 1-3 hours - starting to prove itself
     } else if (ageMinutes < 720) {
-      return 5; // 6-12 hours
+      return 18; // 3-12 hours - good track record
+    } else if (ageMinutes < 1440) {
+      return 20; // 12-24 hours - proven survivor
+    } else if (ageMinutes < 4320) {
+      return 15; // 1-3 days - established
     }
-    
-    return 0; // > 12 hours
+
+    return 10; // > 3 days - mature token
   }
   
   /**

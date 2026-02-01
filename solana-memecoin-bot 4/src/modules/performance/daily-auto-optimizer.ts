@@ -43,7 +43,7 @@ const SYDNEY_TIMEZONE = 'Australia/Sydney';
 const CRON_SCHEDULE = '0 6 * * *'; // 6:00 AM daily
 
 // Optimization constraints
-const MIN_DATA_POINTS = 10;
+const MIN_DATA_POINTS = 50;    // Need 50+ completed signals before adjusting (was 10)
 const MAX_CHANGE_PERCENT = 5;  // Max 5% change per optimization cycle (was 15%)
 const TARGET_WIN_RATE = 30;
 const ADJUSTMENT_FACTOR = 0.1; // Apply 10% of factor diff (was 0.3)

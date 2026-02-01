@@ -41,15 +41,15 @@ const envSchema = z.object({
   MIN_SCORE_BUY_SIGNAL: z.coerce.number().default(70),
   MIN_SCORE_WATCH_SIGNAL: z.coerce.number().default(55),
   
-  // Screening (with defaults)
-  MIN_MARKET_CAP: z.coerce.number().default(50000),
-  MAX_MARKET_CAP: z.coerce.number().default(10000000),
-  MIN_24H_VOLUME: z.coerce.number().default(20000),
-  MIN_VOLUME_MCAP_RATIO: z.coerce.number().default(0.15),
-  MIN_HOLDER_COUNT: z.coerce.number().default(100),
-  MAX_TOP10_CONCENTRATION: z.coerce.number().default(50),
-  MIN_LIQUIDITY_POOL: z.coerce.number().default(10000),
-  MIN_TOKEN_AGE_MINUTES: z.coerce.number().default(30),
+  // Screening (with defaults) - Optimized for current market conditions
+  MIN_MARKET_CAP: z.coerce.number().default(25000),      // Lowered from 50k to catch earlier entries
+  MAX_MARKET_CAP: z.coerce.number().default(15000000),   // Raised from 10M to include more established tokens
+  MIN_24H_VOLUME: z.coerce.number().default(8000),       // Lowered from 20k - new tokens rarely hit 20k immediately
+  MIN_VOLUME_MCAP_RATIO: z.coerce.number().default(0.10), // Lowered from 0.15 for flexibility
+  MIN_HOLDER_COUNT: z.coerce.number().default(50),       // Lowered from 100 - new tokens need time to grow
+  MAX_TOP10_CONCENTRATION: z.coerce.number().default(60), // Raised from 50% - early tokens are concentrated
+  MIN_LIQUIDITY_POOL: z.coerce.number().default(5000),   // Lowered from 10k for early entries
+  MIN_TOKEN_AGE_MINUTES: z.coerce.number().default(15),  // Lowered from 30 mins for faster signals
 });
 
 function loadConfig(): AppConfig {

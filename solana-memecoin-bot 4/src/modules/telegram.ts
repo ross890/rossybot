@@ -1005,6 +1005,168 @@ export class TelegramAlertBot {
   }
 
   /**
+   * Send on-chain momentum signal (pure metrics, no KOL)
+   */
+  async sendOnChainSignal(signal: any): Promise<boolean> {
+    if (!this.bot) {
+      logger.warn('Bot not initialized - cannot send on-chain signal');
+      return false;
+    }
+
+    try {
+      const message = this.formatOnChainSignal(signal);
+
+      await this.bot.sendMessage(this.chatId, message, {
+        parse_mode: 'Markdown',
+        disable_web_page_preview: true,
+        reply_markup: createTelegramInlineKeyboard(signal.tokenAddress),
+      });
+
+      // Log the signal
+      await Database.logSignal(
+        signal.tokenAddress,
+        SignalType.DISCOVERY,
+        signal.onChainScore.total,
+        'ONCHAIN_MOMENTUM'
+      );
+
+      logger.info({
+        tokenAddress: signal.tokenAddress,
+        ticker: signal.tokenTicker,
+        momentumScore: signal.momentumScore.total,
+        onChainScore: signal.onChainScore.total,
+      }, 'On-chain momentum signal sent');
+
+      return true;
+    } catch (error) {
+      logger.error({ error, signal: signal.tokenAddress }, 'Failed to send on-chain signal');
+      return false;
+    }
+  }
+
+  /**
+   * Format on-chain momentum signal message
+   */
+  private formatOnChainSignal(signal: any): string {
+    const { tokenMetrics, momentumScore, bundleAnalysis, onChainScore, safetyResult, positionRationale } = signal;
+
+    let msg = `⚡ *ROSSYBOT MOMENTUM SIGNAL*\n\n`;
+
+    // Token info
+    msg += `*Token:* \`$${signal.tokenTicker}\` (${this.truncateAddress(signal.tokenAddress)})\n`;
+    msg += `*Name:* ${signal.tokenName}\n`;
+    msg += `*Chain:* Solana\n\n`;
+
+    // Momentum metrics (the key differentiator)
+    const buyRatioEmoji = momentumScore.metrics.buySellRatio >= 2.0 ? '🔥' :
+                          momentumScore.metrics.buySellRatio >= 1.5 ? '✨' : '📈';
+    msg += `📊 *MOMENTUM ANALYSIS*\n`;
+    msg += `├─ Total Score: *${momentumScore.total}/100*\n`;
+    msg += `├─ ${buyRatioEmoji} Buy/Sell Ratio: *${momentumScore.metrics.buySellRatio.toFixed(2)}x*\n`;
+    msg += `├─ Buy Pressure: ${momentumScore.components.buyPressure}/25\n`;
+    msg += `├─ Volume Velocity: ${momentumScore.components.volumeVelocity}/25\n`;
+    msg += `├─ Trade Quality: ${momentumScore.components.tradeQuality}/25\n`;
+    msg += `├─ Holder Growth: ${momentumScore.components.holderGrowth}/25\n`;
+    msg += `├─ Unique Buyers (5m): ${momentumScore.metrics.uniqueBuyers5m}\n`;
+    msg += `└─ Net Buy Pressure: $${this.formatNumber(momentumScore.metrics.netBuyPressure)}\n\n`;
+
+    // On-chain score
+    const gradeEmoji = onChainScore.total >= 70 ? '🔥' : onChainScore.total >= 55 ? '✨' : '📊';
+    msg += `🎯 *ON-CHAIN SCORE*\n`;
+    msg += `├─ Total: ${gradeEmoji} *${onChainScore.total}/100*\n`;
+    msg += `├─ Recommendation: *${onChainScore.recommendation}*\n`;
+    msg += `├─ Momentum: ${onChainScore.components.momentum}/30\n`;
+    msg += `├─ Safety: ${onChainScore.components.safety}/25\n`;
+    msg += `├─ Bundle Safety: ${onChainScore.components.bundleSafety}/20\n`;
+    msg += `├─ Market Structure: ${onChainScore.components.marketStructure}/15\n`;
+    msg += `└─ Timing: ${onChainScore.components.timing}/10\n\n`;
+
+    // Bullish/bearish signals
+    const bullish = onChainScore.signals.filter((s: any) => s.type === 'bullish');
+    const bearish = onChainScore.signals.filter((s: any) => s.type === 'bearish');
+
+    if (bullish.length > 0) {
+      msg += `✅ *BULLISH SIGNALS:*\n`;
+      for (const s of bullish.slice(0, 4)) {
+        msg += `• ${s.reason}\n`;
+      }
+      msg += `\n`;
+    }
+
+    if (bearish.length > 0) {
+      msg += `⚠️ *BEARISH SIGNALS:*\n`;
+      for (const s of bearish.slice(0, 3)) {
+        msg += `• ${s.reason}\n`;
+      }
+      msg += `\n`;
+    }
+
+    // Market data
+    msg += `📈 *MARKET DATA*\n`;
+    msg += `├─ Price: $${this.formatPrice(tokenMetrics.price)}\n`;
+    msg += `├─ Market Cap: $${this.formatNumber(tokenMetrics.marketCap)}\n`;
+    msg += `├─ 24h Volume: $${this.formatNumber(tokenMetrics.volume24h)}\n`;
+    msg += `├─ Holders: ${tokenMetrics.holderCount}\n`;
+    msg += `├─ Top 10: ${tokenMetrics.top10Concentration.toFixed(1)}%\n`;
+    msg += `├─ Liquidity: $${this.formatNumber(tokenMetrics.liquidityPool)}\n`;
+    msg += `└─ Token Age: ${tokenMetrics.tokenAge} min\n\n`;
+
+    // Bundle/Insider analysis
+    const bundleEmoji = bundleAnalysis.riskLevel === 'LOW' ? '🟢' :
+                        bundleAnalysis.riskLevel === 'MEDIUM' ? '🟡' : '🔴';
+    msg += `🔍 *BUNDLE ANALYSIS*\n`;
+    msg += `├─ Risk Level: ${bundleEmoji} ${bundleAnalysis.riskLevel}\n`;
+    msg += `├─ Risk Score: ${bundleAnalysis.riskScore}/100\n`;
+    if (bundleAnalysis.flags.length > 0) {
+      msg += `└─ Flags: ${bundleAnalysis.flags.slice(0, 3).join(', ')}\n\n`;
+    } else {
+      msg += `└─ Flags: None ✅\n\n`;
+    }
+
+    // Safety check
+    msg += `🛡️ *SAFETY*\n`;
+    msg += `├─ Score: ${safetyResult.safetyScore}/100\n`;
+    msg += `├─ Mint: ${safetyResult.mintAuthorityEnabled ? '⚠️ ENABLED' : '✅ Revoked'}\n`;
+    msg += `└─ Freeze: ${safetyResult.freezeAuthorityEnabled ? '⚠️ ENABLED' : '✅ Revoked'}\n\n`;
+
+    // Position sizing
+    msg += `💰 *POSITION SIZING*\n`;
+    msg += `├─ Suggested: *${signal.suggestedPositionSize} SOL*\n`;
+    msg += `├─ Signal Strength: ${signal.score.confidence}\n`;
+    if (positionRationale && positionRationale.length > 0) {
+      for (const r of positionRationale.slice(0, 4)) {
+        msg += `├─ ${r}\n`;
+      }
+    }
+    msg += `└─ Stop Loss: 40% | Take Profit: 100%\n\n`;
+
+    // KOL Status
+    msg += `👛 *KOL STATUS*\n`;
+    msg += `└─ ⏳ No KOL activity detected\n`;
+    msg += `   _Signal based on on-chain momentum_\n\n`;
+
+    // Risk warnings
+    if (signal.riskWarnings && signal.riskWarnings.length > 0) {
+      msg += `⚠️ *RISK WARNINGS:*\n`;
+      for (const warning of signal.riskWarnings.slice(0, 5)) {
+        msg += `• ${warning}\n`;
+      }
+      msg += `\n`;
+    }
+
+    // Trade links
+    msg += `*Quick Trade:*\n`;
+    msg += formatLinksAsMarkdown(signal.tokenAddress);
+    msg += `\n\n`;
+
+    // Footer
+    msg += `⏱️ _Signal: ${signal.generatedAt.toISOString().replace('T', ' ').slice(0, 19)} UTC_\n`;
+    msg += `⚡ _MOMENTUM SIGNAL: Based on on-chain metrics. DYOR._`;
+
+    return msg;
+  }
+
+  /**
    * Send KOL validation signal (KOL bought a previously discovered token)
    */
   async sendKolValidationSignal(signal: BuySignal, previousDiscovery: DiscoverySignal): Promise<boolean> {

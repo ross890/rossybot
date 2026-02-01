@@ -748,9 +748,9 @@ export class ScoringEngine {
       return { meets: false, reason: 'Both mint and freeze authorities still enabled' };
     }
 
-    // Additional: Check for honeypot indicators
-    if (scamFilter.contractAnalysis.isHoneypot) {
-      return { meets: false, reason: 'Honeypot risk detected' };
+    // Check for known scam template
+    if (scamFilter.contractAnalysis.isKnownScamTemplate) {
+      return { meets: false, reason: 'Known scam template detected' };
     }
 
     return { meets: true };

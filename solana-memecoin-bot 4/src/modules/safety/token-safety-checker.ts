@@ -530,6 +530,9 @@ export class TokenSafetyChecker {
 
 export const tokenSafetyChecker = new TokenSafetyChecker();
 
+// Re-export the type for external use
+export type { TokenSafetyResult } from '../../types/index.js';
+
 export default {
   TokenSafetyChecker,
   tokenSafetyChecker,

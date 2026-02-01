@@ -533,14 +533,19 @@ export class TelegramAlertBot {
     const wallet = kolActivity.wallet;
     const tx = kolActivity.transaction;
     const perf = kolActivity.performance;
-    
-    // Build the message
-    let msg = `🎯 *ROSSYBOT BUY SIGNAL*\n\n`;
-    
+
+    // Build the message with clear visual hierarchy
+    let msg = `\n`;
+    msg += `═══════════════════════════════\n`;
+    msg += `🎯  *KOL CONFIRMED BUY SIGNAL*\n`;
+    msg += `    Score: *${score.compositeScore}/100* · ${score.confidence}\n`;
+    msg += `═══════════════════════════════\n\n`;
+
     // Token info
     msg += `*Token:* \`$${signal.tokenTicker}\` (${this.truncateAddress(signal.tokenAddress)})\n`;
     msg += `*Chain:* Solana\n\n`;
-    
+
+    msg += `───────────────────────────────\n`;
     // Signal metrics
     msg += `📊 *SIGNAL METRICS*\n`;
     msg += `├─ Composite Score: *${score.compositeScore}/100*\n`;
@@ -548,6 +553,7 @@ export class TelegramAlertBot {
     msg += `├─ Risk Level: *${score.riskLevel}/5*\n`;
     msg += `└─ Signal Type: KOL\\_CONFIRMED\n\n`;
     
+    msg += `───────────────────────────────\n`;
     // KOL Wallet Activity (MANDATORY)
     msg += `👛 *KOL WALLET ACTIVITY*\n`;
     msg += `├─ Status: ✅ CONFIRMED BUY DETECTED\n`;
@@ -560,7 +566,7 @@ export class TelegramAlertBot {
     msg += `├─ TX: \`${this.truncateAddress(tx.signature)}\`\n`;
     msg += `├─ Time: ${tx.timestamp.toISOString().replace('T', ' ').slice(0, 19)} UTC\n`;
     msg += `└─ KOL Accuracy: ${(perf.winRate * 100).toFixed(0)}% (${perf.totalTrades} trades)\n\n`;
-    
+
     // Side wallet attribution (if applicable)
     if (wallet.walletType === WalletType.SIDE) {
       msg += `🔗 *WALLET ATTRIBUTION*\n`;
@@ -568,7 +574,8 @@ export class TelegramAlertBot {
       msg += `├─ Link Method: ${wallet.linkMethod}\n`;
       msg += `└─ Notes: ${wallet.notes || 'N/A'}\n\n`;
     }
-    
+
+    msg += `───────────────────────────────\n`;
     // On-chain data
     msg += `📈 *ON-CHAIN DATA*\n`;
     msg += `├─ Price: $${this.formatPrice(tokenMetrics.price)}\n`;
@@ -578,14 +585,16 @@ export class TelegramAlertBot {
     msg += `├─ Top 10: ${tokenMetrics.top10Concentration.toFixed(1)}%\n`;
     msg += `├─ Vol Auth: ${signal.volumeAuthenticity.score}/100\n`;
     msg += `└─ Bundle Risk: ${scamFilter.bundleAnalysis.riskLevel === 'LOW' ? '🟢 CLEAR' : scamFilter.bundleAnalysis.riskLevel === 'MEDIUM' ? '🟡 FLAGGED' : '🔴 HIGH'}\n\n`;
-    
+
+    msg += `───────────────────────────────\n`;
     // Social signals
     msg += `🐦 *SOCIAL SIGNALS*\n`;
     msg += `├─ X Mentions (1h): ${socialMetrics.mentionVelocity1h}\n`;
     msg += `├─ Other KOLs: ${socialMetrics.kolMentions.length > 0 ? socialMetrics.kolMentions.slice(0, 3).join(', ') : 'None'}\n`;
     msg += `├─ Sentiment: ${socialMetrics.sentimentPolarity > 0.3 ? '🟢 POSITIVE' : socialMetrics.sentimentPolarity > -0.3 ? '🟡 NEUTRAL' : '🔴 NEGATIVE'}\n`;
     msg += `└─ Narrative: ${socialMetrics.narrativeFit || 'N/A'}\n\n`;
-    
+
+    msg += `───────────────────────────────\n`;
     // Suggested action
     msg += `⚡ *SUGGESTED ACTION*\n`;
     msg += `├─ Entry Zone: $${this.formatPrice(signal.entryZone.low)} - $${this.formatPrice(signal.entryZone.high)}\n`;
@@ -600,14 +609,16 @@ export class TelegramAlertBot {
       msg += `⚠️ *FLAGS:* ${score.flags.join(', ')}\n\n`;
     }
     
+    msg += `───────────────────────────────\n`;
     // Trade Links (Feature 6)
     msg += `*Quick Trade:*\n`;
     msg += formatLinksAsMarkdown(signal.tokenAddress);
     msg += `\n\n`;
-    
+
     // Footer
     msg += `⏱️ _Signal: ${signal.generatedAt.toISOString().replace('T', ' ').slice(0, 19)} UTC_\n`;
-    msg += `⚠️ _DYOR. Not financial advice. KOL buys ≠ guaranteed profits._`;
+    msg += `⚠️ _DYOR. Not financial advice. KOL buys ≠ guaranteed profits._\n`;
+    msg += `═══════════════════════════════\n`;
 
     return msg;
   }
@@ -1252,13 +1263,24 @@ export class TelegramAlertBot {
   private formatDiscoverySignal(signal: DiscoverySignal): string {
     const { score, tokenMetrics, moonshotAssessment, safetyResult, scamFilter } = signal;
 
-    let msg = `🔍 *ROSSYBOT DISCOVERY SIGNAL*\n\n`;
+    // Moonshot grade emoji for header
+    const gradeEmoji = moonshotAssessment.grade === 'A' ? '🔥' :
+                       moonshotAssessment.grade === 'B' ? '✨' :
+                       moonshotAssessment.grade === 'C' ? '📈' : '📊';
+
+    // Build the message with clear visual hierarchy
+    let msg = `\n`;
+    msg += `═══════════════════════════════\n`;
+    msg += `🔍  *METRICS DISCOVERY SIGNAL*\n`;
+    msg += `    Score: *${score.compositeScore}/100* · Grade: ${gradeEmoji}${moonshotAssessment.grade}\n`;
+    msg += `═══════════════════════════════\n\n`;
 
     // Token info
     msg += `*Token:* \`$${signal.tokenTicker}\` (${this.truncateAddress(signal.tokenAddress)})\n`;
     msg += `*Name:* ${signal.tokenName}\n`;
     msg += `*Chain:* Solana\n\n`;
 
+    msg += `───────────────────────────────\n`;
     // Discovery metrics
     msg += `📊 *DISCOVERY METRICS*\n`;
     msg += `├─ Score: *${score.compositeScore}/100*\n`;
@@ -1266,10 +1288,8 @@ export class TelegramAlertBot {
     msg += `├─ Risk Level: *${score.riskLevel}/5*\n`;
     msg += `└─ Signal Type: METRICS\\_DISCOVERY\n\n`;
 
+    msg += `───────────────────────────────\n`;
     // Moonshot assessment
-    const gradeEmoji = moonshotAssessment.grade === 'A' ? '🔥' :
-                       moonshotAssessment.grade === 'B' ? '✨' :
-                       moonshotAssessment.grade === 'C' ? '📈' : '📊';
     msg += `🚀 *MOONSHOT ASSESSMENT*\n`;
     msg += `├─ Grade: ${gradeEmoji} *${moonshotAssessment.grade}* (${moonshotAssessment.score}/100)\n`;
     msg += `├─ Potential: *${moonshotAssessment.estimatedPotential}*\n`;
@@ -1283,6 +1303,7 @@ export class TelegramAlertBot {
       msg += `✅ *Matched Patterns:* ${moonshotAssessment.matchedPatterns.slice(0, 5).join(', ')}\n\n`;
     }
 
+    msg += `───────────────────────────────\n`;
     // On-chain data
     msg += `📈 *ON-CHAIN DATA*\n`;
     msg += `├─ Price: $${this.formatPrice(tokenMetrics.price)}\n`;
@@ -1295,6 +1316,7 @@ export class TelegramAlertBot {
     msg += `├─ Token Age: ${tokenMetrics.tokenAge} min\n`;
     msg += `└─ LP Locked: ${tokenMetrics.lpLocked ? '✅ Yes' : '❌ No'}\n\n`;
 
+    msg += `───────────────────────────────\n`;
     // Safety check
     msg += `🛡️ *SAFETY CHECK*\n`;
     msg += `├─ Safety Score: ${safetyResult.safetyScore}/100\n`;
@@ -1303,11 +1325,13 @@ export class TelegramAlertBot {
     msg += `├─ Insider Risk: ${safetyResult.insiderAnalysis.insiderRiskScore}/100\n`;
     msg += `└─ Bundle Risk: ${scamFilter.bundleAnalysis.riskLevel === 'LOW' ? '🟢 CLEAR' : scamFilter.bundleAnalysis.riskLevel === 'MEDIUM' ? '🟡 FLAGGED' : '🔴 HIGH'}\n\n`;
 
+    msg += `───────────────────────────────\n`;
     // KOL Status
     msg += `👛 *KOL STATUS*\n`;
     msg += `└─ ⏳ NO KOL ACTIVITY YET\n`;
     msg += `   _Waiting for KOL validation..._\n\n`;
 
+    msg += `───────────────────────────────\n`;
     // Suggested action
     msg += `⚡ *SUGGESTED ACTION*\n`;
     msg += `├─ Position Size: ${signal.suggestedPositionSize}% (reduced for discovery)\n`;
@@ -1327,6 +1351,7 @@ export class TelegramAlertBot {
       msg += `🏷️ *FLAGS:* ${score.flags.join(', ')}\n\n`;
     }
 
+    msg += `───────────────────────────────\n`;
     // Trade Links
     msg += `*Quick Trade:*\n`;
     msg += formatLinksAsMarkdown(signal.tokenAddress);
@@ -1334,7 +1359,8 @@ export class TelegramAlertBot {
 
     // Footer
     msg += `⏱️ _Discovery: ${signal.generatedAt.toISOString().replace('T', ' ').slice(0, 19)} UTC_\n`;
-    msg += `⚠️ _DISCOVERY SIGNAL: No KOL validation. Higher risk. DYOR._`;
+    msg += `⚠️ _DISCOVERY SIGNAL: No KOL validation. Higher risk. DYOR._\n`;
+    msg += `═══════════════════════════════\n`;
 
     return msg;
   }
@@ -1481,8 +1507,12 @@ export class TelegramAlertBot {
     const ageMinutes = Math.round(tokenMetrics.tokenAge || 0);
     const ageDisplay = ageMinutes < 60 ? `${ageMinutes}m` : `${Math.round(ageMinutes / 60)}h`;
 
-    // Build the message
-    let msg = `${scoreEmoji} *MOMENTUM SIGNAL*\n\n`;
+    // Build the message with clear visual hierarchy
+    let msg = `\n`;
+    msg += `═══════════════════════════════\n`;
+    msg += `${scoreEmoji}  *ON-CHAIN MOMENTUM SIGNAL*\n`;
+    msg += `    ${recEmoji} ${recommendation} · Score: *${totalScore}/100*\n`;
+    msg += `═══════════════════════════════\n\n`;
 
     // Token header with key info
     msg += `*$${ticker}* — ${tokenName}\n`;
@@ -1491,10 +1521,7 @@ export class TelegramAlertBot {
     // Narrative - one sentence about what this token is
     msg += `_${this.generateNarrative(tokenName, ticker)}_\n\n`;
 
-    // Key metrics in a clean grid
-    msg += `━━━━━━━━━━━━━━━━━━━━\n`;
-    msg += `${recEmoji} *${recommendation}* · Score: *${totalScore}/100*\n`;
-    msg += `━━━━━━━━━━━━━━━━━━━━\n\n`;
+    msg += `───────────────────────────────\n`;
 
     // Market snapshot
     msg += `💰 *Market*\n`;
@@ -1504,6 +1531,7 @@ export class TelegramAlertBot {
     // Holders & concentration
     msg += `👥 *Holders:* ${tokenMetrics.holderCount || 0} · Top 10: ${(tokenMetrics.top10Concentration || 0).toFixed(0)}%\n\n`;
 
+    msg += `───────────────────────────────\n`;
     // Safety & Risk in one line
     msg += `${safetyEmoji} *Safety:* ${safetyScore}/100`;
     msg += ` · ${riskEmoji} *Bundle:* ${riskLevel}\n`;
@@ -1520,6 +1548,7 @@ export class TelegramAlertBot {
       msg += `📈 *Momentum:* ${buySellRatio.toFixed(1)}x buy/sell · ${uniqueBuyers} buyers (5m)\n\n`;
     }
 
+    msg += `───────────────────────────────\n`;
     // Position sizing - simplified
     msg += `💵 *Size:* ${signal.suggestedPositionSize || 0.1} SOL\n`;
     msg += `🎯 TP: +100% · SL: -40%\n\n`;
@@ -1543,13 +1572,15 @@ export class TelegramAlertBot {
       msg += shortWarnings.join(' · ') + '\n\n';
     }
 
+    msg += `───────────────────────────────\n`;
     // Trade links
     msg += `🔗 [Jupiter](https://jup.ag/swap/SOL-${signal.tokenAddress || ''})`;
     msg += ` · [DexS](https://dexscreener.com/solana/${signal.tokenAddress || ''})`;
     msg += ` · [Birdeye](https://birdeye.so/token/${signal.tokenAddress || ''})\n\n`;
 
     // Footer
-    msg += `_No KOL validation · DYOR_`;
+    msg += `_No KOL validation · DYOR_\n`;
+    msg += `═══════════════════════════════\n`;
 
     return msg;
   }
@@ -1612,7 +1643,15 @@ export class TelegramAlertBot {
       (Date.now() - previousDiscovery.discoveredAt.getTime()) / (1000 * 60)
     );
 
-    let msg = `🎯 *KOL VALIDATION SIGNAL*\n\n`;
+    // Score boost
+    const scoreBoost = signal.score.compositeScore - previousDiscovery.score.compositeScore;
+
+    // Build the message with clear visual hierarchy
+    let msg = `\n`;
+    msg += `═══════════════════════════════\n`;
+    msg += `✅  *KOL VALIDATION SIGNAL*\n`;
+    msg += `    Boosted: *${score.compositeScore}/100* (+${scoreBoost})\n`;
+    msg += `═══════════════════════════════\n\n`;
 
     // Discovery recap
     msg += `📍 *PREVIOUSLY DISCOVERED*\n`;
@@ -1625,8 +1664,8 @@ export class TelegramAlertBot {
     msg += `*Token:* \`$${signal.tokenTicker}\` (${this.truncateAddress(signal.tokenAddress)})\n`;
     msg += `*Chain:* Solana\n\n`;
 
-    // Score boost
-    const scoreBoost = signal.score.compositeScore - previousDiscovery.score.compositeScore;
+    msg += `───────────────────────────────\n`;
+    // Signal metrics
     msg += `📊 *SIGNAL METRICS (BOOSTED)*\n`;
     msg += `├─ Original Score: ${previousDiscovery.score.compositeScore}/100\n`;
     msg += `├─ *Boosted Score: ${score.compositeScore}/100* (+${scoreBoost})\n`;
@@ -1634,6 +1673,7 @@ export class TelegramAlertBot {
     msg += `├─ Risk Level: *${score.riskLevel}/5*\n`;
     msg += `└─ Signal Type: KOL\\_VALIDATION\n\n`;
 
+    msg += `───────────────────────────────\n`;
     // KOL Wallet Activity
     msg += `👛 *KOL WALLET ACTIVITY*\n`;
     msg += `├─ Status: ✅ KOL BUY CONFIRMED\n`;
@@ -1647,6 +1687,7 @@ export class TelegramAlertBot {
     msg += `├─ Time: ${tx.timestamp.toISOString().replace('T', ' ').slice(0, 19)} UTC\n`;
     msg += `└─ KOL Accuracy: ${(perf.winRate * 100).toFixed(0)}% (${perf.totalTrades} trades)\n\n`;
 
+    msg += `───────────────────────────────\n`;
     // On-chain data
     msg += `📈 *ON-CHAIN DATA*\n`;
     msg += `├─ Price: $${this.formatPrice(tokenMetrics.price)}\n`;
@@ -1656,6 +1697,7 @@ export class TelegramAlertBot {
     msg += `├─ Top 10: ${tokenMetrics.top10Concentration.toFixed(1)}%\n`;
     msg += `└─ Bundle Risk: ${scamFilter.bundleAnalysis.riskLevel === 'LOW' ? '🟢 CLEAR' : scamFilter.bundleAnalysis.riskLevel === 'MEDIUM' ? '🟡 FLAGGED' : '🔴 HIGH'}\n\n`;
 
+    msg += `───────────────────────────────\n`;
     // Suggested action
     msg += `⚡ *SUGGESTED ACTION*\n`;
     msg += `├─ Entry Zone: $${this.formatPrice(signal.entryZone.low)} - $${this.formatPrice(signal.entryZone.high)}\n`;
@@ -1670,6 +1712,7 @@ export class TelegramAlertBot {
       msg += `⚠️ *FLAGS:* ${score.flags.join(', ')}\n\n`;
     }
 
+    msg += `───────────────────────────────\n`;
     // Trade Links
     msg += `*Quick Trade:*\n`;
     msg += formatLinksAsMarkdown(signal.tokenAddress);
@@ -1677,7 +1720,8 @@ export class TelegramAlertBot {
 
     // Footer
     msg += `⏱️ _Signal: ${signal.generatedAt.toISOString().replace('T', ' ').slice(0, 19)} UTC_\n`;
-    msg += `✅ _KOL validated our discovery! Higher confidence entry._`;
+    msg += `✅ _KOL validated our discovery! Higher confidence entry._\n`;
+    msg += `═══════════════════════════════\n`;
 
     return msg;
   }

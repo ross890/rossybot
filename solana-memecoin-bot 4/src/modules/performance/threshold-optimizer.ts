@@ -101,6 +101,26 @@ export class ThresholdOptimizer {
   }
 
   /**
+   * Reset thresholds to default values
+   */
+  async resetThresholds(): Promise<ThresholdSet> {
+    this.currentThresholds = { ...DEFAULT_THRESHOLDS };
+
+    // Save reset thresholds to database (so they persist)
+    await this.saveThresholds(this.currentThresholds);
+
+    logger.info({ thresholds: this.currentThresholds }, 'Thresholds reset to defaults');
+    return { ...this.currentThresholds };
+  }
+
+  /**
+   * Get default thresholds (for comparison)
+   */
+  getDefaultThresholds(): ThresholdSet {
+    return { ...DEFAULT_THRESHOLDS };
+  }
+
+  /**
    * Run optimization analysis and get recommendations
    */
   async optimize(autoApply: boolean = false): Promise<OptimizationResult> {

@@ -10,6 +10,19 @@ import { momentumAnalyzer, MomentumMetrics, MomentumScore } from './momentum-ana
 import { bundleDetector, BundleAnalysisResult } from './bundle-detector.js';
 import { tokenSafetyChecker, TokenSafetyResult } from './safety/token-safety-checker.js';
 
+// AUDIT FIX: Dynamic threshold integration
+// The threshold optimizer learns optimal values - we should use them
+interface DynamicThresholds {
+  minSafetyScore: number;
+  maxBundleRiskScore: number;
+}
+
+// Default thresholds if optimizer not available
+const DEFAULT_DYNAMIC_THRESHOLDS: DynamicThresholds = {
+  minSafetyScore: 40,
+  maxBundleRiskScore: 60,
+};
+
 // ============ TYPES ============
 
 export interface OnChainScore {
@@ -103,6 +116,28 @@ const THRESHOLDS = {
 // ============ ON-CHAIN SCORING ENGINE CLASS ============
 
 export class OnChainScoringEngine {
+  // AUDIT FIX: Store dynamic thresholds from optimizer
+  private dynamicThresholds: DynamicThresholds = { ...DEFAULT_DYNAMIC_THRESHOLDS };
+
+  /**
+   * Update thresholds from the optimizer
+   * Called by signal generator when thresholds change
+   */
+  setDynamicThresholds(thresholds: Partial<DynamicThresholds>): void {
+    this.dynamicThresholds = {
+      ...this.dynamicThresholds,
+      ...thresholds,
+    };
+    logger.debug({ thresholds: this.dynamicThresholds }, 'On-chain scoring thresholds updated');
+  }
+
+  /**
+   * Get current thresholds
+   */
+  getDynamicThresholds(): DynamicThresholds {
+    return { ...this.dynamicThresholds };
+  }
+
   /**
    * Calculate comprehensive on-chain score for a token
    */
@@ -321,46 +356,58 @@ export class OnChainScoringEngine {
   }
 
   private calculateTimingScore(ageMinutes: number): number {
-    // Performance data shows older tokens perform better (+0.16 correlation)
-    // Revised to favor tokens with proven track record over brand new ones
+    // AUDIT FIX: Rebalanced to not overly penalize early tokens
+    // The system is designed for early detection (MIN_TOKEN_AGE: 5 min)
+    // Old scoring gave 30-50 to early tokens, making them unlikely to signal
+    // New scoring: early tokens start at 60, optimal window expanded
+
+    if (ageMinutes < 5) {
+      // < 5 min: Very early, still risky but not disqualifying
+      return 55 + (ageMinutes * 2); // 55-65
+    }
 
     if (ageMinutes < THRESHOLDS.TOO_EARLY_MIN) {
-      // Too early - very high risk, unproven
-      return Math.round(30 + (ageMinutes / THRESHOLDS.TOO_EARLY_MIN) * 20);
+      // 5-15 min: Early but tradeable
+      return 65 + ((ageMinutes - 5) / 10) * 10; // 65-75
     }
 
     if (ageMinutes < THRESHOLDS.OPTIMAL_AGE_MIN) {
-      // Early but gaining traction (15-30 min)
-      return Math.round(50 + ((ageMinutes - THRESHOLDS.TOO_EARLY_MIN) / (THRESHOLDS.OPTIMAL_AGE_MIN - THRESHOLDS.TOO_EARLY_MIN)) * 20);
+      // 15-30 min: Good early entry window
+      return 75 + ((ageMinutes - THRESHOLDS.TOO_EARLY_MIN) / 15) * 10; // 75-85
     }
 
-    if (ageMinutes < 120) {
-      // 30 min - 2 hours: proving itself
-      return 75;
-    }
-
-    if (ageMinutes <= THRESHOLDS.OPTIMAL_AGE_MAX) {
-      // 2-4 hours: strong track record
-      return 90;
-    }
-
-    if (ageMinutes <= 720) {
-      // 4-12 hours: proven survivor, optimal window
-      return 100;
-    }
-
-    if (ageMinutes <= THRESHOLDS.TOO_LATE_HOURS * 60) {
-      // 12-24 hours: established, still good
+    if (ageMinutes < 60) {
+      // 30-60 min: Sweet spot for early entries
       return 85;
     }
 
-    if (ageMinutes <= 4320) {
-      // 1-3 days: mature token, lower upside but reliable
-      return 70;
+    if (ageMinutes < 120) {
+      // 1-2 hours: Strong timing
+      return 90;
     }
 
-    // > 3 days - established, steady
-    return 60;
+    if (ageMinutes <= THRESHOLDS.OPTIMAL_AGE_MAX) {
+      // 2-4 hours: Proven with good upside
+      return 95;
+    }
+
+    if (ageMinutes <= 720) {
+      // 4-12 hours: Established, good for follow-up
+      return 85;
+    }
+
+    if (ageMinutes <= THRESHOLDS.TOO_LATE_HOURS * 60) {
+      // 12-24 hours: Mature token
+      return 75;
+    }
+
+    if (ageMinutes <= 4320) {
+      // 1-3 days: Established
+      return 65;
+    }
+
+    // > 3 days - Older token, limited upside
+    return 55;
   }
 
   // ============ ASSESSMENT HELPERS ============
@@ -378,29 +425,41 @@ export class OnChainScoringEngine {
     components: OnChainScore['components'],
     bundleAnalysis: BundleAnalysisResult
   ): OnChainScore['riskLevel'] {
+    // AUDIT FIX: Now uses dynamic thresholds from the optimizer
+    const maxBundleRisk = this.dynamicThresholds.maxBundleRiskScore;
+    const minSafety = this.dynamicThresholds.minSafetyScore;
+
     // Bundle risk can override everything
     if (bundleAnalysis.riskLevel === 'CRITICAL') {
       return 'CRITICAL';
     }
 
-    // Safety issues - only CRITICAL if very low (honeypot likely)
-    // Lowered threshold from 40 to 25 - most new tokens have low safety scores
-    if (components.safety < 25) {
+    // AUDIT FIX: Use dynamic bundle risk threshold
+    // Critical if significantly above threshold
+    if (bundleAnalysis.riskScore >= maxBundleRisk + 20) {
+      return 'CRITICAL';
+    }
+    // High if above threshold
+    if (bundleAnalysis.riskScore >= maxBundleRisk) {
+      return 'HIGH';
+    }
+
+    // Safety issues - CRITICAL if very low (honeypot likely)
+    if (components.safety < minSafety - 15) {
       return 'CRITICAL';
     }
 
-    // Use score-based risk assessment with relaxed thresholds
-    if (score >= THRESHOLDS.RISK_VERY_LOW && components.bundleSafety >= 60) {
+    // Use score-based risk assessment with dynamic thresholds
+    const bundleSafetyThreshold = 100 - maxBundleRisk; // Convert risk to safety
+    if (score >= THRESHOLDS.RISK_VERY_LOW &&
+        components.bundleSafety >= bundleSafetyThreshold &&
+        components.safety >= minSafety + 10) {
       return 'VERY_LOW';
     }
-    if (score >= THRESHOLDS.RISK_LOW) {
+    if (score >= THRESHOLDS.RISK_LOW && components.bundleSafety >= bundleSafetyThreshold - 20) {
       return 'LOW';
     }
     if (score >= THRESHOLDS.RISK_MEDIUM) {
-      return 'MEDIUM';
-    }
-    // Only return HIGH if score is below 35, otherwise MEDIUM
-    if (score >= 30) {
       return 'MEDIUM';
     }
     if (score >= THRESHOLDS.RISK_HIGH) {

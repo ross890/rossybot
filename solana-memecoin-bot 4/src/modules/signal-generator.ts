@@ -136,6 +136,20 @@ export class SignalGenerator {
       logger.warn({ error }, 'Failed to initialize Win Predictor - predictions will use defaults');
     }
 
+    // AUDIT FIX: Sync optimizer thresholds to on-chain scoring engine
+    // This ensures learned thresholds are used for risk assessment
+    try {
+      await thresholdOptimizer.loadThresholds();
+      const thresholds = thresholdOptimizer.getCurrentThresholds();
+      onChainScoringEngine.setDynamicThresholds({
+        minSafetyScore: thresholds.minSafetyScore,
+        maxBundleRiskScore: thresholds.maxBundleRiskScore,
+      });
+      logger.info({ thresholds }, 'Threshold optimizer synced with on-chain scoring engine');
+    } catch (error) {
+      logger.warn({ error }, 'Failed to sync optimizer thresholds');
+    }
+
     logger.info('Signal generator initialized with all feature modules');
   }
   
@@ -560,14 +574,21 @@ export class SignalGenerator {
       return SignalGenerator.EVAL_RESULTS.DISCOVERY_FAILED;
     }
 
-    // Adjust position size based on prediction
+    // AUDIT FIX: Cap position size multipliers to prevent extremes
+    // Previously: positionSize * mlMultiplier could result in 0.25x (0.5*0.5) or 2.25x (1.5*1.5)
+    // Now: Cap the combined multiplier to reasonable range
+    const rawMultipliedAmount = positionSize.solAmount * prediction.positionSizeMultiplier;
+    const minPosition = positionSize.solAmount * 0.5;  // Never less than 50% of calculated
+    const maxPosition = positionSize.solAmount * 1.5;  // Never more than 150% of calculated
+    const cappedAmount = Math.min(maxPosition, Math.max(minPosition, rawMultipliedAmount));
+
     const adjustedPositionSize = {
       ...positionSize,
-      solAmount: positionSize.solAmount * prediction.positionSizeMultiplier,
+      solAmount: cappedAmount,
       rationale: [
         ...positionSize.rationale,
         `ML Win Probability: ${prediction.winProbability}% (${prediction.confidence})`,
-        `Position multiplier: ${prediction.positionSizeMultiplier}x`,
+        `Position multiplier: ${prediction.positionSizeMultiplier}x (capped to 0.5-1.5x range)`,
       ],
     };
 
@@ -673,16 +694,32 @@ export class SignalGenerator {
     }
     riskWarnings.push(...onChainScore.warnings);
 
+    // AUDIT FIX: Calculate social momentum score from collected metrics
+    // Previously set to 0, wasting valuable social signals that were already collected
+    let socialMomentumScore = 0;
+    if (socialMetrics) {
+      // Mention velocity contributes up to 30 points
+      socialMomentumScore += Math.min(30, (socialMetrics.mentionVelocity1h / 50) * 30);
+      // Engagement quality contributes up to 20 points
+      socialMomentumScore += socialMetrics.engagementQuality * 20;
+      // KOL Twitter mentions are valuable
+      if (socialMetrics.kolMentionDetected) {
+        socialMomentumScore += 15 + Math.min(15, socialMetrics.kolMentions.length * 5);
+      }
+      // Positive sentiment contributes up to 10 points
+      socialMomentumScore += Math.max(0, socialMetrics.sentimentPolarity * 10);
+    }
+
     // Build score object for compatibility
     const score = {
       compositeScore: onChainScore.total,
       factors: {
         onChainHealth: onChainScore.components.marketStructure,
-        socialMomentum: 0, // Not used in on-chain signals
+        socialMomentum: Math.round(socialMomentumScore), // AUDIT FIX: Now integrated
         kolConvictionMain: 0,
         kolConvictionSide: 0,
         scamRiskInverse: onChainScore.components.safety,
-        narrativeBonus: 0,
+        narrativeBonus: socialMetrics?.narrativeFit ? 15 : 0,
         timingBonus: onChainScore.components.timing,
       },
       confidence: signalQuality.signalStrength === 'STRONG' ? 'HIGH' :
@@ -691,6 +728,7 @@ export class SignalGenerator {
       flags: [
         'ONCHAIN_SIGNAL',
         `MOMENTUM_${onChainScore.components.momentum}`,
+        ...(socialMomentumScore > 30 ? ['SOCIAL_TRACTION'] : []),
         ...onChainScore.bullishSignals.slice(0, 3),
       ],
       riskLevel: onChainScore.riskLevel === 'HIGH' || onChainScore.riskLevel === 'CRITICAL' ? 'HIGH' :
@@ -847,6 +885,21 @@ export class SignalGenerator {
       logger.error({ error, tokenAddress }, 'Auto-trade processing failed');
     }
 
+    // AUDIT FIX: Get momentum data for KOL signals so ML can learn from it
+    // Previously recorded as 0, so ML couldn't learn buySellRatio/uniqueBuyers patterns for KOL path
+    let kolMomentumData: { buySellRatio: number; uniqueBuyers: number } = { buySellRatio: 0, uniqueBuyers: 0 };
+    try {
+      const momentumData = await momentumAnalyzer.analyze(tokenAddress);
+      if (momentumData) {
+        kolMomentumData = {
+          buySellRatio: momentumData.buySellRatio,
+          uniqueBuyers: momentumData.uniqueBuyers5m,
+        };
+      }
+    } catch (error) {
+      logger.debug({ error, tokenAddress }, 'Could not fetch momentum for KOL signal tracking');
+    }
+
     // Record signal for performance tracking with additional metrics
     try {
       await signalPerformanceTracker.recordSignal(
@@ -859,7 +912,7 @@ export class SignalGenerator {
         score.factors.onChainHealth || 50,
         score.compositeScore,
         safetyResult?.safetyScore || 50,
-        0, // Bundle risk from scam filter
+        scamResult.bundleAnalysis?.bundledSupplyPercent || 0, // AUDIT FIX: Include bundle data
         score.compositeScore >= 80 ? 'STRONG' : score.compositeScore >= 65 ? 'MODERATE' : 'WEAK',
         // Additional metrics for deeper analysis
         {
@@ -867,8 +920,8 @@ export class SignalGenerator {
           tokenAge: metrics.tokenAge,
           holderCount: metrics.holderCount,
           top10Concentration: metrics.top10Concentration,
-          buySellRatio: 0, // KOL signals don't have momentum data here
-          uniqueBuyers: 0,
+          buySellRatio: kolMomentumData.buySellRatio, // AUDIT FIX: Now tracked for KOL signals
+          uniqueBuyers: kolMomentumData.uniqueBuyers,
         }
       );
     } catch (error) {

@@ -69,7 +69,9 @@ const DEFAULT_THRESHOLDS: ThresholdSet = {
 
 // Target performance
 const TARGET_WIN_RATE = 30;  // 30% win rate target
-const MIN_DATA_POINTS = 50;  // Minimum completed signals for optimization (was 10)
+// AUDIT FIX: Aligned with win-predictor MIN_SAMPLES_FOR_PREDICTION (15)
+// Previously required 50 which meant very long wait for optimization
+const MIN_DATA_POINTS = 20;  // Minimum completed signals for optimization
 const MAX_THRESHOLD_CHANGE = 15;  // Max change per optimization cycle (%)
 
 // ============ THRESHOLD OPTIMIZER CLASS ============

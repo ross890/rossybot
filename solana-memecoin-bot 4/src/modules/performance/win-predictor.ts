@@ -81,8 +81,10 @@ interface PatternCondition {
 
 // ============ CONSTANTS ============
 
-const MIN_SAMPLES_FOR_PREDICTION = 30;
-const MIN_PATTERN_SAMPLES = 10;
+// AUDIT FIX: Lowered initial thresholds to start generating predictions earlier
+// Previously required 30 samples which meant ~2-3 weeks of no ML benefit
+const MIN_SAMPLES_FOR_PREDICTION = 15;  // Reduced from 30 - start learning sooner
+const MIN_PATTERN_SAMPLES = 5;           // Reduced from 10 - discover patterns with less data
 const FEATURE_NORMALIZATION: { [key: string]: { min: number; max: number } } = {
   momentumScore: { min: 0, max: 100 },
   onChainScore: { min: 0, max: 100 },

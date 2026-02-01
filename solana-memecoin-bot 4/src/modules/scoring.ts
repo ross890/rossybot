@@ -483,40 +483,51 @@ export class ScoringEngine {
   /**
    * Calculate inverse scam risk score (0-100)
    * Higher score = lower scam risk = better
+   *
+   * AUDIT FIX: Removed authority penalties here as they are already applied
+   * in token-safety-checker.ts. Double-penalization was causing good early
+   * tokens to be filtered out unnecessarily.
    */
   private calculateScamRiskInverse(scamFilter: ScamFilterOutput): number {
     if (scamFilter.result === ScamFilterResult.REJECT) {
       return 0;
     }
-    
+
     let score = 100;
-    
-    // Deduct for each flag
-    const flagPenalty = 10;
+
+    // Deduct for each flag (reduced from 10 to 7)
+    const flagPenalty = 7;
     score -= scamFilter.flags.length * flagPenalty;
-    
-    // Additional deductions for specific risks
-    if (!scamFilter.contractAnalysis.mintAuthorityRevoked) {
-      score -= 30;
-    }
-    if (!scamFilter.contractAnalysis.freezeAuthorityRevoked) {
-      score -= 30;
-    }
+
+    // AUDIT FIX: Authority penalties REMOVED - already applied in safety checker
+    // This was causing triple-penalization:
+    // 1. token-safety-checker.ts: -15 mint, -12 freeze
+    // 2. Here (old): -30 each = -60 total
+    // 3. onchain-scoring uses safety score which includes penalties
+    // New: Only penalize for truly dangerous patterns, not authorities
+
+    // Rug history is serious - keep penalty
     if (scamFilter.bundleAnalysis.hasRugHistory) {
       score -= 25;
     }
-    if (scamFilter.bundleAnalysis.bundledSupplyPercent > 15) {
+
+    // High bundled supply indicates insider risk (reduced from 15)
+    if (scamFilter.bundleAnalysis.bundledSupplyPercent > 25) {
       score -= 15;
+    } else if (scamFilter.bundleAnalysis.bundledSupplyPercent > 15) {
+      score -= 8;
     }
+
+    // Dev transferred to CEX is a dump signal
     if (scamFilter.devBehaviour?.transferredToCex) {
-      score -= 40;
+      score -= 35;
     }
-    
+
     // Flag result gets base penalty
     if (scamFilter.result === ScamFilterResult.FLAG) {
-      score = Math.min(score, 70);
+      score = Math.min(score, 75);
     }
-    
+
     return Math.max(0, score);
   }
   
@@ -554,28 +565,33 @@ export class ScoringEngine {
   
   /**
    * Calculate timing bonus (0-20)
-   * Performance data shows older tokens do better (+0.16 correlation)
-   * Balanced approach: reward tokens with proven track record
+   *
+   * AUDIT FIX: Rebalanced to not overly penalize early tokens
+   * Previous scoring gave only 5 points to < 30min tokens, making them unlikely to signal
+   * The system is designed for early detection (MIN_TOKEN_AGE: 5 min in config)
+   * New scoring provides more balanced bonuses across the age range
    */
   private calculateTimingBonus(metrics: TokenMetrics): number {
     const ageMinutes = metrics.tokenAge;
 
-    // Very new tokens: minimal bonus (high risk, unproven)
-    if (ageMinutes < 30) {
-      return 5; // < 30 min - too new, risky
+    // Very new tokens: reasonable bonus (early but tradeable)
+    if (ageMinutes < 15) {
+      return 8; // < 15 min - very early, some caution
+    } else if (ageMinutes < 30) {
+      return 12; // 15-30 min - early entry window
     } else if (ageMinutes < 60) {
-      return 8; // 30-60 min - still early
+      return 15; // 30-60 min - sweet spot for early entries
     } else if (ageMinutes < 180) {
-      return 12; // 1-3 hours - starting to prove itself
+      return 18; // 1-3 hours - proven with upside
     } else if (ageMinutes < 720) {
-      return 18; // 3-12 hours - good track record
+      return 20; // 3-12 hours - established, still good
     } else if (ageMinutes < 1440) {
-      return 20; // 12-24 hours - proven survivor
+      return 17; // 12-24 hours - mature
     } else if (ageMinutes < 4320) {
-      return 15; // 1-3 days - established
+      return 14; // 1-3 days - established, less upside
     }
 
-    return 10; // > 3 days - mature token
+    return 10; // > 3 days - older token
   }
   
   /**
@@ -701,6 +717,11 @@ export class ScoringEngine {
 
   /**
    * Check if a token score meets discovery signal requirements (no KOL needed)
+   *
+   * AUDIT FIX: Removed strict authority requirements that were blocking most new tokens
+   * Most new memecoins have authorities enabled initially (for liquidity adds, burns, etc.)
+   * The safety checker already penalizes for authorities and blocks if BOTH are enabled
+   * Requiring revocation here was causing double-filtering and missing good opportunities
    */
   meetsDiscoveryRequirements(
     score: TokenScore,
@@ -719,12 +740,17 @@ export class ScoringEngine {
       return { meets: false, reason: 'Failed safety checks' };
     }
 
-    // Contract must have revoked authorities
-    if (!scamFilter.contractAnalysis.mintAuthorityRevoked) {
-      return { meets: false, reason: 'Mint authority not revoked' };
+    // AUDIT FIX: Only require that NOT BOTH authorities are enabled
+    // This aligns with token-safety-checker.ts:159-164 logic
+    // Single authority enabled is acceptable for new tokens
+    if (!scamFilter.contractAnalysis.mintAuthorityRevoked &&
+        !scamFilter.contractAnalysis.freezeAuthorityRevoked) {
+      return { meets: false, reason: 'Both mint and freeze authorities still enabled' };
     }
-    if (!scamFilter.contractAnalysis.freezeAuthorityRevoked) {
-      return { meets: false, reason: 'Freeze authority not revoked' };
+
+    // Additional: Check for honeypot indicators
+    if (scamFilter.contractAnalysis.isHoneypot) {
+      return { meets: false, reason: 'Honeypot risk detected' };
     }
 
     return { meets: true };

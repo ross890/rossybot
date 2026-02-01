@@ -57,14 +57,14 @@ export interface FactorAnalysis {
 
 // ============ CONSTANTS ============
 
-// Default thresholds (loosened for data collection)
+// Default thresholds (moderate - balanced for data collection + quality)
 const DEFAULT_THRESHOLDS: ThresholdSet = {
-  minMomentumScore: 15,      // Was 35 - lowered to allow more signals
-  minOnChainScore: 20,       // Was 45 - lowered to allow more signals
-  minSafetyScore: 30,        // Was 50 - lowered to allow more signals
-  maxBundleRiskScore: 70,    // Was 50 - raised to allow more signals
-  minLiquidity: 5000,        // Was 15000 - lowered to allow more signals
-  maxTop10Concentration: 70, // Was 50 - raised to allow more signals
+  minMomentumScore: 25,      // Moderate - still allows good signal volume
+  minOnChainScore: 30,       // Moderate - filters obvious low quality
+  minSafetyScore: 40,        // Moderate - some safety filtering
+  maxBundleRiskScore: 60,    // Moderate - allows some risk
+  minLiquidity: 8000,        // Moderate - filters very low liquidity
+  maxTop10Concentration: 60, // Moderate - some concentration allowed
 };
 
 // Target performance

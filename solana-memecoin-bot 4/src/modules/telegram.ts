@@ -377,15 +377,15 @@ export class TelegramAlertBot {
       }
     });
 
-    // /performance command - Show signal performance stats
+    // /performance command - Show compact signal performance report for analysis
     this.bot.onText(/\/performance/, async (msg) => {
       const chatId = msg.chat.id;
 
       try {
-        await this.bot!.sendMessage(chatId, 'Generating performance report...', { parse_mode: 'Markdown' });
+        await this.bot!.sendMessage(chatId, 'Generating compact performance report...', { parse_mode: 'Markdown' });
 
-        const report = await dailyReportGenerator.generateReport(168); // Last 7 days
-        await this.bot!.sendMessage(chatId, report.telegramMessage, { parse_mode: 'Markdown' });
+        const compactReport = await this.generateCompactPerformanceReport();
+        await this.bot!.sendMessage(chatId, compactReport, { parse_mode: 'Markdown' });
       } catch (error) {
         const errorMessage = error instanceof Error ? error.message : 'Unknown error';
         logger.error({ error, chatId }, 'Failed to get performance report');
@@ -610,6 +610,224 @@ export class TelegramAlertBot {
     msg += `⚠️ _DYOR. Not financial advice. KOL buys ≠ guaranteed profits._`;
 
     return msg;
+  }
+
+  /**
+   * Generate compact performance report for analysis
+   * Format optimized for pasting to Claude for threshold tuning
+   * Enhanced with granular score bands and full signal details
+   */
+  private async generateCompactPerformanceReport(): Promise<string> {
+    const stats = await signalPerformanceTracker.getPerformanceStats(168); // Last 7 days
+    const correlations = await signalPerformanceTracker.getFactorCorrelations();
+    const thresholds = thresholdOptimizer.getCurrentThresholds();
+
+    // Get raw signal data for deeper analysis
+    const rawData = await this.getRawSignalData();
+
+    let msg = '```\n';
+    msg += 'PERFORMANCE REPORT (DETAILED)\n';
+    msg += '==============================\n\n';
+
+    // Summary
+    msg += `SUMMARY (7d)\n`;
+    msg += `Total: ${stats.totalSignals} | Done: ${stats.completedSignals} | Pending: ${stats.pendingSignals}\n`;
+    msg += `Wins: ${stats.wins} | Losses: ${stats.losses} | WinRate: ${stats.winRate.toFixed(1)}%\n`;
+    msg += `AvgRet: ${stats.avgReturn.toFixed(1)}% | AvgWin: ${stats.avgWinReturn.toFixed(1)}% | AvgLoss: ${stats.avgLossReturn.toFixed(1)}%\n`;
+    msg += `Best: ${stats.bestReturn.toFixed(1)}% | Worst: ${stats.worstReturn.toFixed(1)}%\n\n`;
+
+    // Granular Score Bands (every 10 points)
+    msg += `SCORE BANDS (granular)\n`;
+    const scoreBands = this.calculateScoreBands(rawData);
+    for (const band of scoreBands) {
+      if (band.count > 0) {
+        msg += `${band.range}: n=${band.count} w=${band.wins} l=${band.losses} wr=${band.winRate.toFixed(0)}% avgRet=${band.avgReturn.toFixed(1)}%\n`;
+      }
+    }
+    msg += '\n';
+
+    // By Strength
+    msg += `BY STRENGTH\n`;
+    for (const [strength, data] of Object.entries(stats.byStrength)) {
+      if (data.count > 0) {
+        msg += `${strength}: n=${data.count} wr=${data.winRate.toFixed(0)}% ret=${data.avgReturn.toFixed(1)}%\n`;
+      }
+    }
+    msg += '\n';
+
+    // Time-to-Outcome Analysis
+    msg += `TIME-TO-OUTCOME\n`;
+    const timeAnalysis = this.analyzeTimeToOutcome(rawData);
+    msg += `Avg time to WIN: ${timeAnalysis.avgWinTime.toFixed(1)}h\n`;
+    msg += `Avg time to LOSS: ${timeAnalysis.avgLossTime.toFixed(1)}h\n`;
+    msg += `Wins via TP hit: ${timeAnalysis.winsViaTP} | Wins via timeout: ${timeAnalysis.winsViaTimeout}\n`;
+    msg += `Losses via SL: ${timeAnalysis.lossesViaSL} | Losses via timeout: ${timeAnalysis.lossesViaTimeout}\n\n`;
+
+    // Factor Correlations (most predictive factors)
+    msg += `FACTOR CORRELATIONS\n`;
+    if (correlations.length > 0) {
+      for (const c of correlations.slice(0, 10)) {
+        const sign = c.correlation >= 0 ? '+' : '';
+        msg += `${c.factor}: w=${c.winningAvg.toFixed(1)} l=${c.losingAvg.toFixed(1)} corr=${sign}${c.correlation.toFixed(3)}\n`;
+      }
+    } else {
+      msg += 'No data yet (need wins AND losses)\n';
+    }
+    msg += '\n';
+
+    // Current Thresholds
+    msg += `CURRENT THRESHOLDS\n`;
+    msg += `MinMomentum: ${thresholds.minMomentumScore} | MinOnChain: ${thresholds.minOnChainScore}\n`;
+    msg += `MinSafety: ${thresholds.minSafetyScore} | MaxBundleRisk: ${thresholds.maxBundleRiskScore}\n`;
+    msg += `MinLiquidity: $${thresholds.minLiquidity} | MaxTop10: ${thresholds.maxTop10Concentration}%\n\n`;
+
+    // Detailed signal list
+    msg += `SIGNAL DETAILS (all ${rawData.length} signals)\n`;
+    msg += `Format: [outcome] ticker | oc=onchain mom=momentum saf=safety bnd=bundle | liq=$k age=min hold=# top10=% | r1h r4h final | max/min\n`;
+    msg += `---\n`;
+
+    if (rawData.length > 0) {
+      for (const s of rawData) {
+        const outcome = s.final_outcome === 'PENDING' ? 'P' : s.final_outcome === 'WIN' ? 'W' : 'L';
+        const ticker = (s.token_ticker || '???').padEnd(6).slice(0, 6);
+
+        // Scores
+        const oc = parseFloat(s.onchain_score || 0).toFixed(0).padStart(2);
+        const mom = parseFloat(s.momentum_score || 0).toFixed(0).padStart(2);
+        const saf = parseFloat(s.safety_score || 0).toFixed(0).padStart(2);
+        const bnd = parseFloat(s.bundle_risk_score || 0).toFixed(0).padStart(2);
+
+        // Entry metrics
+        const liq = (parseFloat(s.entry_liquidity || 0) / 1000).toFixed(0).padStart(3);
+        const age = parseFloat(s.entry_token_age || 0).toFixed(0).padStart(3);
+        const hold = (s.entry_holder_count || 0).toString().padStart(4);
+        const top10 = parseFloat(s.entry_top10_concentration || 0).toFixed(0).padStart(2);
+
+        // Returns
+        const r1h = s.return_1h !== null ? `${parseFloat(s.return_1h).toFixed(0)}%`.padStart(5) : '  -  ';
+        const r4h = s.return_4h !== null ? `${parseFloat(s.return_4h).toFixed(0)}%`.padStart(5) : '  -  ';
+        const final = s.final_return !== null ? `${parseFloat(s.final_return).toFixed(0)}%`.padStart(5) : '  -  ';
+        const maxRet = s.max_return !== null ? `+${parseFloat(s.max_return).toFixed(0)}` : '-';
+        const minRet = s.min_return !== null ? `${parseFloat(s.min_return).toFixed(0)}` : '-';
+
+        msg += `[${outcome}] ${ticker} | oc=${oc} mom=${mom} saf=${saf} bnd=${bnd} | liq=${liq}k age=${age}m hold=${hold} t10=${top10}% | ${r1h} ${r4h} ${final} | ${maxRet}/${minRet}\n`;
+      }
+    } else {
+      msg += 'No signals recorded yet\n';
+    }
+
+    msg += '```';
+
+    return msg;
+  }
+
+  /**
+   * Calculate statistics for granular score bands
+   */
+  private calculateScoreBands(rawData: any[]): {
+    range: string;
+    count: number;
+    wins: number;
+    losses: number;
+    winRate: number;
+    avgReturn: number;
+  }[] {
+    const bands = [
+      { min: 75, max: 100, range: '75-100' },
+      { min: 65, max: 74, range: '65-74 ' },
+      { min: 55, max: 64, range: '55-64 ' },
+      { min: 45, max: 54, range: '45-54 ' },
+      { min: 35, max: 44, range: '35-44 ' },
+      { min: 0, max: 34, range: '0-34  ' },
+    ];
+
+    return bands.map(band => {
+      const inBand = rawData.filter(s => {
+        const score = parseFloat(s.onchain_score || 0);
+        return score >= band.min && score <= band.max;
+      });
+
+      const completed = inBand.filter(s => s.final_outcome !== 'PENDING');
+      const wins = completed.filter(s => s.final_outcome === 'WIN');
+      const losses = completed.filter(s => s.final_outcome === 'LOSS');
+      const returns = completed.map(s => parseFloat(s.final_return || 0));
+
+      return {
+        range: band.range,
+        count: inBand.length,
+        wins: wins.length,
+        losses: losses.length,
+        winRate: completed.length > 0 ? (wins.length / completed.length) * 100 : 0,
+        avgReturn: returns.length > 0 ? returns.reduce((a, b) => a + b, 0) / returns.length : 0,
+      };
+    });
+  }
+
+  /**
+   * Analyze time-to-outcome patterns
+   */
+  private analyzeTimeToOutcome(rawData: any[]): {
+    avgWinTime: number;
+    avgLossTime: number;
+    winsViaTP: number;
+    winsViaTimeout: number;
+    lossesViaSL: number;
+    lossesViaTimeout: number;
+  } {
+    const wins = rawData.filter(s => s.final_outcome === 'WIN');
+    const losses = rawData.filter(s => s.final_outcome === 'LOSS');
+
+    // Calculate average time to outcome (approximated from last_update - signal_time)
+    const calcAvgTime = (signals: any[]): number => {
+      if (signals.length === 0) return 0;
+      const times = signals.map(s => {
+        const signalTime = new Date(s.signal_time).getTime();
+        const lastUpdate = new Date(s.last_update || s.signal_time).getTime();
+        return (lastUpdate - signalTime) / (1000 * 60 * 60); // hours
+      });
+      return times.reduce((a, b) => a + b, 0) / times.length;
+    };
+
+    // Count TP hits vs timeout wins
+    const winsViaTP = wins.filter(s => s.hit_take_profit === true).length;
+    const winsViaTimeout = wins.length - winsViaTP;
+
+    // Count SL hits vs timeout losses
+    const lossesViaSL = losses.filter(s => s.hit_stop_loss === true).length;
+    const lossesViaTimeout = losses.length - lossesViaSL;
+
+    return {
+      avgWinTime: calcAvgTime(wins),
+      avgLossTime: calcAvgTime(losses),
+      winsViaTP,
+      winsViaTimeout,
+      lossesViaSL,
+      lossesViaTimeout,
+    };
+  }
+
+  /**
+   * Get raw signal data from database
+   * Includes all fields needed for comprehensive analysis
+   */
+  private async getRawSignalData(): Promise<any[]> {
+    try {
+      const result = await pool.query(`
+        SELECT token_ticker, signal_type, momentum_score, onchain_score, safety_score,
+               bundle_risk_score, signal_strength, entry_liquidity, entry_token_age,
+               entry_holder_count, entry_top10_concentration, entry_buy_sell_ratio,
+               entry_unique_buyers, final_outcome, final_return, return_1h, return_4h,
+               return_24h, max_return, min_return, signal_time, last_update,
+               hit_stop_loss, hit_take_profit, entry_price, entry_mcap
+        FROM signal_performance
+        ORDER BY signal_time DESC
+        LIMIT 100
+      `);
+      return result.rows;
+    } catch (error) {
+      logger.error({ error }, 'Failed to get raw signal data');
+      return [];
+    }
   }
 
   /**

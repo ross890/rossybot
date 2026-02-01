@@ -491,10 +491,41 @@ export class ThresholdOptimizer {
   }
 
   /**
-   * Load latest thresholds from database
+   * Load latest thresholds from database, initializing with defaults if empty
    */
   async loadThresholds(): Promise<void> {
     try {
+      // Ensure table exists
+      await pool.query(`
+        CREATE TABLE IF NOT EXISTS threshold_history (
+          id SERIAL PRIMARY KEY,
+          thresholds JSONB NOT NULL,
+          applied_at TIMESTAMP DEFAULT NOW()
+        )
+      `);
+
+      // One-time migration: Reset to moderate defaults (v2 - Feb 2026)
+      // This ensures everyone starts fresh with the new balanced thresholds
+      const migrationKey = 'threshold_migration_v2_moderate';
+      const migrationCheck = await pool.query(`
+        SELECT 1 FROM threshold_history
+        WHERE thresholds->>'_migration' = $1
+        LIMIT 1
+      `, [migrationKey]);
+
+      if (migrationCheck.rows.length === 0) {
+        // Migration not applied - reset to new defaults
+        logger.info('Applying threshold migration v2: resetting to moderate defaults');
+        await pool.query('DELETE FROM threshold_history');
+        await pool.query(`
+          INSERT INTO threshold_history (thresholds)
+          VALUES ($1)
+        `, [JSON.stringify({ ...DEFAULT_THRESHOLDS, _migration: migrationKey })]);
+        this.currentThresholds = { ...DEFAULT_THRESHOLDS };
+        logger.info({ thresholds: this.currentThresholds }, 'Migration complete: moderate thresholds applied');
+        return;
+      }
+
       const result = await pool.query(`
         SELECT thresholds FROM threshold_history
         ORDER BY applied_at DESC
@@ -503,14 +534,23 @@ export class ThresholdOptimizer {
 
       if (result.rows.length > 0) {
         const savedThresholds = result.rows[0].thresholds;
+        // Remove migration key from loaded thresholds
+        delete savedThresholds._migration;
         this.currentThresholds = {
           ...DEFAULT_THRESHOLDS,
           ...savedThresholds,
         };
         logger.info({ thresholds: this.currentThresholds }, 'Loaded thresholds from database');
+      } else {
+        // No thresholds saved - initialize with defaults
+        logger.info('No saved thresholds found, initializing with defaults');
+        await this.saveThresholds(DEFAULT_THRESHOLDS);
+        this.currentThresholds = { ...DEFAULT_THRESHOLDS };
+        logger.info({ thresholds: this.currentThresholds }, 'Initialized default thresholds in database');
       }
     } catch (error) {
-      logger.debug('No saved thresholds found, using defaults');
+      logger.error({ error }, 'Failed to load thresholds, using defaults');
+      this.currentThresholds = { ...DEFAULT_THRESHOLDS };
     }
   }
 

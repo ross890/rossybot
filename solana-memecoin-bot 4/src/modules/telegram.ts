@@ -593,10 +593,40 @@ export class TelegramAlertBot {
     msg += `└─ Bundle Risk: ${scamFilter.bundleAnalysis.riskLevel === 'LOW' ? '🟢 CLEAR' : scamFilter.bundleAnalysis.riskLevel === 'MEDIUM' ? '🟡 FLAGGED' : '🔴 HIGH'}\n\n`;
 
     msg += `───────────────────────────────\n`;
-    // Social signals
-    msg += `🐦 *SOCIAL SIGNALS*\n`;
-    msg += `├─ X Mentions (1h): ${socialMetrics.mentionVelocity1h}\n`;
-    msg += `├─ Other KOLs: ${socialMetrics.kolMentions.length > 0 ? socialMetrics.kolMentions.slice(0, 3).join(', ') : 'None'}\n`;
+    // Social signals - X Integration
+    msg += `𝕏 *X/SOCIAL SIGNALS*\n`;
+
+    // Social velocity with visual indicator
+    const velocityEmoji = socialMetrics.mentionVelocity1h >= 50 ? '🔥' :
+                          socialMetrics.mentionVelocity1h >= 20 ? '📈' :
+                          socialMetrics.mentionVelocity1h >= 5 ? '📊' : '📉';
+    const velocityLabel = socialMetrics.mentionVelocity1h >= 50 ? 'VIRAL' :
+                          socialMetrics.mentionVelocity1h >= 20 ? 'HIGH' :
+                          socialMetrics.mentionVelocity1h >= 5 ? 'MODERATE' : 'LOW';
+    msg += `├─ Velocity: ${velocityEmoji} *${socialMetrics.mentionVelocity1h}* mentions/hr (${velocityLabel})\n`;
+
+    // Engagement quality score
+    const engagementPercent = Math.round(socialMetrics.engagementQuality * 100);
+    const engagementEmoji = engagementPercent >= 70 ? '🟢' : engagementPercent >= 40 ? '🟡' : '🔴';
+    msg += `├─ Engagement: ${engagementEmoji} ${engagementPercent}/100\n`;
+
+    // Account authenticity
+    const authPercent = Math.round(socialMetrics.accountAuthenticity * 100);
+    const authEmoji = authPercent >= 70 ? '✅' : authPercent >= 40 ? '⚠️' : '🚨';
+    msg += `├─ Authenticity: ${authEmoji} ${authPercent}/100\n`;
+
+    // KOL mentions with tiers
+    if (socialMetrics.kolMentions.length > 0) {
+      const kolDisplay = socialMetrics.kolMentions.slice(0, 3).map(k => {
+        const tierBadge = k.tier ? `[${k.tier}]` : '';
+        return `@${k.handle}${tierBadge}`;
+      }).join(', ');
+      msg += `├─ KOL Mentions: 👑 ${kolDisplay}\n`;
+    } else {
+      msg += `├─ KOL Mentions: None yet\n`;
+    }
+
+    // Sentiment
     msg += `├─ Sentiment: ${socialMetrics.sentimentPolarity > 0.3 ? '🟢 POSITIVE' : socialMetrics.sentimentPolarity > -0.3 ? '🟡 NEUTRAL' : '🔴 NEGATIVE'}\n`;
     msg += `└─ Narrative: ${socialMetrics.narrativeFit || 'N/A'}\n\n`;
 
@@ -1648,7 +1678,7 @@ export class TelegramAlertBot {
    * Format KOL validation signal message
    */
   private formatKolValidationSignal(signal: BuySignal, previousDiscovery: DiscoverySignal): string {
-    const { kolActivity, score, tokenMetrics, scamFilter, dexScreenerInfo, ctoAnalysis } = signal;
+    const { kolActivity, score, tokenMetrics, scamFilter, socialMetrics, dexScreenerInfo, ctoAnalysis } = signal;
     const wallet = kolActivity.wallet;
     const tx = kolActivity.transaction;
     const perf = kolActivity.performance;
@@ -1715,6 +1745,44 @@ export class TelegramAlertBot {
     msg += `├─ Holders: ${tokenMetrics.holderCount}\n`;
     msg += `├─ Top 10: ${tokenMetrics.top10Concentration.toFixed(1)}%\n`;
     msg += `└─ Bundle Risk: ${scamFilter.bundleAnalysis.riskLevel === 'LOW' ? '🟢 CLEAR' : scamFilter.bundleAnalysis.riskLevel === 'MEDIUM' ? '🟡 FLAGGED' : '🔴 HIGH'}\n\n`;
+
+    msg += `───────────────────────────────\n`;
+    // Social signals - X Integration
+    msg += `𝕏 *X/SOCIAL SIGNALS*\n`;
+
+    // Social velocity with visual indicator
+    const velocityEmoji2 = socialMetrics.mentionVelocity1h >= 50 ? '🔥' :
+                          socialMetrics.mentionVelocity1h >= 20 ? '📈' :
+                          socialMetrics.mentionVelocity1h >= 5 ? '📊' : '📉';
+    const velocityLabel2 = socialMetrics.mentionVelocity1h >= 50 ? 'VIRAL' :
+                          socialMetrics.mentionVelocity1h >= 20 ? 'HIGH' :
+                          socialMetrics.mentionVelocity1h >= 5 ? 'MODERATE' : 'LOW';
+    msg += `├─ Velocity: ${velocityEmoji2} *${socialMetrics.mentionVelocity1h}* mentions/hr (${velocityLabel2})\n`;
+
+    // Engagement quality score
+    const engagementPercent2 = Math.round(socialMetrics.engagementQuality * 100);
+    const engagementEmoji2 = engagementPercent2 >= 70 ? '🟢' : engagementPercent2 >= 40 ? '🟡' : '🔴';
+    msg += `├─ Engagement: ${engagementEmoji2} ${engagementPercent2}/100\n`;
+
+    // Account authenticity
+    const authPercent2 = Math.round(socialMetrics.accountAuthenticity * 100);
+    const authEmoji2 = authPercent2 >= 70 ? '✅' : authPercent2 >= 40 ? '⚠️' : '🚨';
+    msg += `├─ Authenticity: ${authEmoji2} ${authPercent2}/100\n`;
+
+    // KOL mentions with tiers
+    if (socialMetrics.kolMentions.length > 0) {
+      const kolDisplay2 = socialMetrics.kolMentions.slice(0, 3).map(k => {
+        const tierBadge = k.tier ? `[${k.tier}]` : '';
+        return `@${k.handle}${tierBadge}`;
+      }).join(', ');
+      msg += `├─ KOL Mentions: 👑 ${kolDisplay2}\n`;
+    } else {
+      msg += `├─ KOL Mentions: None yet\n`;
+    }
+
+    // Sentiment
+    msg += `├─ Sentiment: ${socialMetrics.sentimentPolarity > 0.3 ? '🟢 POSITIVE' : socialMetrics.sentimentPolarity > -0.3 ? '🟡 NEUTRAL' : '🔴 NEGATIVE'}\n`;
+    msg += `└─ Narrative: ${socialMetrics.narrativeFit || 'N/A'}\n\n`;
 
     msg += `───────────────────────────────\n`;
     // Suggested action

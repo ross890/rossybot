@@ -368,22 +368,77 @@ class BirdeyeClient {
 class DexScreenerClient {
   private client: AxiosInstance;
 
+  // Cache for token pairs with TTL
+  private pairsCache: Map<string, { data: DexScreenerPair[]; expiry: number }> = new Map();
+  private readonly CACHE_TTL_MS = 30 * 1000; // 30 seconds cache
+  private readonly CACHE_TTL_EMPTY_MS = 10 * 1000; // 10 seconds for empty results
+  private readonly MAX_CACHE_SIZE = 500; // Prevent memory bloat
+
   constructor() {
     this.client = axios.create({
       baseURL: 'https://api.dexscreener.com',
       timeout: 10000,
     });
+
+    // Clean up expired cache entries every 5 minutes
+    setInterval(() => this.cleanupCache(), 5 * 60 * 1000);
+  }
+
+  /**
+   * Clean up expired cache entries
+   */
+  private cleanupCache(): void {
+    const now = Date.now();
+    let cleaned = 0;
+
+    for (const [key, value] of this.pairsCache) {
+      if (value.expiry < now) {
+        this.pairsCache.delete(key);
+        cleaned++;
+      }
+    }
+
+    if (cleaned > 0) {
+      logger.debug({ cleaned, remaining: this.pairsCache.size }, 'DexScreener cache cleanup');
+    }
   }
 
   async getTokenPairs(address: string): Promise<DexScreenerPair[]> {
+    const now = Date.now();
+
+    // Check cache first
+    const cached = this.pairsCache.get(address);
+    if (cached && cached.expiry > now) {
+      return cached.data;
+    }
+
     try {
       const response = await this.client.get(`/latest/dex/tokens/${address}`);
-      return response.data.pairs?.filter((p: any) => p.chainId === 'solana') || [];
+      const pairs = response.data.pairs?.filter((p: any) => p.chainId === 'solana') || [];
+
+      // Cache the result
+      const ttl = pairs.length > 0 ? this.CACHE_TTL_MS : this.CACHE_TTL_EMPTY_MS;
+      this.pairsCache.set(address, { data: pairs, expiry: now + ttl });
+
+      // Prevent cache from growing too large
+      if (this.pairsCache.size > this.MAX_CACHE_SIZE) {
+        // Remove oldest entries (first 100)
+        const keysToDelete = Array.from(this.pairsCache.keys()).slice(0, 100);
+        keysToDelete.forEach(k => this.pairsCache.delete(k));
+      }
+
+      return pairs;
     } catch (error: any) {
       const status = error?.response?.status;
       const errorData = error?.response?.data;
       const message = errorData?.message || errorData?.error || error?.message;
-      logger.error(`DexScreener getTokenPairs failed: status=${status} error=${message} address=${address.slice(0, 8)}...`);
+
+      // On rate limit, cache empty result briefly to prevent hammering
+      if (status === 429) {
+        this.pairsCache.set(address, { data: [], expiry: now + this.CACHE_TTL_EMPTY_MS });
+      }
+
+      logger.info(`DexScreener getTokenPairs failed: status=${status} error=${message} address=${address.slice(0, 8)}...`);
       return [];
     }
   }

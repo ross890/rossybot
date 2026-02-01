@@ -15,7 +15,7 @@ import { convictionTracker } from './signals/conviction-tracker.js';
 import { kolAnalytics } from './kol/kol-analytics.js';
 import { bondingCurveMonitor } from './pumpfun/bonding-monitor.js';
 import { dailyDigestGenerator } from './telegram/daily-digest.js';
-import { dailyReportGenerator, signalPerformanceTracker, thresholdOptimizer } from './performance/index.js';
+import { dailyReportGenerator, signalPerformanceTracker, thresholdOptimizer, winPredictor } from './performance/index.js';
 import {
   BuySignal,
   KolWalletActivity,
@@ -47,6 +47,12 @@ const RATE_LIMITS = {
 
 // ============ TELEGRAM BOT CLASS ============
 
+// Threshold adjustment state for conversational flow
+interface ThresholdAdjustmentState {
+  threshold: keyof import('./performance/threshold-optimizer.js').ThresholdSet | null;
+  awaitingValue: boolean;
+}
+
 export class TelegramAlertBot {
   private bot: TelegramBot | null = null;
   private app: Express | null = null;
@@ -56,6 +62,9 @@ export class TelegramAlertBot {
   private lastKolSignalTime: Map<string, number> = new Map();
   private startTime: Date | null = null;
   private isWebhookMode: boolean = false;
+
+  // State tracking for conversational threshold adjustment
+  private thresholdAdjustmentState: Map<number, ThresholdAdjustmentState> = new Map();
 
   constructor() {
     this.chatId = appConfig.telegramChatId;
@@ -337,8 +346,10 @@ export class TelegramAlertBot {
       { command: 'leaderboard', description: 'KOL performance rankings' },
       { command: 'pumpfun', description: 'Tokens approaching migration' },
       { command: 'thresholds', description: 'View current signal thresholds' },
+      { command: 'adjust_thresholds', description: 'Manually adjust thresholds' },
       { command: 'optimize', description: 'Run threshold optimization analysis' },
       { command: 'reset_thresholds', description: 'Reset thresholds to defaults' },
+      { command: 'learning', description: 'ML prediction system info' },
       { command: 'test', description: 'Send a test signal' },
       { command: 'help', description: 'Show all commands' },
     ];
@@ -365,9 +376,12 @@ export class TelegramAlertBot {
         '/test - Send a test signal\n\n' +
         '*Threshold Commands:*\n' +
         '/thresholds - View current signal thresholds\n' +
+        '/adjust\\_thresholds - Manually adjust each threshold\n' +
         '/optimize - Run threshold optimization analysis\n' +
         '/apply\\_thresholds - Apply recommended changes\n' +
         '/reset\\_thresholds - Reset to defaults\n\n' +
+        '*Learning & Predictions:*\n' +
+        '/learning - ML prediction system info\n\n' +
         '/help - Show all commands',
         { parse_mode: 'Markdown' }
       );
@@ -403,14 +417,18 @@ export class TelegramAlertBot {
         '/test - Send a test signal\n\n' +
         '*Threshold Commands:*\n' +
         '/thresholds - View current signal thresholds\n' +
+        '/adjust\\_thresholds - Manually adjust each threshold\n' +
         '/optimize - Run optimization analysis\n' +
         '/apply\\_thresholds - Apply recommended changes\n' +
         '/reset\\_thresholds - Reset to defaults\n\n' +
+        '*Learning & Predictions:*\n' +
+        '/learning - How the ML prediction system works\n\n' +
         '*Signal Format:*\n' +
         'Each buy signal includes:\n' +
         '• Token details and metrics\n' +
         '• Confirmed KOL wallet activity\n' +
         '• Entry/exit recommendations\n' +
+        '• ML win probability prediction\n' +
         '• Risk assessment\n\n' +
         '⚠️ DYOR. Not financial advice.',
         { parse_mode: 'Markdown' }
@@ -720,6 +738,327 @@ export class TelegramAlertBot {
         await this.bot!.sendMessage(chatId, `Failed to reset thresholds: ${errorMessage}`);
       }
     });
+
+    // /adjust_thresholds command - Conversational threshold adjustment
+    this.bot.onText(/\/adjust_thresholds/, async (msg) => {
+      const chatId = msg.chat.id;
+
+      try {
+        const current = thresholdOptimizer.getCurrentThresholds();
+
+        let message = '🎯 *ADJUST THRESHOLDS*\n\n';
+        message += 'Select a threshold to adjust:\n\n';
+        message += '*Current Values:*\n';
+        message += `1️⃣ Min Momentum: ${current.minMomentumScore}\n`;
+        message += `2️⃣ Min OnChain: ${current.minOnChainScore}\n`;
+        message += `3️⃣ Min Safety: ${current.minSafetyScore}\n`;
+        message += `4️⃣ Max Bundle Risk: ${current.maxBundleRiskScore}\n`;
+        message += `5️⃣ Min Liquidity: $${current.minLiquidity.toLocaleString()}\n`;
+        message += `6️⃣ Max Top10 Concentration: ${current.maxTop10Concentration}%\n\n`;
+        message += '_Tap a button below to adjust that threshold_';
+
+        // Create inline keyboard for threshold selection
+        const keyboard: TelegramBot.InlineKeyboardMarkup = {
+          inline_keyboard: [
+            [
+              { text: '1️⃣ Momentum', callback_data: 'adjust_minMomentumScore' },
+              { text: '2️⃣ OnChain', callback_data: 'adjust_minOnChainScore' },
+            ],
+            [
+              { text: '3️⃣ Safety', callback_data: 'adjust_minSafetyScore' },
+              { text: '4️⃣ Bundle Risk', callback_data: 'adjust_maxBundleRiskScore' },
+            ],
+            [
+              { text: '5️⃣ Liquidity', callback_data: 'adjust_minLiquidity' },
+              { text: '6️⃣ Top10 Conc.', callback_data: 'adjust_maxTop10Concentration' },
+            ],
+            [
+              { text: '❌ Cancel', callback_data: 'adjust_cancel' },
+            ],
+          ],
+        };
+
+        await this.bot!.sendMessage(chatId, message, {
+          parse_mode: 'Markdown',
+          reply_markup: keyboard,
+        });
+      } catch (error) {
+        const errorMessage = error instanceof Error ? error.message : 'Unknown error';
+        logger.error({ error, chatId }, 'Failed to show threshold adjustment menu');
+        await this.bot!.sendMessage(chatId, `Failed to show adjustment menu: ${errorMessage}`);
+      }
+    });
+
+    // Handle callback queries for threshold adjustment
+    this.bot.on('callback_query', async (query) => {
+      if (!query.data || !query.message) return;
+      const chatId = query.message.chat.id;
+      const data = query.data;
+
+      // Handle threshold adjustment callbacks
+      if (data.startsWith('adjust_')) {
+        const action = data.replace('adjust_', '');
+
+        if (action === 'cancel') {
+          // Cancel the adjustment
+          this.thresholdAdjustmentState.delete(chatId);
+          await this.bot!.answerCallbackQuery(query.id, { text: 'Cancelled' });
+          await this.bot!.sendMessage(chatId, '❌ Threshold adjustment cancelled.');
+          return;
+        }
+
+        // Valid threshold key
+        const thresholdKey = action as keyof import('./performance/threshold-optimizer.js').ThresholdSet;
+        const current = thresholdOptimizer.getCurrentThresholds();
+        const currentValue = current[thresholdKey];
+
+        // Set state for this user
+        this.thresholdAdjustmentState.set(chatId, {
+          threshold: thresholdKey,
+          awaitingValue: true,
+        });
+
+        // Get threshold info for the message
+        const thresholdInfo = this.getThresholdInfo(thresholdKey);
+
+        let message = `📝 *Adjusting: ${thresholdInfo.name}*\n\n`;
+        message += `Current Value: *${thresholdInfo.format(currentValue)}*\n`;
+        message += `${thresholdInfo.description}\n\n`;
+        message += `*Valid Range:* ${thresholdInfo.min} - ${thresholdInfo.max}\n`;
+        message += `${thresholdInfo.higherMeans}\n\n`;
+        message += '_Reply with the new value:_';
+
+        await this.bot!.answerCallbackQuery(query.id);
+        await this.bot!.sendMessage(chatId, message, { parse_mode: 'Markdown' });
+      }
+    });
+
+    // Handle text messages for threshold value input
+    this.bot.on('message', async (msg) => {
+      if (!msg.text || msg.text.startsWith('/')) return;
+      const chatId = msg.chat.id;
+
+      // Check if user is in threshold adjustment flow
+      const state = this.thresholdAdjustmentState.get(chatId);
+      if (!state || !state.awaitingValue || !state.threshold) return;
+
+      const inputValue = msg.text.trim();
+      const thresholdKey = state.threshold;
+      const thresholdInfo = this.getThresholdInfo(thresholdKey);
+
+      // Parse the value
+      let newValue: number;
+      if (thresholdKey === 'minLiquidity') {
+        // Handle liquidity input (may have $ or k/K suffix)
+        const cleanedInput = inputValue.replace(/[$,]/g, '').toLowerCase();
+        if (cleanedInput.endsWith('k')) {
+          newValue = parseFloat(cleanedInput.slice(0, -1)) * 1000;
+        } else {
+          newValue = parseFloat(cleanedInput);
+        }
+      } else {
+        newValue = parseFloat(inputValue);
+      }
+
+      // Validate the value
+      if (isNaN(newValue)) {
+        await this.bot!.sendMessage(chatId, `❌ Invalid number. Please enter a valid number between ${thresholdInfo.min} and ${thresholdInfo.max}.`);
+        return;
+      }
+
+      if (newValue < thresholdInfo.min || newValue > thresholdInfo.max) {
+        await this.bot!.sendMessage(chatId, `❌ Value out of range. Please enter a number between ${thresholdInfo.min} and ${thresholdInfo.max}.`);
+        return;
+      }
+
+      // Apply the new threshold
+      try {
+        const current = thresholdOptimizer.getCurrentThresholds();
+        const oldValue = current[thresholdKey];
+
+        // Update the threshold
+        thresholdOptimizer.setThresholds({ [thresholdKey]: newValue });
+
+        // Clear the state
+        this.thresholdAdjustmentState.delete(chatId);
+
+        let message = `✅ *Threshold Updated*\n\n`;
+        message += `*${thresholdInfo.name}*\n`;
+        message += `Previous: ${thresholdInfo.format(oldValue)}\n`;
+        message += `New: ${thresholdInfo.format(newValue)}\n\n`;
+        message += `_Use /thresholds to see all current values_\n`;
+        message += `_Use /adjust\\_thresholds to change another threshold_`;
+
+        await this.bot!.sendMessage(chatId, message, { parse_mode: 'Markdown' });
+
+        logger.info({ chatId, threshold: thresholdKey, oldValue, newValue }, 'Threshold manually adjusted');
+      } catch (error) {
+        const errorMessage = error instanceof Error ? error.message : 'Unknown error';
+        logger.error({ error, chatId }, 'Failed to update threshold');
+        await this.bot!.sendMessage(chatId, `❌ Failed to update threshold: ${errorMessage}`);
+      }
+    });
+
+    // /learning command - ML prediction system info
+    this.bot.onText(/\/learning/, async (msg) => {
+      const chatId = msg.chat.id;
+
+      try {
+        const modelSummary = winPredictor.getModelSummary();
+
+        let message = '🧠 *ML PREDICTION SYSTEM*\n\n';
+
+        // System overview
+        message += '*How It Works:*\n';
+        message += 'The bot uses machine learning to predict which signals are most likely to hit +100% (WIN).\n\n';
+
+        message += '📚 *Learning Process:*\n';
+        message += '• Analyzes historical signal outcomes (WIN/LOSS)\n';
+        message += '• Learns which factors correlate with wins\n';
+        message += '• Discovers winning and losing patterns\n';
+        message += '• Retrains every 6 hours with new data\n\n';
+
+        // Training status
+        if (modelSummary.lastTrained) {
+          const trainedAgo = Math.round((Date.now() - modelSummary.lastTrained.getTime()) / (1000 * 60));
+          message += `⏱️ *Last Trained:* ${trainedAgo < 60 ? `${trainedAgo}m ago` : `${Math.round(trainedAgo / 60)}h ago`}\n\n`;
+        } else {
+          message += '⏱️ *Last Trained:* Not yet trained\n\n';
+        }
+
+        // Feature weights
+        if (modelSummary.featureWeights.length > 0) {
+          message += '📊 *Top Predictive Features:*\n';
+          for (const fw of modelSummary.featureWeights.slice(0, 5)) {
+            const direction = fw.weight > 0 ? '↑' : '↓';
+            const importance = Math.round(fw.importance * 100);
+            message += `• ${this.formatFeatureName(fw.feature)}: ${direction} (${importance}% importance)\n`;
+          }
+          message += '\n';
+        }
+
+        // Winning patterns
+        if (modelSummary.winningPatterns.length > 0) {
+          message += '✅ *Winning Patterns Discovered:*\n';
+          for (const pattern of modelSummary.winningPatterns.slice(0, 4)) {
+            message += `• ${pattern.name}: ${pattern.winRate}% WR\n`;
+          }
+          message += '\n';
+        }
+
+        // Losing patterns
+        if (modelSummary.losingPatterns.length > 0) {
+          message += '⚠️ *Risk Patterns (to avoid):*\n';
+          for (const pattern of modelSummary.losingPatterns.slice(0, 3)) {
+            message += `• ${pattern.name}: ${pattern.winRate}% WR\n`;
+          }
+          message += '\n';
+        }
+
+        // Prediction output explanation
+        message += '🎯 *What Predictions Tell You:*\n';
+        message += '• *Win Probability:* 0-100% chance of +100% return\n';
+        message += '• *Confidence:* HIGH/MEDIUM/LOW based on pattern matches\n';
+        message += '• *Recommendation:* STRONG\\_BUY / BUY / WATCH / SKIP\n';
+        message += '• *Optimal Hold Time:* Predicted best duration\n';
+        message += '• *Early Exit Risk:* Chance of hitting stop-loss early\n\n';
+
+        message += '💡 *Tips:*\n';
+        message += '• Higher win probability = better signal quality\n';
+        message += '• HIGH confidence means multiple patterns matched\n';
+        message += '• More training data = better predictions\n';
+        message += '• System improves as it learns from outcomes';
+
+        await this.bot!.sendMessage(chatId, message, { parse_mode: 'Markdown' });
+      } catch (error) {
+        const errorMessage = error instanceof Error ? error.message : 'Unknown error';
+        logger.error({ error, chatId }, 'Failed to get learning info');
+        await this.bot!.sendMessage(chatId, `Failed to get learning info: ${errorMessage}`);
+      }
+    });
+  }
+
+  /**
+   * Get threshold info for display
+   */
+  private getThresholdInfo(key: string): {
+    name: string;
+    description: string;
+    min: number;
+    max: number;
+    higherMeans: string;
+    format: (value: number) => string;
+  } {
+    const infos: Record<string, any> = {
+      minMomentumScore: {
+        name: 'Min Momentum Score',
+        description: 'Minimum momentum score required for a signal. Measures buying pressure, volume velocity, and price action.',
+        min: 0,
+        max: 100,
+        higherMeans: '↑ Higher = stricter filtering (fewer signals)',
+        format: (v: number) => `${v}/100`,
+      },
+      minOnChainScore: {
+        name: 'Min OnChain Score',
+        description: 'Minimum on-chain health score. Measures holder distribution, liquidity depth, and trading activity.',
+        min: 0,
+        max: 100,
+        higherMeans: '↑ Higher = stricter filtering (fewer signals)',
+        format: (v: number) => `${v}/100`,
+      },
+      minSafetyScore: {
+        name: 'Min Safety Score',
+        description: 'Minimum safety score. Checks authority status, LP locks, insider activity, and contract risks.',
+        min: 0,
+        max: 100,
+        higherMeans: '↑ Higher = stricter filtering (fewer signals)',
+        format: (v: number) => `${v}/100`,
+      },
+      maxBundleRiskScore: {
+        name: 'Max Bundle Risk Score',
+        description: 'Maximum acceptable bundle/coordinated wallet risk. Detects potential manipulation and coordinated buys.',
+        min: 0,
+        max: 100,
+        higherMeans: '↓ Lower = stricter filtering (fewer signals)',
+        format: (v: number) => `${v}/100`,
+      },
+      minLiquidity: {
+        name: 'Min Liquidity',
+        description: 'Minimum liquidity pool size in USD. Higher liquidity = easier to exit positions.',
+        min: 1000,
+        max: 100000,
+        higherMeans: '↑ Higher = stricter filtering (fewer signals)',
+        format: (v: number) => `$${v.toLocaleString()}`,
+      },
+      maxTop10Concentration: {
+        name: 'Max Top10 Concentration',
+        description: 'Maximum token concentration allowed in top 10 holders. High concentration = whale manipulation risk.',
+        min: 30,
+        max: 90,
+        higherMeans: '↓ Lower = stricter filtering (fewer signals)',
+        format: (v: number) => `${v}%`,
+      },
+    };
+
+    return infos[key] || {
+      name: key,
+      description: 'Signal threshold',
+      min: 0,
+      max: 100,
+      higherMeans: '',
+      format: (v: number) => String(v),
+    };
+  }
+
+  /**
+   * Format feature name for display
+   */
+  private formatFeatureName(name: string): string {
+    return name
+      .replace(/([A-Z])/g, ' $1')
+      .replace(/_/g, ' ')
+      .replace(/^./, str => str.toUpperCase())
+      .trim();
   }
 
   /**

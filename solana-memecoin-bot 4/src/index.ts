@@ -7,6 +7,7 @@ import { logger } from './utils/logger.js';
 import { pool, SCHEMA_SQL } from './utils/database.js';
 import { signalGenerator } from './modules/signal-generator.js';
 import { telegramBot } from './modules/telegram.js';
+import { matureTokenScanner } from './modules/mature-token/index.js';
 
 // ============ STARTUP ============
 
@@ -35,17 +36,25 @@ async function main(): Promise<void> {
   
   // Initialize signal generator
   await signalGenerator.initialize();
-  
+
+  // Initialize mature token scanner
+  await matureTokenScanner.initialize();
+
   // Start the main loop
   signalGenerator.start();
-  
+
+  // Start mature token scanner
+  matureTokenScanner.start();
+
   logger.info('Bot is running! Press Ctrl+C to stop.');
+  logger.info('Mature Token Scanner is active - scanning for 24h+ survivor tokens');
   
   // Handle graceful shutdown
   const shutdown = async (signal: string) => {
     logger.info({ signal }, 'Shutdown signal received');
 
     signalGenerator.stop();
+    matureTokenScanner.stop();
     await telegramBot.stop();
     await pool.end();
 

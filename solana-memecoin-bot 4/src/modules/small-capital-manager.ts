@@ -195,6 +195,9 @@ export class SmallCapitalManager {
 
   /**
    * Determine signal quality classification
+   * Thresholds lowered based on performance data analysis:
+   * - Previous thresholds resulted in 100% WEAK signals
+   * - Need balanced distribution for proper position sizing
    */
   classifySignal(
     momentumScore: MomentumScore,
@@ -206,15 +209,29 @@ export class SmallCapitalManager {
     // Calculate bundle safety (inverted - higher = safer)
     const bundleSafety = 100 - bundleAnalysis.riskScore;
 
-    // Determine signal strength
+    // Calculate average score for more balanced classification
+    const avgScore = (momentumScore.total + safetyScore + bundleSafety) / 3;
+
+    // Determine signal strength with lowered thresholds
+    // Using average score with individual minimums for safety
     let signalStrength: 'STRONG' | 'MODERATE' | 'WEAK';
 
-    if (momentumScore.total >= 70 && safetyScore >= 70 && bundleSafety >= 70) {
+    if (avgScore >= 60 && momentumScore.total >= 50 && safetyScore >= 45 && bundleSafety >= 45) {
+      // STRONG: Good average with acceptable minimums across all factors
       signalStrength = 'STRONG';
-    } else if (momentumScore.total >= 55 && safetyScore >= 55 && bundleSafety >= 50) {
+    } else if (avgScore >= 45 && momentumScore.total >= 35 && safetyScore >= 35 && bundleSafety >= 30) {
+      // MODERATE: Decent average with basic minimums
       signalStrength = 'MODERATE';
     } else {
       signalStrength = 'WEAK';
+    }
+
+    // KOL validation can upgrade signal strength
+    if (kolValidated && signalStrength === 'WEAK' && avgScore >= 35) {
+      signalStrength = 'MODERATE';
+    }
+    if (multiKol && signalStrength === 'MODERATE') {
+      signalStrength = 'STRONG';
     }
 
     return {

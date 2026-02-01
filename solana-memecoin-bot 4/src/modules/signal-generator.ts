@@ -484,7 +484,7 @@ export class SignalGenerator {
     // Send on-chain signal via Telegram
     await telegramBot.sendOnChainSignal(onChainSignal);
 
-    // Record signal for performance tracking
+    // Record signal for performance tracking with additional metrics
     try {
       await signalPerformanceTracker.recordSignal(
         onChainSignal.id,
@@ -497,7 +497,16 @@ export class SignalGenerator {
         onChainScore.total,
         safetyResult.safetyScore,
         bundleAnalysis.riskScore,
-        signalQuality.signalStrength
+        signalQuality.signalStrength,
+        // Additional metrics for deeper analysis
+        {
+          liquidity: metrics.liquidityPool,
+          tokenAge: metrics.tokenAge,
+          holderCount: metrics.holderCount,
+          top10Concentration: metrics.top10Concentration,
+          buySellRatio: momentumData?.buySellRatio || 0,
+          uniqueBuyers: momentumData?.uniqueBuyers5m || 0,
+        }
       );
     } catch (error) {
       logger.error({ error, tokenAddress }, 'Failed to record signal for tracking');
@@ -686,7 +695,7 @@ export class SignalGenerator {
 
     await telegramBot.sendBuySignal(signal);
 
-    // Record signal for performance tracking
+    // Record signal for performance tracking with additional metrics
     try {
       await signalPerformanceTracker.recordSignal(
         signal.id,
@@ -699,7 +708,16 @@ export class SignalGenerator {
         score.compositeScore,
         safetyResult?.safetyScore || 50,
         0, // Bundle risk from scam filter
-        score.compositeScore >= 80 ? 'STRONG' : score.compositeScore >= 65 ? 'MODERATE' : 'WEAK'
+        score.compositeScore >= 80 ? 'STRONG' : score.compositeScore >= 65 ? 'MODERATE' : 'WEAK',
+        // Additional metrics for deeper analysis
+        {
+          liquidity: metrics.liquidityPool,
+          tokenAge: metrics.tokenAge,
+          holderCount: metrics.holderCount,
+          top10Concentration: metrics.top10Concentration,
+          buySellRatio: 0, // KOL signals don't have momentum data here
+          uniqueBuyers: 0,
+        }
       );
     } catch (error) {
       logger.error({ error, tokenAddress }, 'Failed to record KOL signal for tracking');

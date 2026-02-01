@@ -15,6 +15,7 @@ import { convictionTracker } from './signals/conviction-tracker.js';
 import { kolAnalytics } from './kol/kol-analytics.js';
 import { bondingCurveMonitor } from './pumpfun/bonding-monitor.js';
 import { dailyDigestGenerator } from './telegram/daily-digest.js';
+import { dailyReportGenerator, signalPerformanceTracker, thresholdOptimizer } from './performance/index.js';
 import {
   BuySignal,
   KolWalletActivity,
@@ -77,6 +78,26 @@ export class TelegramAlertBot {
 
     // Set up command handlers
     this.setupCommands();
+
+    // Initialize performance tracking system
+    try {
+      await signalPerformanceTracker.initialize();
+      await thresholdOptimizer.loadThresholds();
+
+      // Set up daily report generator with callback to send messages
+      dailyReportGenerator.initialize(async (message: string) => {
+        if (this.bot) {
+          await this.bot.sendMessage(this.chatId, message, { parse_mode: 'Markdown' });
+        }
+      });
+
+      // Schedule daily report at 9 AM UTC
+      dailyReportGenerator.scheduleDaily(9);
+
+      logger.info('Performance tracking and daily reports initialized');
+    } catch (error) {
+      logger.error({ error }, 'Failed to initialize performance tracking');
+    }
 
     logger.info({ mode: this.isWebhookMode ? 'webhook' : 'polling' }, 'Telegram bot (rossybot) initialized');
   }
@@ -195,6 +216,7 @@ export class TelegramAlertBot {
         '*Commands:*\n' +
         '/status - Bot status & connection health\n' +
         '/positions - Open positions\n' +
+        '/performance - Signal performance & win rate\n' +
         '/safety <token> - Run safety check on any token\n' +
         '/conviction - Show high-conviction tokens\n' +
         '/leaderboard - KOL performance rankings\n' +
@@ -352,6 +374,101 @@ export class TelegramAlertBot {
         const errorMessage = error instanceof Error ? error.message : 'Unknown error';
         logger.error({ error, chatId }, 'Failed to get pumpfun tokens');
         await this.bot!.sendMessage(chatId, `Failed to get Pump.fun tokens: ${errorMessage}`);
+      }
+    });
+
+    // /performance command - Show signal performance stats
+    this.bot.onText(/\/performance/, async (msg) => {
+      const chatId = msg.chat.id;
+
+      try {
+        await this.bot!.sendMessage(chatId, 'Generating performance report...', { parse_mode: 'Markdown' });
+
+        const report = await dailyReportGenerator.generateReport(168); // Last 7 days
+        await this.bot!.sendMessage(chatId, report.telegramMessage, { parse_mode: 'Markdown' });
+      } catch (error) {
+        const errorMessage = error instanceof Error ? error.message : 'Unknown error';
+        logger.error({ error, chatId }, 'Failed to get performance report');
+        await this.bot!.sendMessage(chatId, `Failed to get performance report: ${errorMessage}`);
+      }
+    });
+
+    // /optimize command - Run threshold optimization
+    this.bot.onText(/\/optimize/, async (msg) => {
+      const chatId = msg.chat.id;
+
+      try {
+        await this.bot!.sendMessage(chatId, 'Running threshold optimization...', { parse_mode: 'Markdown' });
+
+        const result = await thresholdOptimizer.optimize(false);
+
+        let message = '🎯 *THRESHOLD OPTIMIZATION RESULTS*\n\n';
+        message += `📊 Data Points: ${result.dataPoints}\n`;
+        message += `📈 Current Win Rate: ${result.currentWinRate.toFixed(1)}%\n`;
+        message += `🎯 Target Win Rate: ${result.targetWinRate}%\n\n`;
+
+        if (result.recommendations.length === 0) {
+          message += '_Insufficient data for recommendations_\n';
+        } else {
+          message += '*Current Thresholds:*\n';
+          message += `• Min Momentum: ${result.currentThresholds.minMomentumScore}\n`;
+          message += `• Min OnChain: ${result.currentThresholds.minOnChainScore}\n`;
+          message += `• Min Safety: ${result.currentThresholds.minSafetyScore}\n`;
+          message += `• Max Bundle Risk: ${result.currentThresholds.maxBundleRiskScore}\n\n`;
+
+          const changes = result.recommendations.filter(r => r.changeDirection !== 'MAINTAIN');
+          if (changes.length > 0) {
+            message += '*Recommended Changes:*\n';
+            for (const rec of changes) {
+              const arrow = rec.changeDirection === 'INCREASE' ? '↑' : '↓';
+              message += `${arrow} ${rec.factor}: ${rec.currentValue} → ${rec.recommendedValue}\n`;
+              message += `   _${rec.reason}_\n`;
+            }
+            message += '\nUse /apply\\_thresholds to apply recommendations';
+          } else {
+            message += '✅ _All thresholds are optimally configured_\n';
+          }
+        }
+
+        await this.bot!.sendMessage(chatId, message, { parse_mode: 'Markdown' });
+      } catch (error) {
+        const errorMessage = error instanceof Error ? error.message : 'Unknown error';
+        logger.error({ error, chatId }, 'Failed to run optimization');
+        await this.bot!.sendMessage(chatId, `Failed to run optimization: ${errorMessage}`);
+      }
+    });
+
+    // /apply_thresholds command - Apply recommended threshold changes
+    this.bot.onText(/\/apply_thresholds/, async (msg) => {
+      const chatId = msg.chat.id;
+
+      try {
+        await this.bot!.sendMessage(chatId, 'Applying threshold optimization...', { parse_mode: 'Markdown' });
+
+        const result = await thresholdOptimizer.optimize(true);
+
+        let message = '✅ *THRESHOLDS UPDATED*\n\n';
+
+        if (result.autoApplied && result.appliedChanges.length > 0) {
+          message += '*Applied Changes:*\n';
+          for (const change of result.appliedChanges) {
+            message += `• ${change}\n`;
+          }
+          message += '\n*New Thresholds:*\n';
+          message += `• Min Momentum: ${result.recommendedThresholds.minMomentumScore}\n`;
+          message += `• Min OnChain: ${result.recommendedThresholds.minOnChainScore}\n`;
+          message += `• Min Safety: ${result.recommendedThresholds.minSafetyScore}\n`;
+          message += `• Max Bundle Risk: ${result.recommendedThresholds.maxBundleRiskScore}\n`;
+        } else {
+          message += '_No changes were applied._\n';
+          message += 'Either thresholds are already optimal or insufficient data.';
+        }
+
+        await this.bot!.sendMessage(chatId, message, { parse_mode: 'Markdown' });
+      } catch (error) {
+        const errorMessage = error instanceof Error ? error.message : 'Unknown error';
+        logger.error({ error, chatId }, 'Failed to apply thresholds');
+        await this.bot!.sendMessage(chatId, `Failed to apply thresholds: ${errorMessage}`);
       }
     });
   }

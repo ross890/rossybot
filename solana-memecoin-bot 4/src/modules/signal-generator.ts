@@ -33,6 +33,9 @@ import { bundleDetector, BundleAnalysisResult } from './bundle-detector.js';
 import { onChainScoringEngine, OnChainScore } from './onchain-scoring.js';
 import { smallCapitalManager, SignalQuality } from './small-capital-manager.js';
 
+// Performance tracking
+import { signalPerformanceTracker } from './performance/index.js';
+
 import {
   TokenMetrics,
   SocialMetrics,
@@ -480,6 +483,25 @@ export class SignalGenerator {
     // Send on-chain signal via Telegram
     await telegramBot.sendOnChainSignal(onChainSignal);
 
+    // Record signal for performance tracking
+    try {
+      await signalPerformanceTracker.recordSignal(
+        onChainSignal.id,
+        tokenAddress,
+        metrics.ticker,
+        'ONCHAIN',
+        metrics.price,
+        metrics.marketCap,
+        onChainScore.components.momentum,
+        onChainScore.total,
+        safetyResult.safetyScore,
+        bundleAnalysis.riskScore,
+        signalQuality.signalStrength
+      );
+    } catch (error) {
+      logger.error({ error, tokenAddress }, 'Failed to record signal for tracking');
+    }
+
     logger.info({
       tokenAddress,
       ticker: metrics.ticker,
@@ -662,6 +684,25 @@ export class SignalGenerator {
     signal.positionSizePercent = Math.round(signal.positionSizePercent * signalWeight * 10) / 10;
 
     await telegramBot.sendBuySignal(signal);
+
+    // Record signal for performance tracking
+    try {
+      await signalPerformanceTracker.recordSignal(
+        signal.id,
+        tokenAddress,
+        metrics.ticker,
+        'KOL',
+        metrics.price,
+        metrics.marketCap,
+        score.factors.onChainHealth || 50,
+        score.compositeScore,
+        safetyResult?.safetyScore || 50,
+        0, // Bundle risk from scam filter
+        score.compositeScore >= 80 ? 'STRONG' : score.compositeScore >= 65 ? 'MODERATE' : 'WEAK'
+      );
+    } catch (error) {
+      logger.error({ error, tokenAddress }, 'Failed to record KOL signal for tracking');
+    }
 
     // FEATURE 4: Track Pump.fun tokens
     if (await bondingCurveMonitor.isPumpfunToken(tokenAddress)) {

@@ -25,3 +25,8 @@ export {
   dailyReportGenerator,
   DailyReport,
 } from './daily-report.js';
+
+export {
+  DailyAutoOptimizer,
+  dailyAutoOptimizer,
+} from './daily-auto-optimizer.js';

@@ -35,7 +35,7 @@ import { onChainScoringEngine, OnChainScore } from './onchain-scoring.js';
 import { smallCapitalManager, SignalQuality } from './small-capital-manager.js';
 
 // Performance tracking
-import { signalPerformanceTracker } from './performance/index.js';
+import { signalPerformanceTracker, thresholdOptimizer } from './performance/index.js';
 
 // Social/X integration
 import { socialAnalyzer } from './social/index.js';
@@ -458,10 +458,10 @@ export class SignalGenerator {
       return SignalGenerator.EVAL_RESULTS.BUNDLE_BLOCKED;
     }
 
-    // Step 3: Check minimum thresholds
-    // Aggressively lowered thresholds to generate more signals for early tokens
-    const MIN_MOMENTUM_SCORE = 20;  // Lowered from 35 - early tokens have less momentum data
-    const MIN_ONCHAIN_SCORE = 35;   // Lowered from 45 - allow more signals through
+    // Step 3: Check minimum thresholds (dynamically loaded from optimizer)
+    const thresholds = thresholdOptimizer.getCurrentThresholds();
+    const MIN_MOMENTUM_SCORE = thresholds.minMomentumScore;
+    const MIN_ONCHAIN_SCORE = thresholds.minOnChainScore;
 
     if (onChainScore.components.momentum < MIN_MOMENTUM_SCORE) {
       logger.debug({

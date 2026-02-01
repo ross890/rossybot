@@ -216,9 +216,11 @@ export class TelegramAlertBot {
   }
 
   /**
-   * Initialize bot in polling mode (local development)
+   * Initialize bot in polling mode (local development or Railway without public domain)
    */
   private async initializePollingMode(): Promise<void> {
+    const PORT = parseInt(process.env.PORT || '3000', 10);
+
     // First, create bot without polling to clear any existing webhook
     const tempBot = new TelegramBot(appConfig.telegramBotToken, { polling: false });
 
@@ -242,6 +244,33 @@ export class TelegramAlertBot {
 
     this.isWebhookMode = false;
 
+    // Always start HTTP server for Railway health checks (required for public domain)
+    this.app = express();
+    this.app.use(express.json());
+
+    // Health check endpoint
+    this.app.get('/health', (_req: Request, res: Response) => {
+      res.status(200).json({
+        status: 'ok',
+        mode: 'polling',
+        uptime: this.startTime ? Date.now() - this.startTime.getTime() : 0,
+      });
+    });
+
+    // Root endpoint
+    this.app.get('/', (_req: Request, res: Response) => {
+      res.status(200).json({
+        name: 'rossybot',
+        status: 'running',
+        mode: 'polling',
+        message: 'Set RAILWAY_PUBLIC_DOMAIN to enable webhook mode',
+      });
+    });
+
+    this.server = this.app.listen(PORT, () => {
+      logger.info({ port: PORT }, 'HTTP server started for health checks (polling mode)');
+    });
+
     // Handle polling errors gracefully
     this.bot.on('polling_error', (error: Error & { code?: string }) => {
       if (error.code === 'ETELEGRAM' && error.message.includes('409 Conflict')) {
@@ -257,7 +286,7 @@ export class TelegramAlertBot {
       }
     });
 
-    logger.info('Telegram bot started in polling mode (development)');
+    logger.info('Telegram bot started in polling mode');
   }
 
   /**

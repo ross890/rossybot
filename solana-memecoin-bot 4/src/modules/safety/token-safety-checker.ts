@@ -11,7 +11,7 @@ import type { TokenSafetyResult, InsiderAnalysis } from '../../types/index.js';
 // ============ CONSTANTS ============
 
 const CACHE_TTL_MS = 15 * 60 * 1000; // 15 minutes
-const MIN_SAFETY_SCORE_THRESHOLD = 40;
+const MIN_SAFETY_SCORE_THRESHOLD = 30; // Lowered from 40 - most new tokens have authorities enabled
 const RUGCHECK_API_BASE = 'https://api.rugcheck.xyz/v1';
 
 // ============ TOKEN SAFETY CHECKER CLASS ============
@@ -47,40 +47,40 @@ export class TokenSafetyChecker {
     const flags: string[] = [];
     let safetyScore = 100;
 
-    // 1. Check mint and freeze authority
+    // 1. Check mint and freeze authority (reduced penalties - common for new tokens)
     const { mintAuthorityEnabled, freezeAuthorityEnabled } = await this.checkMintAuthorities(tokenMint);
     if (mintAuthorityEnabled) {
       flags.push('MINT_AUTHORITY_ENABLED');
-      safetyScore -= 25;
+      safetyScore -= 15; // Reduced from -25
     }
     if (freezeAuthorityEnabled) {
       flags.push('FREEZE_AUTHORITY_ENABLED');
-      safetyScore -= 20;
+      safetyScore -= 12; // Reduced from -20
     }
 
-    // 2. Check holder concentration
+    // 2. Check holder concentration (relaxed - early tokens are naturally concentrated)
     const { top10HolderConcentration, deployerHolding } = await this.checkHolderConcentration(tokenMint);
-    if (top10HolderConcentration > 50) {
+    if (top10HolderConcentration > 70) { // Raised from 50% to 70%
       flags.push('HIGH_TOP10_CONCENTRATION');
-      safetyScore -= 15;
+      safetyScore -= 12; // Reduced from -15
     }
     if (deployerHolding > 10) {
       flags.push('HIGH_DEPLOYER_HOLDING');
       safetyScore -= 10;
     }
 
-    // 3. Get token age
+    // 3. Get token age (reduced penalty - we want newer tokens)
     const tokenAgeMins = await this.getTokenAge(tokenMint);
-    if (tokenAgeMins < 30) {
+    if (tokenAgeMins < 15) { // Changed from 30 to 15 mins
       flags.push('VERY_NEW_TOKEN');
-      safetyScore -= 10;
+      safetyScore -= 5; // Reduced from -10
     }
 
-    // 4. Check LP status
+    // 4. Check LP status (reduced penalty - many legit tokens don't lock LP initially)
     const { lpLocked, lpLockDuration } = await this.checkLpStatus(tokenMint);
     if (!lpLocked) {
       flags.push('LP_NOT_LOCKED');
-      safetyScore -= 15;
+      safetyScore -= 10; // Reduced from -15
     }
 
     // 5. Get RugCheck score

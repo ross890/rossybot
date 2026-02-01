@@ -44,8 +44,9 @@ const CRON_SCHEDULE = '0 6 * * *'; // 6:00 AM daily
 
 // Optimization constraints
 const MIN_DATA_POINTS = 10;
-const MAX_CHANGE_PERCENT = 15;
+const MAX_CHANGE_PERCENT = 5;  // Max 5% change per optimization cycle (was 15%)
 const TARGET_WIN_RATE = 30;
+const ADJUSTMENT_FACTOR = 0.1; // Apply 10% of factor diff (was 0.3)
 
 // ============ DAILY AUTO OPTIMIZER CLASS ============
 
@@ -260,8 +261,9 @@ export class DailyAutoOptimizer {
     };
 
     // Determine if we should tighten or loosen based on win rate
-    const shouldTighten = winRate < TARGET_WIN_RATE - 5;
-    const shouldLoosen = winRate > TARGET_WIN_RATE + 15;
+    // More conservative: only adjust when clearly outside target range
+    const shouldTighten = winRate < TARGET_WIN_RATE - 3;  // < 27% (was < 25%)
+    const shouldLoosen = winRate > TARGET_WIN_RATE + 8;   // > 38% (was > 45%)
 
     if (shouldTighten) {
       reasoning.push(`Win rate (${winRate.toFixed(1)}%) below target (${TARGET_WIN_RATE}%) - tightening thresholds`);
@@ -286,23 +288,23 @@ export class DailyAutoOptimizer {
         if (isMaxThreshold) {
           // For max thresholds, lower the max to be stricter
           if (factor.diff < 0) {
-            adjustment = Math.max(-currentValue * (MAX_CHANGE_PERCENT / 100), factor.diff * 0.3);
+            adjustment = Math.max(-currentValue * (MAX_CHANGE_PERCENT / 100), factor.diff * ADJUSTMENT_FACTOR);
             reason = `Wins have lower ${factor.name} - lowering max`;
           }
         } else {
           // For min thresholds, raise the min to be stricter
           if (factor.diff > 0) {
-            adjustment = Math.min(currentValue * (MAX_CHANGE_PERCENT / 100), factor.diff * 0.3);
+            adjustment = Math.min(currentValue * (MAX_CHANGE_PERCENT / 100), factor.diff * ADJUSTMENT_FACTOR);
             reason = `Wins have higher ${factor.name} - raising min`;
           }
         }
       } else if (shouldLoosen && Math.abs(factor.diff) < 3) {
-        // Factor doesn't strongly differentiate - could loosen
+        // Factor doesn't strongly differentiate - could loosen slightly
         if (isMaxThreshold) {
-          adjustment = currentValue * 0.05; // Loosen by 5%
+          adjustment = currentValue * 0.02; // Loosen by 2% (was 5%)
           reason = `${factor.name} not differentiating - loosening for volume`;
         } else {
-          adjustment = -currentValue * 0.05;
+          adjustment = -currentValue * 0.02; // Loosen by 2% (was 5%)
           reason = `${factor.name} not differentiating - loosening for volume`;
         }
       }

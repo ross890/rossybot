@@ -12,6 +12,7 @@
     "db:migrate": "tsx scripts/migrate.ts",
     "db:migrate:trading": "tsx scripts/migrate-trading.ts",
     "db:seed": "tsx scripts/seed-kols.ts",
+    "wallet:generate": "tsx scripts/generate-wallet.ts",
     "test:telegram": "tsx scripts/test-telegram.ts"
   },
   "dependencies": {

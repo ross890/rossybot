@@ -36,6 +36,9 @@ import { smallCapitalManager, SignalQuality } from './small-capital-manager.js';
 // Performance tracking
 import { signalPerformanceTracker } from './performance/index.js';
 
+// Social/X integration
+import { socialAnalyzer } from './social/index.js';
+
 import {
   TokenMetrics,
   SocialMetrics,
@@ -87,6 +90,18 @@ export class SignalGenerator {
 
     // Initialize Telegram bot
     await telegramBot.initialize();
+
+    // Initialize Social/X analyzer for real-time social metrics
+    try {
+      const socialReady = await socialAnalyzer.initialize();
+      if (socialReady) {
+        logger.info('Social analyzer initialized - X/Twitter integration active');
+      } else {
+        logger.warn('Social analyzer initialization failed - social metrics will be limited');
+      }
+    } catch (error) {
+      logger.warn({ error }, 'Failed to initialize social analyzer - social signals will use fallback data');
+    }
 
     // Initialize Pump.fun bonding curve monitor (Feature 4)
     bondingCurveMonitor.onAlert(async (alert) => {
@@ -920,20 +935,46 @@ export class SignalGenerator {
    * Get social metrics (simplified implementation)
    */
   private async getSocialMetrics(
-    _tokenAddress: string,
+    tokenAddress: string,
     metrics: TokenMetrics
   ): Promise<SocialMetrics> {
-    // This would integrate with Twitter API in production
-    // For now, return placeholder data
-    return {
-      mentionVelocity1h: 0,
-      engagementQuality: 0.5,
-      accountAuthenticity: 0.7,
-      sentimentPolarity: 0.2,
-      kolMentionDetected: false,
-      kolMentions: [],
-      narrativeFit: this.detectNarrative(metrics),
-    };
+    try {
+      // Use real X/Twitter social analyzer
+      const socialMetrics = await socialAnalyzer.getSocialMetrics(
+        tokenAddress,
+        metrics.ticker,
+        metrics.name
+      );
+
+      // If social analyzer returned data, use it
+      if (socialMetrics.mentionVelocity1h > 0 || socialMetrics.kolMentionDetected) {
+        logger.debug({
+          ticker: metrics.ticker,
+          velocity: socialMetrics.mentionVelocity1h,
+          sentiment: socialMetrics.sentimentPolarity,
+          kolMentions: socialMetrics.kolMentions.length,
+        }, 'Real social metrics retrieved from X');
+        return socialMetrics;
+      }
+
+      // Fallback: If no social data found, return with detected narrative
+      return {
+        ...socialMetrics,
+        narrativeFit: socialMetrics.narrativeFit || this.detectNarrative(metrics),
+      };
+    } catch (error) {
+      logger.debug({ error, ticker: metrics.ticker }, 'Social metrics fetch failed, using fallback');
+      // Fallback to basic narrative detection if social analyzer fails
+      return {
+        mentionVelocity1h: 0,
+        engagementQuality: 0.5,
+        accountAuthenticity: 0.5,
+        sentimentPolarity: 0,
+        kolMentionDetected: false,
+        kolMentions: [],
+        narrativeFit: this.detectNarrative(metrics),
+      };
+    }
   }
   
   /**

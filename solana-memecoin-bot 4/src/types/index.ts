@@ -172,13 +172,19 @@ export interface ScamFilterOutput {
 
 // ============ SOCIAL TYPES ============
 
+export interface KolMention {
+  handle: string;
+  tier?: 'S' | 'A' | 'B' | 'C';
+  followers?: number;
+}
+
 export interface SocialMetrics {
   mentionVelocity1h: number;
   engagementQuality: number;
   accountAuthenticity: number;
   sentimentPolarity: number; // -1 to 1
   kolMentionDetected: boolean;
-  kolMentions: string[]; // KOL handles
+  kolMentions: KolMention[]; // KOL mentions with optional tier and follower data
   narrativeFit: string | null;
 }
 

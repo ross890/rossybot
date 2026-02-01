@@ -8,6 +8,7 @@ import { kolWalletMonitor } from './kol-tracker.js';
 import {
   TokenMetrics,
   SocialMetrics,
+  KolMention,
   VolumeAuthenticityScore,
   ScamFilterOutput,
   KolWalletActivity,
@@ -400,26 +401,53 @@ export class ScoringEngine {
   
   /**
    * Calculate social momentum score (0-100)
+   * Enhanced with X/Twitter KOL detection and velocity trending
    */
   private calculateSocialMomentum(socialMetrics: SocialMetrics): number {
     let score = 0;
-    
-    // Mention velocity (0-30 points)
-    const velocityScore = Math.min(30, (socialMetrics.mentionVelocity1h / THRESHOLDS.IDEAL_MENTION_VELOCITY) * 30);
+
+    // Mention velocity (0-25 points)
+    // Using a more realistic threshold - 50 mentions/hour is excellent for memecoins
+    const velocityScore = Math.min(25, (socialMetrics.mentionVelocity1h / 50) * 25);
     score += velocityScore;
-    
-    // Engagement quality (0-25 points)
-    const engagementScore = socialMetrics.engagementQuality * 25;
+
+    // Engagement quality (0-20 points)
+    const engagementScore = socialMetrics.engagementQuality * 20;
     score += engagementScore;
-    
-    // Account authenticity (0-25 points)
-    const authenticityScore = socialMetrics.accountAuthenticity * 25;
+
+    // Account authenticity (0-20 points)
+    const authenticityScore = socialMetrics.accountAuthenticity * 20;
     score += authenticityScore;
-    
-    // Sentiment polarity (0-20 points) - positive sentiment is better
-    const sentimentScore = ((socialMetrics.sentimentPolarity + 1) / 2) * 20;
+
+    // Sentiment polarity (0-15 points) - positive sentiment is better
+    const sentimentScore = ((socialMetrics.sentimentPolarity + 1) / 2) * 15;
     score += sentimentScore;
-    
+
+    // KOL Twitter mention bonus (0-20 points) - significant boost for influencer attention
+    if (socialMetrics.kolMentionDetected && socialMetrics.kolMentions.length > 0) {
+      // Base bonus for any KOL mention
+      let kolBonus = 10;
+
+      // Additional bonus based on number of KOLs
+      kolBonus += Math.min(10, socialMetrics.kolMentions.length * 3);
+
+      // Check for high-tier KOL mentions (S/A tier)
+      const highTierMentions = socialMetrics.kolMentions.filter(
+        (k: KolMention) => k.tier === 'S' || k.tier === 'A'
+      );
+      if (highTierMentions.length > 0) {
+        kolBonus += 5;
+      }
+
+      score += Math.min(20, kolBonus);
+
+      logger.debug({
+        kolCount: socialMetrics.kolMentions.length,
+        highTierCount: highTierMentions.length,
+        kolBonus,
+      }, 'KOL Twitter mention bonus applied');
+    }
+
     return Math.min(100, Math.max(0, score));
   }
   

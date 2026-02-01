@@ -74,9 +74,32 @@ export class TelegramAlertBot {
     const PORT = parseInt(process.env.PORT || '3000', 10);
     const RAILWAY_PUBLIC_DOMAIN = process.env.RAILWAY_PUBLIC_DOMAIN;
 
-    // Use webhook mode in production (Railway), polling in development
+    // Detect Railway environment more robustly
+    const isRailwayEnvironment = !!(
+      process.env.RAILWAY_ENVIRONMENT ||
+      process.env.RAILWAY_PROJECT_ID ||
+      process.env.RAILWAY_SERVICE_ID ||
+      RAILWAY_PUBLIC_DOMAIN
+    );
+
+    logger.info({
+      isRailwayEnvironment,
+      hasPublicDomain: !!RAILWAY_PUBLIC_DOMAIN,
+      railwayEnv: process.env.RAILWAY_ENVIRONMENT,
+      port: PORT,
+    }, 'Detecting deployment environment');
+
+    // Use webhook mode if we have a public domain, otherwise polling
     if (RAILWAY_PUBLIC_DOMAIN) {
       await this.initializeWebhookMode(PORT, RAILWAY_PUBLIC_DOMAIN);
+    } else if (isRailwayEnvironment) {
+      // Railway environment without public domain - warn user
+      logger.warn(
+        'Running on Railway but RAILWAY_PUBLIC_DOMAIN is not set. ' +
+        'Please add a public domain in Railway settings to enable webhook mode. ' +
+        'Falling back to polling mode, which may cause 409 conflicts with multiple instances.'
+      );
+      await this.initializePollingMode();
     } else {
       await this.initializePollingMode();
     }
@@ -196,8 +219,44 @@ export class TelegramAlertBot {
    * Initialize bot in polling mode (local development)
    */
   private async initializePollingMode(): Promise<void> {
-    this.bot = new TelegramBot(appConfig.telegramBotToken, { polling: true });
+    // First, create bot without polling to clear any existing webhook
+    const tempBot = new TelegramBot(appConfig.telegramBotToken, { polling: false });
+
+    try {
+      // Clear any existing webhook to prevent conflicts
+      await tempBot.deleteWebHook();
+      logger.info('Cleared any existing webhook before starting polling');
+    } catch (error) {
+      logger.warn({ error }, 'Failed to clear webhook (may not exist)');
+    }
+
+    // Now create the bot with polling enabled
+    this.bot = new TelegramBot(appConfig.telegramBotToken, {
+      polling: {
+        autoStart: true,
+        params: {
+          timeout: 30,
+        },
+      },
+    });
+
     this.isWebhookMode = false;
+
+    // Handle polling errors gracefully
+    this.bot.on('polling_error', (error: Error & { code?: string }) => {
+      if (error.code === 'ETELEGRAM' && error.message.includes('409 Conflict')) {
+        logger.error(
+          '409 Conflict detected - another bot instance is polling. ' +
+          'Ensure only ONE instance is running, or configure webhook mode with RAILWAY_PUBLIC_DOMAIN.'
+        );
+        // Stop polling to prevent repeated errors
+        this.bot?.stopPolling();
+        logger.info('Stopped polling due to conflict. Bot will only send messages, not receive commands.');
+      } else {
+        logger.error({ error }, 'Telegram polling error');
+      }
+    });
+
     logger.info('Telegram bot started in polling mode (development)');
   }
 

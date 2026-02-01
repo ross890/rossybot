@@ -1836,6 +1836,38 @@ export class TelegramAlertBot {
     }
 
     msg += `───────────────────────────────\n`;
+
+    // ML Prediction Section (NEW)
+    const prediction = signal.prediction;
+    if (prediction) {
+      const probEmoji = prediction.winProbability >= 50 ? '🎯' :
+                        prediction.winProbability >= 35 ? '📊' : '⚠️';
+      const confEmoji = prediction.confidence === 'HIGH' ? '🔥' :
+                        prediction.confidence === 'MEDIUM' ? '✨' : '❓';
+
+      msg += `${probEmoji} *ML Prediction*\n`;
+      msg += `Win Prob: *${prediction.winProbability}%* ${confEmoji} (${prediction.confidence})\n`;
+
+      if (prediction.matchedPatterns && prediction.matchedPatterns.length > 0) {
+        msg += `✅ Patterns: ${prediction.matchedPatterns.slice(0, 2).join(', ')}\n`;
+      }
+
+      if (prediction.optimalHoldTime) {
+        msg += `⏱️ Opt. Hold: ${prediction.optimalHoldTime}h`;
+        if (prediction.earlyExitRisk > 50) {
+          msg += ` · Early Exit Risk: ${prediction.earlyExitRisk}%`;
+        }
+        msg += `\n`;
+      }
+
+      if (prediction.riskFactors && prediction.riskFactors.length > 0) {
+        const shortRisks = prediction.riskFactors.slice(0, 2).map((r: string) => r.split(':')[0]);
+        msg += `⚠️ Risks: ${shortRisks.join(', ')}\n`;
+      }
+
+      msg += `\n`;
+    }
+
     // Position sizing - simplified
     msg += `💵 *Size:* ${signal.suggestedPositionSize || 0.1} SOL\n`;
     msg += `🎯 TP: +100% · SL: -40%\n\n`;

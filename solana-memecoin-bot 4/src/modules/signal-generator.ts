@@ -34,8 +34,8 @@ import { bundleDetector, BundleAnalysisResult } from './bundle-detector.js';
 import { onChainScoringEngine, OnChainScore } from './onchain-scoring.js';
 import { smallCapitalManager, SignalQuality } from './small-capital-manager.js';
 
-// Performance tracking
-import { signalPerformanceTracker, thresholdOptimizer } from './performance/index.js';
+// Performance tracking and prediction
+import { signalPerformanceTracker, thresholdOptimizer, winPredictor, WinPrediction } from './performance/index.js';
 
 // Social/X integration
 import { socialAnalyzer } from './social/index.js';
@@ -127,6 +127,14 @@ export class SignalGenerator {
       logger.info('Daily digest generated');
     });
     dailyDigestGenerator.start(9); // 9 AM
+
+    // Initialize Win Predictor (ML-based prediction)
+    try {
+      await winPredictor.initialize();
+      logger.info('Win Predictor initialized - ML predictions active');
+    } catch (error) {
+      logger.warn({ error }, 'Failed to initialize Win Predictor - predictions will use defaults');
+    }
 
     logger.info('Signal generator initialized with all feature modules');
   }
@@ -517,19 +525,66 @@ export class SignalGenerator {
 
     const positionSize = smallCapitalManager.calculatePositionSize(signalQuality);
 
-    // Step 6: Build and send on-chain momentum signal
+    // Step 6: Get ML-based win prediction
+    const prediction = await winPredictor.predict({
+      momentumScore: onChainScore.components.momentum,
+      onChainScore: onChainScore.total,
+      safetyScore: safetyResult.safetyScore,
+      bundleRiskScore: bundleAnalysis.riskScore,
+      liquidity: metrics.liquidityPool,
+      tokenAge: metrics.tokenAge,
+      holderCount: metrics.holderCount,
+      top10Concentration: metrics.top10Concentration,
+      buySellRatio: momentumData?.buySellRatio || 1,
+      uniqueBuyers: momentumData?.uniqueBuyers5m || 0,
+      marketCap: metrics.marketCap,
+      volumeMarketCapRatio: metrics.volumeMarketCapRatio,
+    });
+
+    logger.debug({
+      tokenAddress,
+      ticker: metrics.ticker,
+      winProbability: prediction.winProbability,
+      confidence: prediction.confidence,
+      action: prediction.recommendedAction,
+      patterns: prediction.matchedWinPatterns,
+    }, 'Win prediction calculated');
+
+    // Filter signals with very low win probability
+    if (prediction.recommendedAction === 'SKIP' && prediction.winProbability < 25) {
+      logger.debug({
+        tokenAddress,
+        winProbability: prediction.winProbability,
+        reason: 'ML prediction SKIP with low probability',
+      }, 'Signal filtered by ML predictor');
+      return SignalGenerator.EVAL_RESULTS.DISCOVERY_FAILED;
+    }
+
+    // Adjust position size based on prediction
+    const adjustedPositionSize = {
+      ...positionSize,
+      solAmount: positionSize.solAmount * prediction.positionSizeMultiplier,
+      rationale: [
+        ...positionSize.rationale,
+        `ML Win Probability: ${prediction.winProbability}% (${prediction.confidence})`,
+        `Position multiplier: ${prediction.positionSizeMultiplier}x`,
+      ],
+    };
+
+    // Step 7: Build and send on-chain momentum signal
     const onChainSignal = this.buildOnChainSignal(
       tokenAddress,
       metrics,
       onChainScore,
       bundleAnalysis,
       safetyResult,
-      positionSize,
+      adjustedPositionSize,
       signalQuality,
       momentumScore,
       socialMetrics,
       dexScreenerInfo,
-      ctoAnalysis
+      ctoAnalysis,
+      prediction
     );
 
     // Track for KOL follow-up (optional validation)
@@ -598,7 +653,8 @@ export class SignalGenerator {
     momentumScore: any,
     socialMetrics: SocialMetrics,
     dexScreenerInfo?: DexScreenerTokenInfo,
-    ctoAnalysis?: CTOAnalysis
+    ctoAnalysis?: CTOAnalysis,
+    prediction?: WinPrediction
   ): DiscoverySignal {
     // Build risk warnings
     const riskWarnings: string[] = [];
@@ -690,6 +746,19 @@ export class SignalGenerator {
       bundleAnalysis,
       onChainScore,
       positionRationale: positionSize.rationale,
+
+      // ML Prediction data
+      prediction: prediction ? {
+        winProbability: prediction.winProbability,
+        confidence: prediction.confidence,
+        predictedReturn: prediction.predictedReturn,
+        recommendedAction: prediction.recommendedAction,
+        matchedPatterns: prediction.matchedWinPatterns,
+        riskFactors: prediction.riskFactors,
+        bullishFactors: prediction.bullishFactors,
+        optimalHoldTime: prediction.predictedOptimalHoldTime,
+        earlyExitRisk: prediction.earlyExitRisk,
+      } : null,
     } as any;
   }
 

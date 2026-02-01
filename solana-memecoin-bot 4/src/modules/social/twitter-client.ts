@@ -108,6 +108,11 @@ export class TwitterClient {
   private bearerToken: string | null = null;
   private initialized = false;
 
+  // Billing/payment error tracking
+  private billingError = false;
+  private billingErrorTime: number | null = null;
+  private readonly BILLING_ERROR_RETRY_MS = 60 * 60 * 1000; // Retry after 1 hour
+
   // Rate limiting tracking
   private rateLimits: Map<string, RateLimitInfo> = new Map();
   private requestCounts: Map<string, number> = new Map();
@@ -483,6 +488,18 @@ export class TwitterClient {
     limitKey: string,
     request: () => Promise<{ data: T }>
   ): Promise<T | null> {
+    // Check if we have a billing error and should skip requests
+    if (this.billingError) {
+      if (this.billingErrorTime && Date.now() - this.billingErrorTime < this.BILLING_ERROR_RETRY_MS) {
+        logger.debug('Skipping Twitter API request due to billing error (402)');
+        return null;
+      }
+      // Reset billing error after retry period
+      this.billingError = false;
+      this.billingErrorTime = null;
+      logger.info('Retrying Twitter API after billing error cooldown');
+    }
+
     // Check rate limits
     if (!this.canMakeRequest(limitKey)) {
       const resetTime = this.getResetTime(limitKey);
@@ -508,6 +525,16 @@ export class TwitterClient {
       const response = await request();
       return response.data;
     } catch (error: any) {
+      if (error.response?.status === 402) {
+        // Payment required - API subscription issue
+        this.billingError = true;
+        this.billingErrorTime = Date.now();
+        logger.error(
+          'Twitter API returned 402 Payment Required. Please check your Twitter API subscription and billing. ' +
+          'Social metrics will be disabled until billing is resolved. Will retry in 1 hour.'
+        );
+        return null;
+      }
       if (error.response?.status === 429) {
         // Rate limited - queue and retry
         return new Promise((resolve, reject) => {
@@ -637,6 +664,22 @@ export class TwitterClient {
    */
   getRateLimitStatus(): Map<string, RateLimitInfo> {
     return new Map(this.rateLimits);
+  }
+
+  /**
+   * Check if there's a billing error affecting the API
+   */
+  hasBillingError(): boolean {
+    return this.billingError;
+  }
+
+  /**
+   * Reset billing error (call after resolving billing issues)
+   */
+  resetBillingError(): void {
+    this.billingError = false;
+    this.billingErrorTime = null;
+    logger.info('Twitter API billing error has been manually reset');
   }
 }
 

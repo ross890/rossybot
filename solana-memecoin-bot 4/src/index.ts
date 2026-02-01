@@ -8,6 +8,7 @@ import { pool, SCHEMA_SQL } from './utils/database.js';
 import { signalGenerator } from './modules/signal-generator.js';
 import { telegramBot } from './modules/telegram.js';
 import { matureTokenScanner } from './modules/mature-token/index.js';
+import { dailyAutoOptimizer, thresholdOptimizer } from './modules/performance/index.js';
 
 // ============ STARTUP ============
 
@@ -40,6 +41,17 @@ async function main(): Promise<void> {
   // Initialize mature token scanner
   await matureTokenScanner.initialize();
 
+  // Load saved thresholds from database
+  await thresholdOptimizer.loadThresholds();
+  logger.info('Threshold optimizer loaded saved thresholds');
+
+  // Initialize and start daily auto optimizer (runs at 6am Sydney time)
+  await dailyAutoOptimizer.initialize();
+  dailyAutoOptimizer.start();
+  logger.info({
+    nextRun: dailyAutoOptimizer.getNextRunTime()?.toISOString(),
+  }, 'Daily auto optimizer scheduled');
+
   // Start the main loop
   signalGenerator.start();
 
@@ -55,6 +67,7 @@ async function main(): Promise<void> {
 
     signalGenerator.stop();
     matureTokenScanner.stop();
+    dailyAutoOptimizer.stop();
     await telegramBot.stop();
     await pool.end();
 

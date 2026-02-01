@@ -201,9 +201,13 @@ export class TelegramAlertBot {
       res.sendStatus(200);
     });
 
-    // Start Express server
-    this.server = this.app.listen(port, () => {
-      logger.info({ port, webhookUrl }, 'Express server started for webhook');
+    // Start Express server - bind to 0.0.0.0 for Railway
+    this.server = this.app.listen(port, '0.0.0.0', () => {
+      logger.info({ port, webhookUrl, host: '0.0.0.0' }, 'Express server started for webhook');
+    });
+
+    this.server.on('error', (error) => {
+      logger.error({ error, port }, 'Express server error');
     });
 
     // Set webhook with Telegram
@@ -269,8 +273,12 @@ export class TelegramAlertBot {
       });
     });
 
-    this.server = this.app.listen(PORT, () => {
-      logger.info({ port: PORT }, 'HTTP server started for health checks (polling mode)');
+    this.server = this.app.listen(PORT, '0.0.0.0', () => {
+      logger.info({ port: PORT, host: '0.0.0.0' }, 'HTTP server started for health checks (polling mode)');
+    });
+
+    this.server.on('error', (error) => {
+      logger.error({ error, port: PORT }, 'Express server error');
     });
 
     // Handle polling errors gracefully

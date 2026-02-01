@@ -25,6 +25,14 @@ export interface SignalRecord {
   bundleRiskScore: number;
   signalStrength: 'STRONG' | 'MODERATE' | 'WEAK';
 
+  // Additional entry metrics for analysis
+  entryLiquidity: number;
+  entryTokenAge: number;  // in minutes
+  entryHolderCount: number;
+  entryTop10Concentration: number;
+  entryBuySellRatio: number;
+  entryUniqueBuyers: number;
+
   // Timestamps
   signalTime: Date;
 
@@ -166,21 +174,40 @@ export class SignalPerformanceTracker {
     onChainScore: number,
     safetyScore: number,
     bundleRiskScore: number,
-    signalStrength: 'STRONG' | 'MODERATE' | 'WEAK'
+    signalStrength: 'STRONG' | 'MODERATE' | 'WEAK',
+    // Additional metrics for deeper analysis
+    additionalMetrics?: {
+      liquidity?: number;
+      tokenAge?: number;
+      holderCount?: number;
+      top10Concentration?: number;
+      buySellRatio?: number;
+      uniqueBuyers?: number;
+    }
   ): Promise<void> {
     try {
+      const metrics = additionalMetrics || {};
+
       await pool.query(`
         INSERT INTO signal_performance (
           signal_id, token_address, token_ticker, signal_type,
           entry_price, entry_mcap, momentum_score, onchain_score,
           safety_score, bundle_risk_score, signal_strength,
+          entry_liquidity, entry_token_age, entry_holder_count,
+          entry_top10_concentration, entry_buy_sell_ratio, entry_unique_buyers,
           signal_time, tracked, final_outcome
-        ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, NOW(), true, 'PENDING')
+        ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, NOW(), true, 'PENDING')
         ON CONFLICT (signal_id) DO NOTHING
       `, [
         signalId, tokenAddress, tokenTicker, signalType,
         entryPrice, entryMcap, momentumScore, onChainScore,
-        safetyScore, bundleRiskScore, signalStrength
+        safetyScore, bundleRiskScore, signalStrength,
+        metrics.liquidity || 0,
+        metrics.tokenAge || 0,
+        metrics.holderCount || 0,
+        metrics.top10Concentration || 0,
+        metrics.buySellRatio || 0,
+        metrics.uniqueBuyers || 0
       ]);
 
       logger.info({
@@ -188,6 +215,8 @@ export class SignalPerformanceTracker {
         tokenTicker,
         entryPrice,
         onChainScore,
+        liquidity: metrics.liquidity,
+        tokenAge: metrics.tokenAge,
       }, 'Signal recorded for performance tracking');
     } catch (error) {
       logger.error({ error, signalId }, 'Failed to record signal for tracking');
@@ -537,10 +566,22 @@ export class SignalPerformanceTracker {
         return [];
       }
 
-      const factors = ['momentum_score', 'onchain_score', 'safety_score', 'bundle_risk_score'];
+      // Core score factors
+      const scoreFactors = ['momentum_score', 'onchain_score', 'safety_score', 'bundle_risk_score'];
+      // Additional market factors (added for deeper analysis)
+      const marketFactors = [
+        'entry_liquidity',
+        'entry_token_age',
+        'entry_holder_count',
+        'entry_top10_concentration',
+        'entry_buy_sell_ratio',
+        'entry_unique_buyers'
+      ];
+
       const correlations = [];
 
-      for (const factor of factors) {
+      // Process score factors
+      for (const factor of scoreFactors) {
         const winAvg = wins.reduce((sum: number, s: any) => sum + parseFloat(s[factor] || 0), 0) / wins.length;
         const lossAvg = losses.reduce((sum: number, s: any) => sum + parseFloat(s[factor] || 0), 0) / losses.length;
 
@@ -550,7 +591,35 @@ export class SignalPerformanceTracker {
           : (winAvg - lossAvg) / 100; // Higher scores are better
 
         correlations.push({
-          factor: factor.replace('_', ' ').replace('score', '').trim(),
+          factor: this.formatFactorName(factor),
+          winningAvg: winAvg,
+          losingAvg: lossAvg,
+          correlation,
+        });
+      }
+
+      // Process market factors
+      for (const factor of marketFactors) {
+        const winAvg = wins.reduce((sum: number, s: any) => sum + parseFloat(s[factor] || 0), 0) / wins.length;
+        const lossAvg = losses.reduce((sum: number, s: any) => sum + parseFloat(s[factor] || 0), 0) / losses.length;
+
+        // Determine correlation direction based on factor type
+        let correlation: number;
+        if (factor === 'entry_top10_concentration') {
+          // Lower concentration is better
+          correlation = (lossAvg - winAvg) / Math.max(winAvg, lossAvg, 1);
+        } else if (factor === 'entry_liquidity') {
+          // Normalize by dividing by larger value to get comparable scale
+          correlation = (winAvg - lossAvg) / Math.max(winAvg, lossAvg, 1);
+        } else {
+          // Higher is better for most metrics
+          correlation = winAvg !== 0 || lossAvg !== 0
+            ? (winAvg - lossAvg) / Math.max(winAvg, lossAvg, 1)
+            : 0;
+        }
+
+        correlations.push({
+          factor: this.formatFactorName(factor),
           winningAvg: winAvg,
           losingAvg: lossAvg,
           correlation,
@@ -562,6 +631,20 @@ export class SignalPerformanceTracker {
       logger.error({ error }, 'Failed to get factor correlations');
       return [];
     }
+  }
+
+  /**
+   * Format factor name for display
+   */
+  private formatFactorName(factor: string): string {
+    return factor
+      .replace(/_/g, ' ')
+      .replace('entry ', '')
+      .replace('score', '')
+      .trim()
+      .split(' ')
+      .map(word => word.charAt(0).toUpperCase() + word.slice(1))
+      .join(' ');
   }
 
   /**
@@ -584,6 +667,14 @@ export class SignalPerformanceTracker {
           bundle_risk_score DECIMAL(5, 2),
           signal_strength VARCHAR(20),
 
+          -- Additional entry metrics for deeper analysis
+          entry_liquidity DECIMAL(30, 2) DEFAULT 0,
+          entry_token_age DECIMAL(10, 2) DEFAULT 0,
+          entry_holder_count INTEGER DEFAULT 0,
+          entry_top10_concentration DECIMAL(5, 2) DEFAULT 0,
+          entry_buy_sell_ratio DECIMAL(10, 2) DEFAULT 0,
+          entry_unique_buyers INTEGER DEFAULT 0,
+
           signal_time TIMESTAMP NOT NULL,
           tracked BOOLEAN DEFAULT true,
 
@@ -602,6 +693,31 @@ export class SignalPerformanceTracker {
 
           created_at TIMESTAMP DEFAULT NOW()
         )
+      `);
+
+      // Add new columns if they don't exist (for existing tables)
+      await pool.query(`
+        DO $$
+        BEGIN
+          IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name = 'signal_performance' AND column_name = 'entry_liquidity') THEN
+            ALTER TABLE signal_performance ADD COLUMN entry_liquidity DECIMAL(30, 2) DEFAULT 0;
+          END IF;
+          IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name = 'signal_performance' AND column_name = 'entry_token_age') THEN
+            ALTER TABLE signal_performance ADD COLUMN entry_token_age DECIMAL(10, 2) DEFAULT 0;
+          END IF;
+          IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name = 'signal_performance' AND column_name = 'entry_holder_count') THEN
+            ALTER TABLE signal_performance ADD COLUMN entry_holder_count INTEGER DEFAULT 0;
+          END IF;
+          IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name = 'signal_performance' AND column_name = 'entry_top10_concentration') THEN
+            ALTER TABLE signal_performance ADD COLUMN entry_top10_concentration DECIMAL(5, 2) DEFAULT 0;
+          END IF;
+          IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name = 'signal_performance' AND column_name = 'entry_buy_sell_ratio') THEN
+            ALTER TABLE signal_performance ADD COLUMN entry_buy_sell_ratio DECIMAL(10, 2) DEFAULT 0;
+          END IF;
+          IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name = 'signal_performance' AND column_name = 'entry_unique_buyers') THEN
+            ALTER TABLE signal_performance ADD COLUMN entry_unique_buyers INTEGER DEFAULT 0;
+          END IF;
+        END $$;
       `);
 
       await pool.query(`

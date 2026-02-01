@@ -3,7 +3,7 @@
 // Automated daily performance summaries
 // ===========================================
 
-import * as cron from 'node-cron';
+import { CronJob } from 'cron';
 import { logger } from '../../utils/logger.js';
 import { pool, Database } from '../../utils/database.js';
 import { convictionTracker } from '../signals/conviction-tracker.js';
@@ -12,13 +12,14 @@ import type { DailyDigest } from '../../types/index.js';
 
 // ============ CONSTANTS ============
 
-const DEFAULT_DIGEST_HOUR = 9; // 9 AM
+const DEFAULT_DIGEST_HOUR = 9; // 9 AM Sydney time
+const SYDNEY_TIMEZONE = 'Australia/Sydney';
 const SIMULATED_ENTRY_SOL = 10; // Assume 10 SOL per signal for simulation
 
 // ============ DAILY DIGEST CLASS ============
 
 export class DailyDigestGenerator {
-  private cronJob: cron.ScheduledTask | null = null;
+  private cronJob: CronJob | null = null;
   private sendCallback: ((message: string) => Promise<void>) | null = null;
 
   /**
@@ -34,17 +35,30 @@ export class DailyDigestGenerator {
   start(hour: number = DEFAULT_DIGEST_HOUR): void {
     if (this.cronJob) {
       this.cronJob.stop();
+      this.cronJob = null;
     }
 
-    // Schedule at specified hour daily
-    const cronExpression = `0 ${hour} * * *`;
+    // Schedule at specified hour daily in Sydney timezone
+    // Format: seconds minutes hours dayOfMonth month dayOfWeek
+    const cronExpression = `0 0 ${hour} * * *`;
 
-    this.cronJob = cron.schedule(cronExpression, async () => {
-      logger.info('Running scheduled daily digest');
-      await this.generateAndSend();
-    });
+    this.cronJob = new CronJob(
+      cronExpression,
+      async () => {
+        logger.info('Running scheduled daily digest');
+        await this.generateAndSend();
+      },
+      null,
+      true,
+      SYDNEY_TIMEZONE
+    );
 
-    logger.info({ hour, cronExpression }, 'Daily digest scheduler started');
+    logger.info({
+      hour,
+      cronExpression,
+      timezone: SYDNEY_TIMEZONE,
+      nextRun: this.cronJob.nextDate().toISO(),
+    }, 'Daily digest scheduler started');
   }
 
   /**

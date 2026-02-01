@@ -1193,6 +1193,41 @@ export class TelegramAlertBot {
   }
 
   /**
+   * Generate a brief narrative about what the token is
+   */
+  private generateNarrative(tokenName: string, ticker: string): string {
+    const name = (tokenName || '').toLowerCase();
+    const tick = (ticker || '').toLowerCase();
+
+    // AI/Tech themed
+    if (name.includes('ai') || name.includes('gpt') || name.includes('llm') || name.includes('neural') || name.includes('bot')) {
+      return 'AI/tech-themed memecoin riding the artificial intelligence narrative.';
+    }
+    // Animal themed
+    if (name.includes('dog') || name.includes('cat') || name.includes('pepe') || name.includes('frog') || name.includes('shib') || name.includes('doge') || tick.includes('dog') || tick.includes('cat')) {
+      return 'Animal-themed memecoin following classic crypto mascot trends.';
+    }
+    // Trump/Political
+    if (name.includes('trump') || name.includes('maga') || name.includes('biden') || name.includes('politic')) {
+      return 'Political-themed token capitalizing on current events narrative.';
+    }
+    // Elon/Tesla
+    if (name.includes('elon') || name.includes('tesla') || name.includes('mars') || name.includes('rocket') || name.includes('space')) {
+      return 'Space/Elon-themed memecoin tapping into tech billionaire culture.';
+    }
+    // Food themed
+    if (name.includes('burger') || name.includes('pizza') || name.includes('food') || name.includes('eat') || name.includes('chef')) {
+      return 'Food-themed memecoin with casual retail appeal.';
+    }
+    // Gaming
+    if (name.includes('game') || name.includes('play') || name.includes('pixel') || name.includes('arcade')) {
+      return 'Gaming-themed token targeting the web3 gaming community.';
+    }
+    // Default
+    return 'New Solana memecoin with emerging on-chain momentum.';
+  }
+
+  /**
    * Format on-chain momentum signal message
    */
   private formatOnChainSignal(signal: any): string {
@@ -1202,127 +1237,101 @@ export class TelegramAlertBot {
     const bundleAnalysis = signal.bundleAnalysis || { riskLevel: 'UNKNOWN', riskScore: 0, flags: [] };
     const onChainScore = signal.onChainScore || { total: 0, recommendation: 'N/A', components: {}, signals: [] };
     const safetyResult = signal.safetyResult || { safetyScore: 0, mintAuthorityEnabled: false, freezeAuthorityEnabled: false };
-    const positionRationale = signal.positionRationale || [];
 
-    let msg = `*ROSSYBOT MOMENTUM SIGNAL*\n\n`;
-
-    // Token info
-    const ticker = this.escapeMarkdown(signal.tokenTicker || 'UNKNOWN');
-    const tokenName = this.escapeMarkdown(signal.tokenName || 'Unknown');
-    msg += `*Token:* \`$${ticker}\` (${this.truncateAddress(signal.tokenAddress || '')})\n`;
-    msg += `*Name:* ${tokenName}\n`;
-    msg += `*Chain:* Solana\n\n`;
-
-    // Momentum metrics (the key differentiator)
-    const buySellRatio = momentumScore.metrics?.buySellRatio || 0;
-    const buyRatioEmoji = buySellRatio >= 2.0 ? '' : buySellRatio >= 1.5 ? '' : '';
-    msg += `*MOMENTUM ANALYSIS*\n`;
-    msg += `Total Score: *${momentumScore.total || 0}/100*\n`;
-    msg += `${buyRatioEmoji} Buy/Sell Ratio: *${buySellRatio.toFixed(2)}x*\n`;
-    msg += `Buy Pressure: ${momentumScore.components?.buyPressure || 0}/25\n`;
-    msg += `Volume Velocity: ${momentumScore.components?.volumeVelocity || 0}/25\n`;
-    msg += `Trade Quality: ${momentumScore.components?.tradeQuality || 0}/25\n`;
-    msg += `Holder Growth: ${momentumScore.components?.holderGrowth || 0}/25\n`;
-    msg += `Unique Buyers (5m): ${momentumScore.metrics?.uniqueBuyers5m || 0}\n`;
-    msg += `Net Buy Pressure: $${this.formatNumber(momentumScore.metrics?.netBuyPressure || 0)}\n\n`;
-
-    // On-chain score
+    const ticker = signal.tokenTicker || 'UNKNOWN';
+    const tokenName = signal.tokenName || 'Unknown';
     const totalScore = onChainScore.total || 0;
-    const gradeEmoji = totalScore >= 70 ? '' : totalScore >= 55 ? '' : '';
-    msg += `*ON-CHAIN SCORE*\n`;
-    msg += `Total: ${gradeEmoji} *${totalScore}/100*\n`;
-    msg += `Recommendation: *${this.escapeMarkdown(onChainScore.recommendation || 'N/A')}*\n`;
-    msg += `Momentum: ${onChainScore.components?.momentum || 0}/30\n`;
-    msg += `Safety: ${onChainScore.components?.safety || 0}/25\n`;
-    msg += `Bundle Safety: ${onChainScore.components?.bundleSafety || 0}/20\n`;
-    msg += `Market Structure: ${onChainScore.components?.marketStructure || 0}/15\n`;
-    msg += `Timing: ${onChainScore.components?.timing || 0}/10\n\n`;
+    const recommendation = onChainScore.recommendation || 'WATCH';
 
-    // Bullish/bearish signals
-    const signals = onChainScore.signals || [];
-    const bullish = signals.filter((s: any) => s?.type === 'bullish');
-    const bearish = signals.filter((s: any) => s?.type === 'bearish');
+    // Score emoji
+    const scoreEmoji = totalScore >= 70 ? '🔥' : totalScore >= 55 ? '✨' : totalScore >= 40 ? '📊' : '⚠️';
 
-    if (bullish.length > 0) {
-      msg += `*BULLISH SIGNALS:*\n`;
-      for (const s of bullish.slice(0, 4)) {
-        msg += `${this.escapeMarkdown(s.reason || '')}\n`;
-      }
-      msg += `\n`;
-    }
+    // Recommendation emoji
+    const recEmoji = recommendation === 'STRONG_BUY' ? '🚀' :
+                     recommendation === 'BUY' ? '✅' :
+                     recommendation === 'WATCH' ? '👀' : '⛔';
 
-    if (bearish.length > 0) {
-      msg += `*BEARISH SIGNALS:*\n`;
-      for (const s of bearish.slice(0, 3)) {
-        msg += `${this.escapeMarkdown(s.reason || '')}\n`;
-      }
-      msg += `\n`;
-    }
-
-    // Market data
-    msg += `*MARKET DATA*\n`;
-    msg += `Price: $${this.formatPrice(tokenMetrics.price || 0)}\n`;
-    msg += `Market Cap: $${this.formatNumber(tokenMetrics.marketCap || 0)}\n`;
-    msg += `24h Volume: $${this.formatNumber(tokenMetrics.volume24h || 0)}\n`;
-    msg += `Holders: ${tokenMetrics.holderCount || 0}\n`;
-    msg += `Top 10: ${(tokenMetrics.top10Concentration || 0).toFixed(1)}%\n`;
-    msg += `Liquidity: $${this.formatNumber(tokenMetrics.liquidityPool || 0)}\n`;
-    msg += `Token Age: ${tokenMetrics.tokenAge || 0} min\n\n`;
-
-    // Bundle/Insider analysis
+    // Risk level
     const riskLevel = bundleAnalysis.riskLevel || 'UNKNOWN';
-    const bundleEmoji = riskLevel === 'LOW' ? 'LOW' : riskLevel === 'MEDIUM' ? 'MEDIUM' : 'HIGH';
-    msg += `*BUNDLE ANALYSIS*\n`;
-    msg += `Risk Level: ${bundleEmoji}\n`;
-    msg += `Risk Score: ${bundleAnalysis.riskScore || 0}/100\n`;
-    const flags = bundleAnalysis.flags || [];
-    if (flags.length > 0) {
-      msg += `Flags: ${flags.slice(0, 3).map((f: string) => this.escapeMarkdown(f)).join(', ')}\n\n`;
-    } else {
-      msg += `Flags: None\n\n`;
+    const riskEmoji = riskLevel === 'LOW' ? '🟢' : riskLevel === 'MEDIUM' ? '🟡' : '🔴';
+
+    // Safety status
+    const safetyScore = safetyResult.safetyScore || 0;
+    const safetyEmoji = safetyScore >= 60 ? '🛡️' : safetyScore >= 40 ? '⚠️' : '🚨';
+
+    // Token age formatting
+    const ageMinutes = Math.round(tokenMetrics.tokenAge || 0);
+    const ageDisplay = ageMinutes < 60 ? `${ageMinutes}m` : `${Math.round(ageMinutes / 60)}h`;
+
+    // Build the message
+    let msg = `${scoreEmoji} *MOMENTUM SIGNAL*\n\n`;
+
+    // Token header with key info
+    msg += `*$${ticker}* — ${tokenName}\n`;
+    msg += `\`${signal.tokenAddress || ''}\`\n\n`;
+
+    // Narrative - one sentence about what this token is
+    msg += `_${this.generateNarrative(tokenName, ticker)}_\n\n`;
+
+    // Key metrics in a clean grid
+    msg += `━━━━━━━━━━━━━━━━━━━━\n`;
+    msg += `${recEmoji} *${recommendation}* · Score: *${totalScore}/100*\n`;
+    msg += `━━━━━━━━━━━━━━━━━━━━\n\n`;
+
+    // Market snapshot
+    msg += `💰 *Market*\n`;
+    msg += `MCap: \`$${this.formatNumber(tokenMetrics.marketCap || 0)}\` · Liq: \`$${this.formatNumber(tokenMetrics.liquidityPool || 0)}\`\n`;
+    msg += `Vol: \`$${this.formatNumber(tokenMetrics.volume24h || 0)}\` · Age: \`${ageDisplay}\`\n\n`;
+
+    // Holders & concentration
+    msg += `👥 *Holders:* ${tokenMetrics.holderCount || 0} · Top 10: ${(tokenMetrics.top10Concentration || 0).toFixed(0)}%\n\n`;
+
+    // Safety & Risk in one line
+    msg += `${safetyEmoji} *Safety:* ${safetyScore}/100`;
+    msg += ` · ${riskEmoji} *Bundle:* ${riskLevel}\n`;
+
+    // Contract status
+    const mintStatus = safetyResult.mintAuthorityEnabled ? '⚠️ Mint ON' : '✅ Mint OFF';
+    const freezeStatus = safetyResult.freezeAuthorityEnabled ? '⚠️ Freeze ON' : '✅ Freeze OFF';
+    msg += `${mintStatus} · ${freezeStatus}\n\n`;
+
+    // Momentum quick stats
+    const buySellRatio = momentumScore.metrics?.buySellRatio || 0;
+    const uniqueBuyers = momentumScore.metrics?.uniqueBuyers5m || 0;
+    if (buySellRatio > 0 || uniqueBuyers > 0) {
+      msg += `📈 *Momentum:* ${buySellRatio.toFixed(1)}x buy/sell · ${uniqueBuyers} buyers (5m)\n\n`;
     }
 
-    // Safety check
-    msg += `*SAFETY*\n`;
-    msg += `Score: ${safetyResult.safetyScore || 0}/100\n`;
-    msg += `Mint: ${safetyResult.mintAuthorityEnabled ? 'ENABLED' : 'Revoked'}\n`;
-    msg += `Freeze: ${safetyResult.freezeAuthorityEnabled ? 'ENABLED' : 'Revoked'}\n\n`;
+    // Position sizing - simplified
+    msg += `💵 *Size:* ${signal.suggestedPositionSize || 0.1} SOL\n`;
+    msg += `🎯 TP: +100% · SL: -40%\n\n`;
 
-    // Position sizing
-    msg += `*POSITION SIZING*\n`;
-    msg += `Suggested: *${signal.suggestedPositionSize || 0.1} SOL*\n`;
-    msg += `Signal Strength: ${this.escapeMarkdown(signal.score?.confidence || 'N/A')}\n`;
-    if (positionRationale.length > 0) {
-      for (const r of positionRationale.slice(0, 4)) {
-        msg += `${this.escapeMarkdown(r)}\n`;
-      }
-    }
-    msg += `Stop Loss: 40% | Take Profit: 100%\n\n`;
-
-    // KOL Status
-    msg += `*KOL STATUS*\n`;
-    msg += `No KOL activity detected\n`;
-    msg += `Signal based on on-chain momentum\n\n`;
-
-    // Risk warnings
+    // Warnings - only show if present, cleaner format
     const riskWarnings = signal.riskWarnings || [];
-    if (riskWarnings.length > 0) {
-      msg += `*RISK WARNINGS:*\n`;
-      for (const warning of riskWarnings.slice(0, 5)) {
-        msg += `${this.escapeMarkdown(warning)}\n`;
-      }
-      msg += `\n`;
+    const importantWarnings = riskWarnings.filter((w: string) =>
+      !w.includes('ON-CHAIN SIGNAL') && !w.includes('No KOL')
+    );
+    if (importantWarnings.length > 0) {
+      msg += `⚠️ *Warnings:* `;
+      const shortWarnings = importantWarnings.slice(0, 3).map((w: string) => {
+        // Shorten common warnings
+        if (w.includes('less than 1 hour')) return 'New token';
+        if (w.includes('Low liquidity')) return 'Low liq';
+        if (w.includes('DEPLOYER')) return 'Dev holding';
+        if (w.includes('VERY_NEW')) return 'Very new';
+        if (w.includes('HIGH_CONCENTRATION')) return 'Concentrated';
+        return w.slice(0, 20);
+      });
+      msg += shortWarnings.join(' · ') + '\n\n`;
     }
 
     // Trade links
-    msg += `*Quick Trade:*\n`;
-    msg += formatLinksAsMarkdown(signal.tokenAddress || '');
-    msg += `\n\n`;
+    msg += `🔗 [Jupiter](https://jup.ag/swap/SOL-${signal.tokenAddress || ''})`;
+    msg += ` · [DexS](https://dexscreener.com/solana/${signal.tokenAddress || ''})`;
+    msg += ` · [Birdeye](https://birdeye.so/token/${signal.tokenAddress || ''})\n\n`;
 
     // Footer
-    const generatedAt = signal.generatedAt ? signal.generatedAt.toISOString().replace('T', ' ').slice(0, 19) : new Date().toISOString().replace('T', ' ').slice(0, 19);
-    msg += `Signal: ${generatedAt} UTC\n`;
-    msg += `MOMENTUM SIGNAL: Based on on-chain metrics. DYOR.`;
+    msg += `_No KOL validation · DYOR_`;
 
     return msg;
   }

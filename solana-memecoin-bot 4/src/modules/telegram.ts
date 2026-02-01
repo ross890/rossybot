@@ -915,102 +915,59 @@ export class TelegramAlertBot {
     const stats = await signalPerformanceTracker.getPerformanceStats(168); // Last 7 days
     const correlations = await signalPerformanceTracker.getFactorCorrelations();
     const thresholds = thresholdOptimizer.getCurrentThresholds();
-
-    // Get raw signal data for deeper analysis
     const rawData = await this.getRawSignalData();
 
-    let msg = '```\n';
-    msg += 'PERFORMANCE REPORT (DETAILED)\n';
-    msg += '==============================\n\n';
+    let msg = '📊 *PERFORMANCE REPORT (7d)*\n\n';
 
     // Summary
-    msg += `SUMMARY (7d)\n`;
-    msg += `Total: ${stats.totalSignals} | Done: ${stats.completedSignals} | Pending: ${stats.pendingSignals}\n`;
-    msg += `Wins: ${stats.wins} | Losses: ${stats.losses} | WinRate: ${stats.winRate.toFixed(1)}%\n`;
-    msg += `AvgRet: ${stats.avgReturn.toFixed(1)}% | AvgWin: ${stats.avgWinReturn.toFixed(1)}% | AvgLoss: ${stats.avgLossReturn.toFixed(1)}%\n`;
+    msg += `*Summary*\n`;
+    msg += `Signals: ${stats.totalSignals} (${stats.completedSignals} done, ${stats.pendingSignals} pending)\n`;
+    msg += `Win Rate: ${stats.winRate.toFixed(1)}% (${stats.wins}W/${stats.losses}L)\n`;
+    msg += `Avg Return: ${stats.avgReturn.toFixed(1)}%\n`;
     msg += `Best: ${stats.bestReturn.toFixed(1)}% | Worst: ${stats.worstReturn.toFixed(1)}%\n\n`;
 
-    // Granular Score Bands (every 10 points)
-    msg += `SCORE BANDS (granular)\n`;
+    // Score Bands (condensed)
     const scoreBands = this.calculateScoreBands(rawData);
-    for (const band of scoreBands) {
-      if (band.count > 0) {
-        msg += `${band.range}: n=${band.count} w=${band.wins} l=${band.losses} wr=${band.winRate.toFixed(0)}% avgRet=${band.avgReturn.toFixed(1)}%\n`;
+    const activeBands = scoreBands.filter(b => b.count > 0);
+    if (activeBands.length > 0) {
+      msg += `*By Score*\n`;
+      for (const band of activeBands) {
+        msg += `${band.range}: ${band.count} signals, ${band.winRate.toFixed(0)}% WR\n`;
       }
+      msg += '\n';
     }
-    msg += '\n';
 
-    // By Strength
-    msg += `BY STRENGTH\n`;
-    for (const [strength, data] of Object.entries(stats.byStrength)) {
-      if (data.count > 0) {
-        msg += `${strength}: n=${data.count} wr=${data.winRate.toFixed(0)}% ret=${data.avgReturn.toFixed(1)}%\n`;
+    // By Strength (condensed)
+    const activeStrengths = Object.entries(stats.byStrength).filter(([_, d]) => d.count > 0);
+    if (activeStrengths.length > 0) {
+      msg += `*By Strength*\n`;
+      for (const [strength, data] of activeStrengths) {
+        msg += `${strength}: ${data.count} signals, ${data.winRate.toFixed(0)}% WR\n`;
       }
+      msg += '\n';
     }
-    msg += '\n';
 
-    // Time-to-Outcome Analysis
-    msg += `TIME-TO-OUTCOME\n`;
+    // Time Analysis (condensed)
     const timeAnalysis = this.analyzeTimeToOutcome(rawData);
-    msg += `Avg time to WIN: ${timeAnalysis.avgWinTime.toFixed(1)}h\n`;
-    msg += `Avg time to LOSS: ${timeAnalysis.avgLossTime.toFixed(1)}h\n`;
-    msg += `Wins via TP hit: ${timeAnalysis.winsViaTP} | Wins via timeout: ${timeAnalysis.winsViaTimeout}\n`;
-    msg += `Losses via SL: ${timeAnalysis.lossesViaSL} | Losses via timeout: ${timeAnalysis.lossesViaTimeout}\n\n`;
-
-    // Factor Correlations (most predictive factors)
-    msg += `FACTOR CORRELATIONS\n`;
-    if (correlations.length > 0) {
-      for (const c of correlations.slice(0, 10)) {
-        const sign = c.correlation >= 0 ? '+' : '';
-        msg += `${c.factor}: w=${c.winningAvg.toFixed(1)} l=${c.losingAvg.toFixed(1)} corr=${sign}${c.correlation.toFixed(3)}\n`;
-      }
-    } else {
-      msg += 'No data yet (need wins AND losses)\n';
+    if (timeAnalysis.avgWinTime > 0 || timeAnalysis.avgLossTime > 0) {
+      msg += `*Timing*\n`;
+      msg += `Win avg: ${timeAnalysis.avgWinTime.toFixed(1)}h | Loss avg: ${timeAnalysis.avgLossTime.toFixed(1)}h\n\n`;
     }
-    msg += '\n';
+
+    // Top Correlations (only top 5)
+    if (correlations.length > 0) {
+      msg += `*Top Factors*\n`;
+      for (const c of correlations.slice(0, 5)) {
+        const sign = c.correlation >= 0 ? '+' : '';
+        msg += `${c.factor}: ${sign}${c.correlation.toFixed(2)}\n`;
+      }
+      msg += '\n';
+    }
 
     // Current Thresholds
-    msg += `CURRENT THRESHOLDS\n`;
-    msg += `MinMomentum: ${thresholds.minMomentumScore} | MinOnChain: ${thresholds.minOnChainScore}\n`;
-    msg += `MinSafety: ${thresholds.minSafetyScore} | MaxBundleRisk: ${thresholds.maxBundleRiskScore}\n`;
-    msg += `MinLiquidity: $${thresholds.minLiquidity} | MaxTop10: ${thresholds.maxTop10Concentration}%\n\n`;
-
-    // Detailed signal list
-    msg += `SIGNAL DETAILS (all ${rawData.length} signals)\n`;
-    msg += `Format: [outcome] ticker | oc=onchain mom=momentum saf=safety bnd=bundle | liq=$k age=min hold=# top10=% | r1h r4h final | max/min\n`;
-    msg += `---\n`;
-
-    if (rawData.length > 0) {
-      for (const s of rawData) {
-        const outcome = s.final_outcome === 'PENDING' ? 'P' : s.final_outcome === 'WIN' ? 'W' : 'L';
-        const ticker = (s.token_ticker || '???').padEnd(6).slice(0, 6);
-
-        // Scores
-        const oc = parseFloat(s.onchain_score || 0).toFixed(0).padStart(2);
-        const mom = parseFloat(s.momentum_score || 0).toFixed(0).padStart(2);
-        const saf = parseFloat(s.safety_score || 0).toFixed(0).padStart(2);
-        const bnd = parseFloat(s.bundle_risk_score || 0).toFixed(0).padStart(2);
-
-        // Entry metrics
-        const liq = (parseFloat(s.entry_liquidity || 0) / 1000).toFixed(0).padStart(3);
-        const age = parseFloat(s.entry_token_age || 0).toFixed(0).padStart(3);
-        const hold = (s.entry_holder_count || 0).toString().padStart(4);
-        const top10 = parseFloat(s.entry_top10_concentration || 0).toFixed(0).padStart(2);
-
-        // Returns
-        const r1h = s.return_1h !== null ? `${parseFloat(s.return_1h).toFixed(0)}%`.padStart(5) : '  -  ';
-        const r4h = s.return_4h !== null ? `${parseFloat(s.return_4h).toFixed(0)}%`.padStart(5) : '  -  ';
-        const final = s.final_return !== null ? `${parseFloat(s.final_return).toFixed(0)}%`.padStart(5) : '  -  ';
-        const maxRet = s.max_return !== null ? `+${parseFloat(s.max_return).toFixed(0)}` : '-';
-        const minRet = s.min_return !== null ? `${parseFloat(s.min_return).toFixed(0)}` : '-';
-
-        msg += `[${outcome}] ${ticker} | oc=${oc} mom=${mom} saf=${saf} bnd=${bnd} | liq=${liq}k age=${age}m hold=${hold} t10=${top10}% | ${r1h} ${r4h} ${final} | ${maxRet}/${minRet}\n`;
-      }
-    } else {
-      msg += 'No signals recorded yet\n';
-    }
-
-    msg += '```';
+    msg += `*Thresholds*\n`;
+    msg += `Mom≥${thresholds.minMomentumScore} OC≥${thresholds.minOnChainScore} Safe≥${thresholds.minSafetyScore}\n`;
+    msg += `Bundle≤${thresholds.maxBundleRiskScore} Liq≥$${thresholds.minLiquidity} Top10≤${thresholds.maxTop10Concentration}%`;
 
     return msg;
   }

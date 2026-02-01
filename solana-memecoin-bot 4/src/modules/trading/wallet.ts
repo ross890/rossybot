@@ -304,7 +304,7 @@ export class BotWallet {
         throw new Error(`Birdeye API error: ${response.status}`);
       }
 
-      const data = await response.json();
+      const data = await response.json() as { data?: { value?: number } };
       return data.data?.value || 150; // Fallback to $150
     } catch (error) {
       logger.warn({ error }, 'Failed to get SOL price, using fallback');

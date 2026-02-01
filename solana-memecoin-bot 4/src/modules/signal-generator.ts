@@ -27,6 +27,12 @@ import { bondingCurveMonitor } from './pumpfun/bonding-monitor.js';
 import { dailyDigestGenerator } from './telegram/daily-digest.js';
 import { moonshotAssessor } from './moonshot-assessor.js';
 
+// NEW: On-chain first modules (replacing KOL-dependent logic)
+import { momentumAnalyzer } from './momentum-analyzer.js';
+import { bundleDetector, BundleAnalysisResult } from './bundle-detector.js';
+import { onChainScoringEngine, OnChainScore } from './onchain-scoring.js';
+import { smallCapitalManager, SignalQuality } from './small-capital-manager.js';
+
 import {
   TokenMetrics,
   SocialMetrics,
@@ -158,7 +164,7 @@ export class SignalGenerator {
         `Scan cycle: pre-filter complete | candidates=${candidates.length} passed=${preFiltered.length} failed=${quickFilterFails}`
       );
 
-      // Step 3: Evaluate each token (KOL signals + discovery signals)
+      // Step 3: Evaluate each token (KOL signals + on-chain signals)
       let safetyBlocked = 0;
       let noMetrics = 0;
       let screeningFailed = 0;
@@ -168,6 +174,9 @@ export class SignalGenerator {
       let discoverySignals = 0;
       let kolValidationSignals = 0;
       let discoveryFailed = 0;
+      let onchainSignals = 0;
+      let momentumFailed = 0;
+      let bundleBlocked = 0;
 
       for (const tokenAddress of preFiltered) {
         try {
@@ -182,6 +191,9 @@ export class SignalGenerator {
             case 'DISCOVERY_SENT': discoverySignals++; break;
             case 'KOL_VALIDATION_SENT': kolValidationSignals++; break;
             case 'DISCOVERY_FAILED': discoveryFailed++; break;
+            case 'ONCHAIN_SIGNAL_SENT': onchainSignals++; break;
+            case 'MOMENTUM_FAILED': momentumFailed++; break;
+            case 'BUNDLE_BLOCKED': bundleBlocked++; break;
             case 'SKIPPED': break; // Already have position
           }
         } catch (error) {
@@ -194,7 +206,7 @@ export class SignalGenerator {
 
       // Show where tokens are dropping off
       logger.info(
-        `Scan cycle: evaluation complete | evaluated=${preFiltered.length} safetyBlocked=${safetyBlocked} noMetrics=${noMetrics} screeningFailed=${screeningFailed} scamRejected=${scamRejected} scoringFailed=${scoringFailed} buySignals=${signalsGenerated} discoveries=${discoverySignals} kolValidations=${kolValidationSignals} discoveryFailed=${discoveryFailed}`
+        `Scan cycle: evaluation complete | evaluated=${preFiltered.length} safetyBlocked=${safetyBlocked} noMetrics=${noMetrics} screeningFailed=${screeningFailed} scamRejected=${scamRejected} scoringFailed=${scoringFailed} buySignals=${signalsGenerated} onchainSignals=${onchainSignals} discoveries=${discoverySignals} kolValidations=${kolValidationSignals} momentumFailed=${momentumFailed} bundleBlocked=${bundleBlocked} discoveryFailed=${discoveryFailed}`
       );
     } catch (error) {
       logger.error({ error }, 'Error in scan cycle');
@@ -266,6 +278,9 @@ export class SignalGenerator {
     DISCOVERY_SENT: 'DISCOVERY_SENT',        // New: Discovery signal (no KOL)
     KOL_VALIDATION_SENT: 'KOL_VALIDATION_SENT', // New: KOL bought discovered token
     DISCOVERY_FAILED: 'DISCOVERY_FAILED',    // New: Didn't meet discovery threshold
+    ONCHAIN_SIGNAL_SENT: 'ONCHAIN_SIGNAL_SENT', // New: Pure on-chain momentum signal
+    MOMENTUM_FAILED: 'MOMENTUM_FAILED',      // New: Didn't pass momentum checks
+    BUNDLE_BLOCKED: 'BUNDLE_BLOCKED',        // New: High bundle/insider risk
   } as const;
 
   /**
@@ -366,77 +381,222 @@ export class SignalGenerator {
       );
     }
 
-    // ============ PATH B: NO KOL - EVALUATE FOR DISCOVERY ============
-    // Calculate discovery score (no KOL component)
-    const discoveryScore = scoringEngine.calculateDiscoveryScore(
+    // ============ PATH B: NO KOL - ON-CHAIN MOMENTUM ANALYSIS ============
+    // NEW: Use on-chain momentum analysis instead of social metrics
+
+    // Step 1: Calculate comprehensive on-chain score (handles momentum + bundle internally)
+    const onChainScore = await onChainScoringEngine.calculateScore(tokenAddress, metrics);
+
+    logger.debug({
       tokenAddress,
-      metrics,
-      socialMetrics,
-      volumeAuthenticity,
-      scamResult
-    );
+      ticker: metrics.ticker,
+      onChainTotal: onChainScore.total,
+      recommendation: onChainScore.recommendation,
+      riskLevel: onChainScore.riskLevel,
+      components: onChainScore.components,
+    }, 'On-chain scoring complete');
 
-    // Calculate moonshot assessment
-    const moonshotAssessment = moonshotAssessor.assess(
-      metrics,
-      safetyResult,
-      volumeAuthenticity,
-      socialMetrics
-    );
-
-    // Add safety and moonshot info to flags
-    if (safetyResult.safetyScore < 60) {
-      discoveryScore.flags.push(`SAFETY_${safetyResult.safetyScore}`);
-    }
-    if (safetyResult.insiderAnalysis.insiderRiskScore > 50) {
-      discoveryScore.flags.push(`INSIDER_RISK_${safetyResult.insiderAnalysis.insiderRiskScore}`);
-    }
-
-    // Check if meets discovery requirements
-    const discoveryCheck = scoringEngine.meetsDiscoveryRequirements(discoveryScore, scamResult);
-    const moonshotCheck = moonshotAssessor.meetsDiscoveryThreshold(moonshotAssessment);
-
-    if (!discoveryCheck.meets || !moonshotCheck) {
+    // Step 2: Check if bundle/safety risk is too high
+    if (onChainScore.riskLevel === 'CRITICAL' || onChainScore.riskLevel === 'HIGH') {
       logger.debug({
         tokenAddress,
-        score: discoveryScore.compositeScore,
-        moonshotScore: moonshotAssessment.score,
-        moonshotGrade: moonshotAssessment.grade,
-        reason: discoveryCheck.reason || 'Moonshot threshold not met',
-      }, 'Token did not meet discovery requirements');
+        riskLevel: onChainScore.riskLevel,
+        warnings: onChainScore.warnings,
+      }, 'Token blocked by risk assessment');
+      return SignalGenerator.EVAL_RESULTS.BUNDLE_BLOCKED;
+    }
+
+    // Step 3: Check minimum thresholds
+    // Using lower thresholds than KOL signals: momentum >= 35, total >= 45
+    const MIN_MOMENTUM_SCORE = 35;  // Lowered for more signals
+    const MIN_ONCHAIN_SCORE = 45;   // Lowered for more signals
+
+    if (onChainScore.components.momentum < MIN_MOMENTUM_SCORE) {
+      logger.debug({
+        tokenAddress,
+        momentumScore: onChainScore.components.momentum,
+        minRequired: MIN_MOMENTUM_SCORE,
+      }, 'Token did not meet momentum threshold');
+      return SignalGenerator.EVAL_RESULTS.MOMENTUM_FAILED;
+    }
+
+    // Check if on-chain score recommends action
+    if (onChainScore.total < MIN_ONCHAIN_SCORE ||
+        onChainScore.recommendation === 'STRONG_AVOID' ||
+        onChainScore.recommendation === 'AVOID') {
+      logger.debug({
+        tokenAddress,
+        onChainScore: onChainScore.total,
+        recommendation: onChainScore.recommendation,
+      }, 'Token did not meet on-chain score requirements');
       return SignalGenerator.EVAL_RESULTS.DISCOVERY_FAILED;
     }
 
-    // Generate and send discovery signal
-    const discoverySignal = this.buildDiscoverySignal(
-      tokenAddress,
-      metrics,
-      discoveryScore,
-      volumeAuthenticity,
-      scamResult,
-      safetyResult,
-      moonshotAssessment
+    // Step 4: Get additional data for position sizing and display
+    const bundleAnalysis = await bundleDetector.analyze(tokenAddress);
+    const momentumData = await momentumAnalyzer.analyze(tokenAddress);
+    const momentumScore = momentumData ? momentumAnalyzer.calculateScore(momentumData) : null;
+
+    // Step 5: Calculate position size using small capital manager
+    // Create a compatible MomentumScore object for the manager
+    const mockMomentumScore = {
+      total: onChainScore.components.momentum,
+      breakdown: {
+        buyPressure: onChainScore.components.momentum / 4,
+        volumeMomentum: onChainScore.components.momentum / 4,
+        tradeQuality: onChainScore.components.momentum / 4,
+        holderGrowth: onChainScore.components.momentum / 4,
+      },
+      signals: onChainScore.bullishSignals,
+      flags: onChainScore.warnings,
+      confidence: onChainScore.confidence,
+    };
+
+    const signalQuality = smallCapitalManager.classifySignal(
+      mockMomentumScore as any,
+      safetyResult.safetyScore,
+      bundleAnalysis,
+      false, // kolValidated
+      false  // multiKol
     );
 
-    // Track for KOL follow-up
-    this.discoverySignals.set(tokenAddress, discoverySignal);
+    const positionSize = smallCapitalManager.calculatePositionSize(signalQuality);
 
-    // Send discovery alert
-    await telegramBot.sendDiscoverySignal(discoverySignal);
+    // Step 6: Build and send on-chain momentum signal
+    const onChainSignal = this.buildOnChainSignal(
+      tokenAddress,
+      metrics,
+      onChainScore,
+      bundleAnalysis,
+      safetyResult,
+      positionSize,
+      signalQuality,
+      momentumScore
+    );
+
+    // Track for KOL follow-up (optional validation)
+    this.discoverySignals.set(tokenAddress, onChainSignal);
+
+    // Send on-chain signal via Telegram
+    await telegramBot.sendOnChainSignal(onChainSignal);
 
     logger.info({
       tokenAddress,
       ticker: metrics.ticker,
-      score: discoveryScore.compositeScore,
-      moonshotGrade: moonshotAssessment.grade,
-    }, 'Discovery signal sent');
+      momentumScore: onChainScore.components.momentum,
+      onChainTotal: onChainScore.total,
+      recommendation: onChainScore.recommendation,
+      positionSize: positionSize.solAmount,
+      signalStrength: signalQuality.signalStrength,
+    }, 'On-chain momentum signal sent');
 
-    // FEATURE 4: Track Pump.fun tokens
+    // Track Pump.fun tokens
     if (await bondingCurveMonitor.isPumpfunToken(tokenAddress)) {
       await bondingCurveMonitor.trackToken(tokenAddress);
     }
 
-    return SignalGenerator.EVAL_RESULTS.DISCOVERY_SENT;
+    return SignalGenerator.EVAL_RESULTS.ONCHAIN_SIGNAL_SENT;
+  }
+
+  /**
+   * Build on-chain momentum signal (no KOL dependency)
+   */
+  private buildOnChainSignal(
+    tokenAddress: string,
+    metrics: TokenMetrics,
+    onChainScore: OnChainScore,
+    bundleAnalysis: BundleAnalysisResult,
+    safetyResult: TokenSafetyResult,
+    positionSize: any,
+    signalQuality: SignalQuality,
+    momentumScore: any
+  ): DiscoverySignal {
+    // Build risk warnings
+    const riskWarnings: string[] = [];
+
+    if (!signalQuality.kolValidated) {
+      riskWarnings.push('ON-CHAIN SIGNAL: No KOL validation - based on momentum metrics');
+    }
+    if (metrics.tokenAge < 60) {
+      riskWarnings.push('Token is less than 1 hour old');
+    }
+    if (metrics.liquidityPool < 25000) {
+      riskWarnings.push(`Low liquidity: $${metrics.liquidityPool.toLocaleString()}`);
+    }
+    if (bundleAnalysis.riskScore > 30) {
+      riskWarnings.push(`Bundle risk: ${bundleAnalysis.riskScore}% (${bundleAnalysis.riskLevel})`);
+    }
+    riskWarnings.push(...onChainScore.warnings);
+
+    // Build score object for compatibility
+    const score = {
+      compositeScore: onChainScore.total,
+      factors: {
+        onChainHealth: onChainScore.components.marketStructure,
+        socialMomentum: 0, // Not used in on-chain signals
+        kolConvictionMain: 0,
+        kolConvictionSide: 0,
+        scamRiskInverse: onChainScore.components.safety,
+        narrativeBonus: 0,
+        timingBonus: onChainScore.components.timing,
+      },
+      confidence: signalQuality.signalStrength === 'STRONG' ? 'HIGH' :
+                  signalQuality.signalStrength === 'MODERATE' ? 'MEDIUM' : 'LOW',
+      confidenceBand: 15,
+      flags: [
+        'ONCHAIN_SIGNAL',
+        `MOMENTUM_${onChainScore.components.momentum}`,
+        ...onChainScore.bullishSignals.slice(0, 3),
+      ],
+      riskLevel: onChainScore.riskLevel === 'HIGH' || onChainScore.riskLevel === 'CRITICAL' ? 'HIGH' :
+                 onChainScore.riskLevel === 'MEDIUM' ? 'MEDIUM' : 'LOW',
+    };
+
+    return {
+      id: `onchain_${Date.now()}_${tokenAddress.slice(0, 8)}`,
+      tokenAddress,
+      tokenTicker: metrics.ticker,
+      tokenName: metrics.name,
+
+      score,
+      tokenMetrics: metrics,
+      volumeAuthenticity: { score: onChainScore.components.momentum },
+      scamFilter: { result: 'PASS', flags: [] },
+      safetyResult,
+
+      moonshotAssessment: {
+        score: onChainScore.total,
+        grade: onChainScore.grade,
+        estimatedPotential: signalQuality.signalStrength === 'STRONG' ? 'HIGH' : 'MEDIUM',
+        factors: [],
+      },
+
+      kolActivity: null,
+
+      suggestedPositionSize: positionSize.solAmount,
+      riskWarnings,
+
+      generatedAt: new Date(),
+      signalType: SignalType.DISCOVERY,
+
+      discoveredAt: new Date(),
+      kolValidatedAt: null,
+
+      // Extra on-chain data for telegram formatting
+      momentumScore: momentumScore || {
+        total: onChainScore.components.momentum,
+        metrics: { buySellRatio: 1.5, uniqueBuyers5m: 10, netBuyPressure: 1000 },
+        components: {
+          buyPressure: onChainScore.components.momentum / 4,
+          volumeVelocity: onChainScore.components.momentum / 4,
+          tradeQuality: onChainScore.components.momentum / 4,
+          holderGrowth: onChainScore.components.momentum / 4,
+        },
+      },
+      bundleAnalysis,
+      onChainScore,
+      positionRationale: positionSize.rationale,
+    } as any;
   }
 
   /**

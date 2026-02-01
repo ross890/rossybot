@@ -43,6 +43,7 @@ export class PositionManager {
   private isRunning = false;
   private monitorInterval: NodeJS.Timeout | null = null;
   private readonly MONITOR_INTERVAL_MS = 30 * 1000; // Check every 30 seconds
+  private tablesVerified = false;
 
   /**
    * Start monitoring positions
@@ -215,28 +216,54 @@ export class PositionManager {
    * Get all open positions with config
    */
   private async getOpenPositions(): Promise<ManagedPosition[]> {
-    const result = await pool.query(`
-      SELECT
-        p.id,
-        p.token_address,
-        p.token_ticker,
-        p.entry_price,
-        p.current_price,
-        p.quantity,
-        p.entry_timestamp,
-        p.stop_loss,
-        p.take_profit_1,
-        p.take_profit_2,
-        p.take_profit_1_hit,
-        p.take_profit_2_hit,
-        COALESCE(pc.signal_category, 'MANUAL_CONFIRM') as signal_category,
-        COALESCE(pc.tp1_sell_percent, 50) as tp1_sell_percent,
-        COALESCE(pc.tp2_sell_percent, 50) as tp2_sell_percent
-      FROM positions p
-      LEFT JOIN position_config pc ON p.id = pc.position_id
-      WHERE p.status = 'OPEN'
-      ORDER BY p.entry_timestamp DESC
-    `);
+    // Try query with position_config join, fall back to simpler query if table doesn't exist
+    let result;
+    try {
+      result = await pool.query(`
+        SELECT
+          p.id,
+          p.token_address,
+          p.token_ticker,
+          p.entry_price,
+          p.current_price,
+          p.quantity,
+          p.entry_timestamp,
+          p.stop_loss,
+          p.take_profit_1,
+          p.take_profit_2,
+          p.take_profit_1_hit,
+          p.take_profit_2_hit,
+          COALESCE(pc.signal_category, 'MANUAL_CONFIRM') as signal_category,
+          COALESCE(pc.tp1_sell_percent, 50) as tp1_sell_percent,
+          COALESCE(pc.tp2_sell_percent, 50) as tp2_sell_percent
+        FROM positions p
+        LEFT JOIN position_config pc ON p.id = pc.position_id
+        WHERE p.status = 'OPEN'
+        ORDER BY p.entry_timestamp DESC
+      `);
+    } catch (error) {
+      // If position_config table doesn't exist, use simpler query
+      if (String(error).includes('position_config') || String(error).includes('does not exist')) {
+        if (!this.tablesVerified) {
+          logger.warn('position_config table not found - run npm run db:migrate:trading');
+          this.tablesVerified = true; // Only log once
+        }
+        result = await pool.query(`
+          SELECT
+            id, token_address, token_ticker, entry_price, current_price, quantity,
+            entry_timestamp, stop_loss, take_profit_1, take_profit_2,
+            take_profit_1_hit, take_profit_2_hit,
+            'MANUAL_CONFIRM' as signal_category,
+            50 as tp1_sell_percent,
+            50 as tp2_sell_percent
+          FROM positions
+          WHERE status = 'OPEN'
+          ORDER BY entry_timestamp DESC
+        `);
+      } else {
+        throw error;
+      }
+    }
 
     return result.rows.map(row => {
       const entryPrice = parseFloat(row.entry_price);

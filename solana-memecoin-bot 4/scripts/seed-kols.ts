@@ -331,6 +331,242 @@ const RESEARCHED_KOLS: KolData[] = [
     ],
     sideWallets: [],
   },
+
+  // =============================================
+  // DUNE SMART WALLET ANALYSIS - TOP PERFORMERS
+  // Source: ChainCatcher/Bitget analysis of 1,080 smart wallets
+  // Avg 63.55% win rate, $980K total profit across cohort
+  // =============================================
+  {
+    handle: 'dune_smart_1',
+    displayName: 'Dune Top Performer #1',
+    followerCount: null,
+    tier: KolTier.TIER_3,
+    notes: 'Dune smart wallet analysis - 100% win rate, $106K 30-day profit, highest individual score (4.85)',
+    mainWallets: [
+      {
+        address: '6FNbu3i6vpigXMatC6SyWKibUAdJyyX8nM8WDtZCNcEz',
+        confidence: AttributionConfidence.MEDIUM,
+        linkMethod: LinkMethod.BEHAVIOURAL_MATCH,
+        notes: 'Dune smart wallet analysis - 63.55% avg win rate cohort, rank #1',
+      },
+    ],
+    sideWallets: [],
+  },
+  {
+    handle: 'dune_smart_2',
+    displayName: 'Dune Top Performer #2',
+    followerCount: null,
+    tier: KolTier.TIER_3,
+    notes: 'Dune smart wallet analysis - top 10 performer from 1,080 wallet cohort',
+    mainWallets: [
+      {
+        address: '6xUL8CUfV1fzd3UQoDBs7agWNXpwyE5q56css1wHNFFU',
+        confidence: AttributionConfidence.MEDIUM,
+        linkMethod: LinkMethod.BEHAVIOURAL_MATCH,
+        notes: 'Dune smart wallet analysis - 63.55% avg win rate cohort, rank #2',
+      },
+    ],
+    sideWallets: [],
+  },
+  {
+    handle: 'dune_smart_3',
+    displayName: 'Dune Top Performer #3',
+    followerCount: null,
+    tier: KolTier.TIER_3,
+    notes: 'Dune smart wallet analysis - top 10 performer from 1,080 wallet cohort',
+    mainWallets: [
+      {
+        address: '4J5rDTvRbzjuKkB4B9rvNEvDz6f1BEBzUVT5mdctKHoT',
+        confidence: AttributionConfidence.MEDIUM,
+        linkMethod: LinkMethod.BEHAVIOURAL_MATCH,
+        notes: 'Dune smart wallet analysis - 63.55% avg win rate cohort, rank #3',
+      },
+    ],
+    sideWallets: [],
+  },
+  {
+    handle: 'dune_smart_4',
+    displayName: 'Dune Top Performer #4',
+    followerCount: null,
+    tier: KolTier.TIER_3,
+    notes: 'Dune smart wallet analysis - top 10 performer from 1,080 wallet cohort',
+    mainWallets: [
+      {
+        address: '9v6RGY46wf672PtpYMxCJ1nvrVTrukUDn1AjE634rvCf',
+        confidence: AttributionConfidence.MEDIUM,
+        linkMethod: LinkMethod.BEHAVIOURAL_MATCH,
+        notes: 'Dune smart wallet analysis - 63.55% avg win rate cohort, rank #4',
+      },
+    ],
+    sideWallets: [],
+  },
+  {
+    handle: 'dune_smart_5',
+    displayName: 'Dune Top Performer #5',
+    followerCount: null,
+    tier: KolTier.TIER_3,
+    notes: 'Dune smart wallet analysis - top 10 performer from 1,080 wallet cohort',
+    mainWallets: [
+      {
+        address: 'GpNbukV5nggkJfsEEbKrJaZkdgYcNWCAaD91Mi4MmGQi',
+        confidence: AttributionConfidence.MEDIUM,
+        linkMethod: LinkMethod.BEHAVIOURAL_MATCH,
+        notes: 'Dune smart wallet analysis - 63.55% avg win rate cohort, rank #5',
+      },
+    ],
+    sideWallets: [],
+  },
+  {
+    handle: 'dune_smart_6',
+    displayName: 'Dune Top Performer #6',
+    followerCount: null,
+    tier: KolTier.TIER_3,
+    notes: 'Dune smart wallet analysis - top 10 performer from 1,080 wallet cohort',
+    mainWallets: [
+      {
+        address: 'DNfuF1L62WWyW3pNakVkyGGFzVVhj4Yr52jSmdTyeBHm',
+        confidence: AttributionConfidence.MEDIUM,
+        linkMethod: LinkMethod.BEHAVIOURAL_MATCH,
+        notes: 'Dune smart wallet analysis - 63.55% avg win rate cohort, rank #6',
+      },
+    ],
+    sideWallets: [],
+  },
+  {
+    handle: 'dune_smart_7',
+    displayName: 'Dune Top Performer #7',
+    followerCount: null,
+    tier: KolTier.TIER_3,
+    notes: 'Dune smart wallet analysis - top 10 performer from 1,080 wallet cohort',
+    mainWallets: [
+      {
+        address: 'FTg1gqW7vPm4kdU1LPM7JJnizbgPdRDy2PitKw6mY27j',
+        confidence: AttributionConfidence.MEDIUM,
+        linkMethod: LinkMethod.BEHAVIOURAL_MATCH,
+        notes: 'Dune smart wallet analysis - 63.55% avg win rate cohort, rank #7',
+      },
+    ],
+    sideWallets: [],
+  },
+  {
+    handle: 'dune_smart_8',
+    displayName: 'Dune Top Performer #8',
+    followerCount: null,
+    tier: KolTier.TIER_3,
+    notes: 'Dune smart wallet analysis - top 10 performer from 1,080 wallet cohort',
+    mainWallets: [
+      {
+        address: '69ngexW9UkgRp5KFjLpaK9XNSCxUFmps6jYmqhK3q6m9',
+        confidence: AttributionConfidence.MEDIUM,
+        linkMethod: LinkMethod.BEHAVIOURAL_MATCH,
+        notes: 'Dune smart wallet analysis - 63.55% avg win rate cohort, rank #8',
+      },
+    ],
+    sideWallets: [],
+  },
+  {
+    handle: 'dune_smart_9',
+    displayName: 'Dune Top Performer #9',
+    followerCount: null,
+    tier: KolTier.TIER_3,
+    notes: 'Dune smart wallet analysis - top 10 performer from 1,080 wallet cohort',
+    mainWallets: [
+      {
+        address: '7XgBprwnRfFHd287pnNQj4AZ6Yb9QE5pJ6ChQ3zhsGpJ',
+        confidence: AttributionConfidence.MEDIUM,
+        linkMethod: LinkMethod.BEHAVIOURAL_MATCH,
+        notes: 'Dune smart wallet analysis - 63.55% avg win rate cohort, rank #9',
+      },
+    ],
+    sideWallets: [],
+  },
+
+  // =============================================
+  // GMGN/BEINCRYPTO SMART MONEY WALLETS
+  // Source: BeInCrypto "Top Smart Wallets" analysis
+  // =============================================
+  {
+    handle: 'gmgn_sniper_1',
+    displayName: 'GMGN Elite Sniper',
+    followerCount: null,
+    tier: KolTier.TIER_3,
+    notes: 'GMGN highlighted sniper - known for early entries into explosive memecoins',
+    mainWallets: [
+      {
+        address: 'H72yLkhTnoBfhBTXXaj1RBXuirm8s8G5fcVh2XpQLggM',
+        confidence: AttributionConfidence.MEDIUM,
+        linkMethod: LinkMethod.BEHAVIOURAL_MATCH,
+        notes: 'GMGN/BeInCrypto smart money tracking - early entry specialist',
+      },
+    ],
+    sideWallets: [],
+  },
+  {
+    handle: 'smart_money_trump',
+    displayName: 'TRUMP Mega Trader',
+    followerCount: null,
+    tier: KolTier.TIER_3,
+    notes: 'BeInCrypto smart wallet - 49% win rate, turned $511K into $4.87M on TRUMP token',
+    mainWallets: [
+      {
+        address: '9HCTuTPEiQvkUtLmTZvK6uch4E3pDynwJTbNw6jLhp9z',
+        confidence: AttributionConfidence.MEDIUM,
+        linkMethod: LinkMethod.BEHAVIOURAL_MATCH,
+        notes: 'BeInCrypto smart money - specializes in new token launches, $4.3M profit on single trade',
+      },
+    ],
+    sideWallets: [],
+  },
+  {
+    handle: 'smart_money_diversified',
+    displayName: 'Diversified Smart Trader',
+    followerCount: null,
+    tier: KolTier.TIER_3,
+    notes: 'BeInCrypto smart wallet - 52% win rate, $1.3M realized profit, 98 tokens traded. Top trades: JELLYJELLY, GRIFFAIN',
+    mainWallets: [
+      {
+        address: '6kbwsSY4hL6WVadLRLnWV2irkMN2AvFZVAS8McKJmAtJ',
+        confidence: AttributionConfidence.MEDIUM,
+        linkMethod: LinkMethod.BEHAVIOURAL_MATCH,
+        notes: 'BeInCrypto smart money - high volume diversified trader, $100K+ on 5 different tokens',
+      },
+    ],
+    sideWallets: [],
+  },
+  {
+    handle: 'smart_money_volume',
+    displayName: 'High Volume Smart Trader',
+    followerCount: null,
+    tier: KolTier.TIER_3,
+    notes: 'BeInCrypto smart wallet - 58% win rate, $1.4M realized profit, 205 tokens traded over 90 days',
+    mainWallets: [
+      {
+        address: '5fWkLJfoDsRAaXhPJcJY19qNtDDQ5h6q1SPzsAPRrUNG',
+        confidence: AttributionConfidence.MEDIUM,
+        linkMethod: LinkMethod.BEHAVIOURAL_MATCH,
+        notes: 'BeInCrypto smart money - highest win rate in cohort (58%), meme coin specialist',
+      },
+    ],
+    sideWallets: [],
+  },
+
+  // =============================================
+  // PUMP.FUN ELITE - PLACEHOLDER
+  // Top 293 wallets (~0.002% of all Pump.fun traders)
+  // =============================================
+  {
+    handle: 'pumpfun_elite_1',
+    displayName: 'Pump.fun Elite Placeholder',
+    followerCount: null,
+    tier: KolTier.TIER_3,
+    notes: 'PLACEHOLDER: Top Pump.fun trader has ~$40M profits. Address needs extraction from Dune dashboard. Top 0.002% of all Pump.fun traders.',
+    mainWallets: [
+      // Wallet address to be added once extracted from Dune
+      // The #1 Pump.fun wallet shows ~$40M in realized profits
+    ],
+    sideWallets: [],
+  },
 ];
 
 // ============ SEED FUNCTION ============

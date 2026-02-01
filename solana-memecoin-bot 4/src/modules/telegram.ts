@@ -88,20 +88,9 @@ export class TelegramAlertBot {
       port: PORT,
     }, 'Detecting deployment environment');
 
-    // Use webhook mode if we have a public domain, otherwise polling
-    if (RAILWAY_PUBLIC_DOMAIN) {
-      await this.initializeWebhookMode(PORT, RAILWAY_PUBLIC_DOMAIN);
-    } else if (isRailwayEnvironment) {
-      // Railway environment without public domain - warn user
-      logger.warn(
-        'Running on Railway but RAILWAY_PUBLIC_DOMAIN is not set. ' +
-        'Please add a public domain in Railway settings to enable webhook mode. ' +
-        'Falling back to polling mode, which may cause 409 conflicts with multiple instances.'
-      );
-      await this.initializePollingMode();
-    } else {
-      await this.initializePollingMode();
-    }
+    // Always use polling mode for reliable command handling
+    // HTTP server is still started for Railway health checks
+    await this.initializePollingMode();
 
     this.startTime = new Date();
 

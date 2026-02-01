@@ -57,14 +57,14 @@ export interface FactorAnalysis {
 
 // ============ CONSTANTS ============
 
-// Default thresholds (can be overridden)
+// Default thresholds (loosened for data collection)
 const DEFAULT_THRESHOLDS: ThresholdSet = {
-  minMomentumScore: 35,
-  minOnChainScore: 45,
-  minSafetyScore: 50,
-  maxBundleRiskScore: 50,
-  minLiquidity: 15000,
-  maxTop10Concentration: 50,
+  minMomentumScore: 15,      // Was 35 - lowered to allow more signals
+  minOnChainScore: 20,       // Was 45 - lowered to allow more signals
+  minSafetyScore: 30,        // Was 50 - lowered to allow more signals
+  maxBundleRiskScore: 70,    // Was 50 - raised to allow more signals
+  minLiquidity: 5000,        // Was 15000 - lowered to allow more signals
+  maxTop10Concentration: 70, // Was 50 - raised to allow more signals
 };
 
 // Target performance

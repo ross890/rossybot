@@ -32,9 +32,9 @@ import {
   CTOAnalysis,
 } from '../types/index.js';
 
-// Trading module imports
-import { TradingCommands } from './telegram/trading-commands.js';
-import { tradeExecutor, positionManager, autoTrader } from './trading/index.js';
+// Trading module imports (disabled - signal-only mode)
+// import { TradingCommands } from './telegram/trading-commands.js';
+// import { tradeExecutor, positionManager, autoTrader } from './trading/index.js';
 
 // ============ RATE LIMITING ============
 
@@ -56,7 +56,6 @@ export class TelegramAlertBot {
   private lastKolSignalTime: Map<string, number> = new Map();
   private startTime: Date | null = null;
   private isWebhookMode: boolean = false;
-  private tradingCommands: TradingCommands | null = null;
 
   constructor() {
     this.chatId = appConfig.telegramChatId;
@@ -129,32 +128,9 @@ export class TelegramAlertBot {
       logger.error({ error }, 'Failed to initialize performance tracking');
     }
 
-    // Initialize trading system
-    try {
-      // Initialize trade executor
-      await tradeExecutor.initialize();
-
-      // Initialize trading commands
-      if (this.bot) {
-        this.tradingCommands = new TradingCommands(this.bot, this.chatId);
-        await this.tradingCommands.initialize();
-
-        // Connect auto-trader to confirmation callback
-        autoTrader.setConfirmationCallback(async (confirmation) => {
-          if (this.tradingCommands) {
-            return await this.tradingCommands.sendConfirmationRequest(confirmation);
-          }
-          return undefined;
-        });
-
-        // Start position manager
-        positionManager.start();
-
-        logger.info('Trading system initialized');
-      }
-    } catch (error) {
-      logger.error({ error }, 'Failed to initialize trading system');
-    }
+    // Trading system disabled - using signal-only mode
+    // Wallet integration and auto-trading can be re-enabled later
+    logger.info('Running in signal-only mode (trading system disabled)');
 
     logger.info({ mode: this.isWebhookMode ? 'webhook' : 'polling' }, 'Telegram bot (rossybot) initialized');
   }
@@ -328,22 +304,47 @@ export class TelegramAlertBot {
    */
   private setupCommands(): void {
     if (!this.bot) return;
-    
+
+    // Set up Telegram command menu (appears in chat)
+    const SIGNAL_BOT_COMMANDS: TelegramBot.BotCommand[] = [
+      { command: 'status', description: 'Bot status & connection health' },
+      { command: 'performance', description: 'Signal performance & win rate report' },
+      { command: 'safety', description: 'Run safety check: /safety <token>' },
+      { command: 'conviction', description: 'High-conviction tokens (2+ KOLs)' },
+      { command: 'leaderboard', description: 'KOL performance rankings' },
+      { command: 'pumpfun', description: 'Tokens approaching migration' },
+      { command: 'thresholds', description: 'View current signal thresholds' },
+      { command: 'optimize', description: 'Run threshold optimization analysis' },
+      { command: 'reset_thresholds', description: 'Reset thresholds to defaults' },
+      { command: 'test', description: 'Send a test signal' },
+      { command: 'help', description: 'Show all commands' },
+    ];
+
+    this.bot.setMyCommands(SIGNAL_BOT_COMMANDS).then(() => {
+      logger.info('Bot command menu set up successfully');
+    }).catch((error) => {
+      logger.error({ error }, 'Failed to set bot commands');
+    });
+
     // /start command
     this.bot.onText(/\/start/, async (msg) => {
       const chatId = msg.chat.id;
       await this.bot!.sendMessage(chatId,
         '*rossybot* initialized!\n\n' +
         'You will receive memecoin buy signals here.\n\n' +
-        '*Commands:*\n' +
+        '*Signal Commands:*\n' +
         '/status - Bot status & connection health\n' +
-        '/positions - Open positions\n' +
-        '/performance - Signal performance & win rate\n' +
+        '/performance - Signal performance & win rate report\n' +
         '/safety <token> - Run safety check on any token\n' +
-        '/conviction - Show high-conviction tokens\n' +
+        '/conviction - Show high-conviction tokens (2+ KOLs)\n' +
         '/leaderboard - KOL performance rankings\n' +
         '/pumpfun - Tokens approaching migration\n' +
-        '/test - Send a test signal\n' +
+        '/test - Send a test signal\n\n' +
+        '*Threshold Commands:*\n' +
+        '/thresholds - View current signal thresholds\n' +
+        '/optimize - Run threshold optimization analysis\n' +
+        '/apply\\_thresholds - Apply recommended changes\n' +
+        '/reset\\_thresholds - Reset to defaults\n\n' +
         '/help - Show all commands',
         { parse_mode: 'Markdown' }
       );
@@ -369,13 +370,19 @@ export class TelegramAlertBot {
       const chatId = msg.chat.id;
       await this.bot!.sendMessage(chatId,
         '📖 *rossybot Help*\n\n' +
-        '*Commands:*\n' +
+        '*Signal Commands:*\n' +
         '/status - Bot status, uptime & connection health\n' +
-        '/positions - List all open positions with P&L\n' +
-        '/test - Send a test signal to verify bot is working\n' +
-        '/pause - Temporarily stop receiving signals\n' +
-        '/resume - Resume signal delivery\n' +
-        '/help - Show this message\n\n' +
+        '/performance - Signal performance & win rate report\n' +
+        '/safety <token> - Run safety check on any token\n' +
+        '/conviction - High-conviction tokens (2+ KOLs)\n' +
+        '/leaderboard - KOL performance rankings\n' +
+        '/pumpfun - Tokens approaching migration\n' +
+        '/test - Send a test signal\n\n' +
+        '*Threshold Commands:*\n' +
+        '/thresholds - View current signal thresholds\n' +
+        '/optimize - Run optimization analysis\n' +
+        '/apply\\_thresholds - Apply recommended changes\n' +
+        '/reset\\_thresholds - Reset to defaults\n\n' +
         '*Signal Format:*\n' +
         'Each buy signal includes:\n' +
         '• Token details and metrics\n' +
@@ -593,8 +600,105 @@ export class TelegramAlertBot {
         await this.bot!.sendMessage(chatId, `Failed to apply thresholds: ${errorMessage}`);
       }
     });
+
+    // /thresholds command - View current signal thresholds
+    this.bot.onText(/\/thresholds/, async (msg) => {
+      const chatId = msg.chat.id;
+
+      try {
+        const current = thresholdOptimizer.getCurrentThresholds();
+        const defaults = thresholdOptimizer.getDefaultThresholds();
+
+        let message = '🎯 *SIGNAL THRESHOLDS*\n\n';
+        message += '*Current Values:*\n';
+        message += `• Min Momentum Score: ${current.minMomentumScore}`;
+        if (current.minMomentumScore !== defaults.minMomentumScore) {
+          message += ` (default: ${defaults.minMomentumScore})`;
+        }
+        message += '\n';
+
+        message += `• Min OnChain Score: ${current.minOnChainScore}`;
+        if (current.minOnChainScore !== defaults.minOnChainScore) {
+          message += ` (default: ${defaults.minOnChainScore})`;
+        }
+        message += '\n';
+
+        message += `• Min Safety Score: ${current.minSafetyScore}`;
+        if (current.minSafetyScore !== defaults.minSafetyScore) {
+          message += ` (default: ${defaults.minSafetyScore})`;
+        }
+        message += '\n';
+
+        message += `• Max Bundle Risk: ${current.maxBundleRiskScore}`;
+        if (current.maxBundleRiskScore !== defaults.maxBundleRiskScore) {
+          message += ` (default: ${defaults.maxBundleRiskScore})`;
+        }
+        message += '\n';
+
+        message += `• Min Liquidity: $${current.minLiquidity.toLocaleString()}`;
+        if (current.minLiquidity !== defaults.minLiquidity) {
+          message += ` (default: $${defaults.minLiquidity.toLocaleString()})`;
+        }
+        message += '\n';
+
+        message += `• Max Top10 Concentration: ${current.maxTop10Concentration}%`;
+        if (current.maxTop10Concentration !== defaults.maxTop10Concentration) {
+          message += ` (default: ${defaults.maxTop10Concentration}%)`;
+        }
+        message += '\n\n';
+
+        // Check if any threshold differs from default
+        const hasChanges =
+          current.minMomentumScore !== defaults.minMomentumScore ||
+          current.minOnChainScore !== defaults.minOnChainScore ||
+          current.minSafetyScore !== defaults.minSafetyScore ||
+          current.maxBundleRiskScore !== defaults.maxBundleRiskScore ||
+          current.minLiquidity !== defaults.minLiquidity ||
+          current.maxTop10Concentration !== defaults.maxTop10Concentration;
+
+        if (hasChanges) {
+          message += '⚠️ Thresholds have been modified from defaults.\n';
+          message += 'Use `/reset_thresholds` to restore defaults.\n\n';
+        } else {
+          message += '✅ Using default thresholds.\n\n';
+        }
+
+        message += '_Higher min scores = stricter filtering (fewer signals)_\n';
+        message += '_Lower max scores = stricter filtering (fewer signals)_';
+
+        await this.bot!.sendMessage(chatId, message, { parse_mode: 'Markdown' });
+      } catch (error) {
+        const errorMessage = error instanceof Error ? error.message : 'Unknown error';
+        logger.error({ error, chatId }, 'Failed to get thresholds');
+        await this.bot!.sendMessage(chatId, `Failed to get thresholds: ${errorMessage}`);
+      }
+    });
+
+    // /reset_thresholds command - Reset to defaults
+    this.bot.onText(/\/reset_thresholds/, async (msg) => {
+      const chatId = msg.chat.id;
+
+      try {
+        const defaults = await thresholdOptimizer.resetThresholds();
+
+        let message = '✅ *THRESHOLDS RESET TO DEFAULTS*\n\n';
+        message += `• Min Momentum Score: ${defaults.minMomentumScore}\n`;
+        message += `• Min OnChain Score: ${defaults.minOnChainScore}\n`;
+        message += `• Min Safety Score: ${defaults.minSafetyScore}\n`;
+        message += `• Max Bundle Risk: ${defaults.maxBundleRiskScore}\n`;
+        message += `• Min Liquidity: $${defaults.minLiquidity.toLocaleString()}\n`;
+        message += `• Max Top10 Concentration: ${defaults.maxTop10Concentration}%\n\n`;
+        message += '_Signal filtering restored to original settings._';
+
+        await this.bot!.sendMessage(chatId, message, { parse_mode: 'Markdown' });
+      } catch (error) {
+        const errorMessage = error instanceof Error ? error.message : 'Unknown error';
+        logger.error({ error, chatId }, 'Failed to reset thresholds');
+        await this.bot!.sendMessage(chatId, `Failed to reset thresholds: ${errorMessage}`);
+      }
+    });
   }
-  
+
   /**
    * Send a buy signal alert
    */

@@ -1297,7 +1297,7 @@ export class TelegramAlertBot {
    * Format discovery signal message
    */
   private formatDiscoverySignal(signal: DiscoverySignal): string {
-    const { score, tokenMetrics, moonshotAssessment, safetyResult, scamFilter, dexScreenerInfo, ctoAnalysis } = signal;
+    const { score, tokenMetrics, moonshotAssessment, safetyResult, scamFilter, socialMetrics, dexScreenerInfo, ctoAnalysis } = signal;
 
     // Moonshot grade emoji for header
     const gradeEmoji = moonshotAssessment.grade === 'A' ? '🔥' :
@@ -1364,6 +1364,44 @@ export class TelegramAlertBot {
     msg += `├─ Freeze Authority: ${safetyResult.freezeAuthorityEnabled ? '⚠️ ENABLED' : '✅ Revoked'}\n`;
     msg += `├─ Insider Risk: ${safetyResult.insiderAnalysis.insiderRiskScore}/100\n`;
     msg += `└─ Bundle Risk: ${scamFilter.bundleAnalysis.riskLevel === 'LOW' ? '🟢 CLEAR' : scamFilter.bundleAnalysis.riskLevel === 'MEDIUM' ? '🟡 FLAGGED' : '🔴 HIGH'}\n\n`;
+
+    msg += `───────────────────────────────\n`;
+    // Social signals - X Integration
+    msg += `𝕏 *X/SOCIAL SIGNALS*\n`;
+
+    // Social velocity with visual indicator
+    const velocityEmojiD = socialMetrics.mentionVelocity1h >= 50 ? '🔥' :
+                          socialMetrics.mentionVelocity1h >= 20 ? '📈' :
+                          socialMetrics.mentionVelocity1h >= 5 ? '📊' : '📉';
+    const velocityLabelD = socialMetrics.mentionVelocity1h >= 50 ? 'VIRAL' :
+                          socialMetrics.mentionVelocity1h >= 20 ? 'HIGH' :
+                          socialMetrics.mentionVelocity1h >= 5 ? 'MODERATE' : 'LOW';
+    msg += `├─ Velocity: ${velocityEmojiD} *${socialMetrics.mentionVelocity1h}* mentions/hr (${velocityLabelD})\n`;
+
+    // Engagement quality score
+    const engagementPercentD = Math.round(socialMetrics.engagementQuality * 100);
+    const engagementEmojiD = engagementPercentD >= 70 ? '🟢' : engagementPercentD >= 40 ? '🟡' : '🔴';
+    msg += `├─ Engagement: ${engagementEmojiD} ${engagementPercentD}/100\n`;
+
+    // Account authenticity
+    const authPercentD = Math.round(socialMetrics.accountAuthenticity * 100);
+    const authEmojiD = authPercentD >= 70 ? '✅' : authPercentD >= 40 ? '⚠️' : '🚨';
+    msg += `├─ Authenticity: ${authEmojiD} ${authPercentD}/100\n`;
+
+    // KOL mentions with tiers
+    if (socialMetrics.kolMentions.length > 0) {
+      const kolDisplayD = socialMetrics.kolMentions.slice(0, 3).map(k => {
+        const tierBadge = k.tier ? `[${k.tier}]` : '';
+        return `@${k.handle}${tierBadge}`;
+      }).join(', ');
+      msg += `├─ KOL Mentions: 👑 ${kolDisplayD}\n`;
+    } else {
+      msg += `├─ KOL Mentions: None yet\n`;
+    }
+
+    // Sentiment
+    msg += `├─ Sentiment: ${socialMetrics.sentimentPolarity > 0.3 ? '🟢 POSITIVE' : socialMetrics.sentimentPolarity > -0.3 ? '🟡 NEUTRAL' : '🔴 NEGATIVE'}\n`;
+    msg += `└─ Narrative: ${socialMetrics.narrativeFit || 'N/A'}\n\n`;
 
     msg += `───────────────────────────────\n`;
     // KOL Status

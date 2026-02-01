@@ -524,6 +524,7 @@ export class SignalGenerator {
       positionSize,
       signalQuality,
       momentumScore,
+      socialMetrics,
       dexScreenerInfo,
       ctoAnalysis
     );
@@ -592,6 +593,7 @@ export class SignalGenerator {
     positionSize: any,
     signalQuality: SignalQuality,
     momentumScore: any,
+    socialMetrics: SocialMetrics,
     dexScreenerInfo?: DexScreenerTokenInfo,
     ctoAnalysis?: CTOAnalysis
   ): DiscoverySignal {
@@ -647,6 +649,7 @@ export class SignalGenerator {
       volumeAuthenticity: { score: onChainScore.components.momentum },
       scamFilter: { result: 'PASS', flags: [] },
       safetyResult,
+      socialMetrics,
 
       moonshotAssessment: {
         score: onChainScore.total,
@@ -867,7 +870,8 @@ export class SignalGenerator {
     volumeAuthenticity: any,
     scamResult: any,
     safetyResult: TokenSafetyResult,
-    moonshotAssessment: MoonshotAssessment
+    moonshotAssessment: MoonshotAssessment,
+    socialMetrics?: SocialMetrics
   ): DiscoverySignal {
     // Calculate suggested position size (50% of normal for discovery)
     let positionSize = appConfig.trading.defaultPositionSizePercent * 0.5;
@@ -896,6 +900,17 @@ export class SignalGenerator {
       riskWarnings.push(`Moonshot potential: ${moonshotAssessment.estimatedPotential}`);
     }
 
+    // Default social metrics if not provided
+    const defaultSocialMetrics: SocialMetrics = socialMetrics || {
+      mentionVelocity1h: 0,
+      engagementQuality: 0,
+      accountAuthenticity: 0,
+      sentimentPolarity: 0,
+      kolMentionDetected: false,
+      kolMentions: [],
+      narrativeFit: null,
+    };
+
     return {
       id: `disc_${Date.now()}_${tokenAddress.slice(0, 8)}`,
       tokenAddress,
@@ -907,6 +922,7 @@ export class SignalGenerator {
       volumeAuthenticity,
       scamFilter: scamResult,
       safetyResult,
+      socialMetrics: defaultSocialMetrics,
 
       moonshotAssessment,
 

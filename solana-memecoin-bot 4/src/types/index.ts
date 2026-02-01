@@ -611,6 +611,7 @@ export interface DiscoverySignal {
   volumeAuthenticity: VolumeAuthenticityScore;
   scamFilter: ScamFilterOutput;
   safetyResult: TokenSafetyResult;
+  socialMetrics: SocialMetrics;
 
   // Moonshot assessment
   moonshotAssessment: MoonshotAssessment;

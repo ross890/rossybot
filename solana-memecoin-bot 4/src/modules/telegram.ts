@@ -377,15 +377,15 @@ export class TelegramAlertBot {
       }
     });
 
-    // /performance command - Show signal performance stats
+    // /performance command - Show compact signal performance report for analysis
     this.bot.onText(/\/performance/, async (msg) => {
       const chatId = msg.chat.id;
 
       try {
-        await this.bot!.sendMessage(chatId, 'Generating performance report...', { parse_mode: 'Markdown' });
+        await this.bot!.sendMessage(chatId, 'Generating compact performance report...', { parse_mode: 'Markdown' });
 
-        const report = await dailyReportGenerator.generateReport(168); // Last 7 days
-        await this.bot!.sendMessage(chatId, report.telegramMessage, { parse_mode: 'Markdown' });
+        const compactReport = await this.generateCompactPerformanceReport();
+        await this.bot!.sendMessage(chatId, compactReport, { parse_mode: 'Markdown' });
       } catch (error) {
         const errorMessage = error instanceof Error ? error.message : 'Unknown error';
         logger.error({ error, chatId }, 'Failed to get performance report');
@@ -610,6 +610,104 @@ export class TelegramAlertBot {
     msg += `⚠️ _DYOR. Not financial advice. KOL buys ≠ guaranteed profits._`;
 
     return msg;
+  }
+
+  /**
+   * Generate compact performance report for analysis
+   * Format optimized for pasting to Claude for threshold tuning
+   */
+  private async generateCompactPerformanceReport(): Promise<string> {
+    const stats = await signalPerformanceTracker.getPerformanceStats(168); // Last 7 days
+    const correlations = await signalPerformanceTracker.getFactorCorrelations();
+    const thresholds = thresholdOptimizer.getCurrentThresholds();
+
+    // Get raw signal data for deeper analysis
+    const rawData = await this.getRawSignalData();
+
+    let msg = '```\n';
+    msg += 'PERFORMANCE REPORT\n';
+    msg += '==================\n\n';
+
+    // Summary
+    msg += `SUMMARY (7d)\n`;
+    msg += `Total: ${stats.totalSignals} | Done: ${stats.completedSignals} | Pending: ${stats.pendingSignals}\n`;
+    msg += `Wins: ${stats.wins} | Losses: ${stats.losses} | WinRate: ${stats.winRate.toFixed(1)}%\n`;
+    msg += `AvgRet: ${stats.avgReturn.toFixed(1)}% | AvgWin: ${stats.avgWinReturn.toFixed(1)}% | AvgLoss: ${stats.avgLossReturn.toFixed(1)}%\n`;
+    msg += `Best: ${stats.bestReturn.toFixed(1)}% | Worst: ${stats.worstReturn.toFixed(1)}%\n\n`;
+
+    // By Score Range
+    msg += `BY SCORE RANGE\n`;
+    msg += `High(70+): n=${stats.byScoreRange.high.count} wr=${stats.byScoreRange.high.winRate.toFixed(0)}% ret=${stats.byScoreRange.high.avgReturn.toFixed(1)}%\n`;
+    msg += `Med(50-69): n=${stats.byScoreRange.medium.count} wr=${stats.byScoreRange.medium.winRate.toFixed(0)}% ret=${stats.byScoreRange.medium.avgReturn.toFixed(1)}%\n`;
+    msg += `Low(<50): n=${stats.byScoreRange.low.count} wr=${stats.byScoreRange.low.winRate.toFixed(0)}% ret=${stats.byScoreRange.low.avgReturn.toFixed(1)}%\n\n`;
+
+    // By Strength
+    msg += `BY STRENGTH\n`;
+    for (const [strength, data] of Object.entries(stats.byStrength)) {
+      if (data.count > 0) {
+        msg += `${strength}: n=${data.count} wr=${data.winRate.toFixed(0)}% ret=${data.avgReturn.toFixed(1)}%\n`;
+      }
+    }
+    msg += '\n';
+
+    // Factor Correlations (most predictive factors)
+    msg += `FACTOR CORRELATIONS (sorted by |corr|)\n`;
+    if (correlations.length > 0) {
+      for (const c of correlations.slice(0, 10)) {
+        const sign = c.correlation >= 0 ? '+' : '';
+        msg += `${c.factor}: winAvg=${c.winningAvg.toFixed(1)} lossAvg=${c.losingAvg.toFixed(1)} corr=${sign}${c.correlation.toFixed(3)}\n`;
+      }
+    } else {
+      msg += 'No data yet (need wins AND losses)\n';
+    }
+    msg += '\n';
+
+    // Current Thresholds
+    msg += `CURRENT THRESHOLDS\n`;
+    msg += `MinMomentum: ${thresholds.minMomentumScore}\n`;
+    msg += `MinOnChain: ${thresholds.minOnChainScore}\n`;
+    msg += `MinSafety: ${thresholds.minSafetyScore}\n`;
+    msg += `MaxBundleRisk: ${thresholds.maxBundleRiskScore}\n`;
+    msg += `MinLiquidity: $${thresholds.minLiquidity}\n`;
+    msg += `MaxTop10Conc: ${thresholds.maxTop10Concentration}%\n\n`;
+
+    // Raw signal details (last 20)
+    msg += `RECENT SIGNALS (last 20)\n`;
+    if (rawData.length > 0) {
+      for (const s of rawData.slice(0, 20)) {
+        const outcome = s.final_outcome === 'PENDING' ? '⏳' : s.final_outcome === 'WIN' ? '✓' : '✗';
+        const ret = s.final_return !== null ? `${parseFloat(s.final_return).toFixed(0)}%` : '-';
+        msg += `${outcome} ${s.token_ticker || '???'} mom=${parseFloat(s.momentum_score || 0).toFixed(0)} oc=${parseFloat(s.onchain_score || 0).toFixed(0)} saf=${parseFloat(s.safety_score || 0).toFixed(0)} liq=$${(parseFloat(s.entry_liquidity || 0)/1000).toFixed(1)}k ret=${ret}\n`;
+      }
+    } else {
+      msg += 'No signals recorded yet\n';
+    }
+
+    msg += '```';
+
+    return msg;
+  }
+
+  /**
+   * Get raw signal data from database
+   */
+  private async getRawSignalData(): Promise<any[]> {
+    try {
+      const result = await pool.query(`
+        SELECT token_ticker, signal_type, momentum_score, onchain_score, safety_score,
+               bundle_risk_score, signal_strength, entry_liquidity, entry_token_age,
+               entry_holder_count, entry_top10_concentration, entry_buy_sell_ratio,
+               entry_unique_buyers, final_outcome, final_return, return_1h, return_4h,
+               max_return, min_return, signal_time
+        FROM signal_performance
+        ORDER BY signal_time DESC
+        LIMIT 50
+      `);
+      return result.rows;
+    } catch (error) {
+      logger.error({ error }, 'Failed to get raw signal data');
+      return [];
+    }
   }
 
   /**

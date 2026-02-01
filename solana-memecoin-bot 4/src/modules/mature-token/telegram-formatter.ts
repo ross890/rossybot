@@ -121,14 +121,19 @@ export class MatureTokenTelegramFormatter {
     // Signal type emoji and label
     const signalTypeInfo = this.getSignalTypeInfo(signal.signalType);
 
-    let msg = `${signalTypeInfo.emoji} *MATURE TOKEN SIGNAL*\n\n`;
+    // Build the message with clear visual hierarchy
+    let msg = `\n`;
+    msg += `═══════════════════════════════\n`;
+    msg += `${signalTypeInfo.emoji}  *MATURE TOKEN SIGNAL*\n`;
+    msg += `    ${signalTypeInfo.label} · Score: *${score.compositeScore}/100*\n`;
+    msg += `═══════════════════════════════\n\n`;
 
     // Token info
     msg += `*Token:* \`$${signal.tokenTicker}\`\n`;
     msg += `*Address:* \`${signal.tokenAddress}\`\n`;
     msg += `*Chain:* Solana\n\n`;
 
-    msg += `${'━'.repeat(24)}\n\n`;
+    msg += `───────────────────────────────\n`;
 
     // Signal Overview
     msg += `📊 *SIGNAL OVERVIEW*\n`;
@@ -138,7 +143,7 @@ export class MatureTokenTelegramFormatter {
     msg += `├─ Risk Level: *${signal.riskLevel}/5*\n`;
     msg += `└─ Token Age: *${signal.tokenAgeDays}d ${signal.tokenAgeHours % 24}h*\n\n`;
 
-    msg += `${'━'.repeat(24)}\n\n`;
+    msg += `───────────────────────────────\n`;
 
     // Accumulation Analysis
     msg += `📈 *ACCUMULATION ANALYSIS*\n`;
@@ -149,7 +154,7 @@ export class MatureTokenTelegramFormatter {
     msg += `├─ Buy/Sell Ratio: ${accumulationMetrics.buyVolumeRatio.toFixed(1)}:1\n`;
     msg += `└─ Accumulation Score: *${accumulationMetrics.accumulationScore}/100*\n\n`;
 
-    msg += `${'━'.repeat(24)}\n\n`;
+    msg += `───────────────────────────────\n`;
 
     // Smart Money Activity
     msg += `🧠 *SMART MONEY ACTIVITY*\n`;
@@ -159,7 +164,7 @@ export class MatureTokenTelegramFormatter {
     msg += `├─ Exchange Net Flow: ${smartMoneyMetrics.exchangeNetFlow > 0 ? '📥 INFLOW' : '📤 OUTFLOW'}\n`;
     msg += `└─ Smart Money Score: *${smartMoneyMetrics.smartMoneyScore}/100*\n\n`;
 
-    msg += `${'━'.repeat(24)}\n\n`;
+    msg += `───────────────────────────────\n`;
 
     // KOL Activity
     const kolStatus = kolReentryMetrics.kolBuys24h > 0 ? '🟢 ACTIVE' : kolReentryMetrics.kolBuys7d > 0 ? '🟡 WATCHING' : '⚪ NONE';
@@ -172,7 +177,7 @@ export class MatureTokenTelegramFormatter {
     msg += `├─ KOL Conviction: ${kolReentryMetrics.kolConvictionScore >= 50 ? 'HIGH' : kolReentryMetrics.kolConvictionScore >= 30 ? 'MEDIUM' : 'LOW'}\n`;
     msg += `└─ KOL Score: *${kolReentryMetrics.kolActivityScore}/100*\n\n`;
 
-    msg += `${'━'.repeat(24)}\n\n`;
+    msg += `───────────────────────────────\n`;
 
     // Holder Dynamics
     msg += `👥 *HOLDER DYNAMICS*\n`;
@@ -183,7 +188,7 @@ export class MatureTokenTelegramFormatter {
     msg += `├─ Quality Wallets: ${(holderDynamics.qualityWalletRatio * 100).toFixed(0)}%\n`;
     msg += `└─ Holder Score: *${holderDynamics.holderDynamicsScore}/100*\n\n`;
 
-    msg += `${'━'.repeat(24)}\n\n`;
+    msg += `───────────────────────────────\n`;
 
     // On-Chain Data
     msg += `📉 *ON-CHAIN DATA*\n`;
@@ -194,7 +199,7 @@ export class MatureTokenTelegramFormatter {
     msg += `├─ Volume Authenticity: ${volumeProfile.volumeAuthenticityScore}%\n`;
     msg += `└─ LP Status: ${signal.score.contractSafetyScore >= 70 ? '🔒 LOCKED' : '🔓 UNLOCKED'}\n\n`;
 
-    msg += `${'━'.repeat(24)}\n\n`;
+    msg += `───────────────────────────────\n`;
 
     // Safety Check
     const safetyEmoji = score.contractSafetyScore >= 70 ? '🟢' : score.contractSafetyScore >= 50 ? '🟡' : '🔴';
@@ -230,7 +235,7 @@ export class MatureTokenTelegramFormatter {
     msg += `📈 Trailing Stop: -15% from highs (after TP1)\n`;
     msg += `⏱️ Max Hold: ${signal.maxHoldDays} days\n\n`;
 
-    msg += `${'━'.repeat(24)}\n\n`;
+    msg += `───────────────────────────────\n`;
 
     // Quick Links
     msg += `🔗 *Quick Links:*\n`;
@@ -240,7 +245,8 @@ export class MatureTokenTelegramFormatter {
     // Footer
     msg += `⏱️ _${signal.generatedAt.toISOString().replace('T', ' ').slice(0, 19)} UTC_\n`;
     msg += `🔵 *Mature Token Signal* - Tokens 24hrs+\n\n`;
-    msg += `⚠️ _DYOR. Not financial advice. Mature tokens have lower rug risk but can still lose value rapidly._`;
+    msg += `⚠️ _DYOR. Not financial advice. Mature tokens have lower rug risk but can still lose value rapidly._\n`;
+    msg += `═══════════════════════════════\n`;
 
     return msg;
   }
@@ -252,19 +258,24 @@ export class MatureTokenTelegramFormatter {
     const urgencyEmoji = signal.urgency === 'HIGH' ? '🔴' : signal.urgency === 'MEDIUM' ? '🟡' : '🟢';
     const pnlEmoji = signal.pnlPercent >= 0 ? '🟢' : '🔴';
 
-    let msg = `🔴 *MATURE TOKEN EXIT SIGNAL*\n\n`;
+    // Build the message with clear visual hierarchy
+    let msg = `\n`;
+    msg += `═══════════════════════════════\n`;
+    msg += `🔴  *MATURE TOKEN EXIT SIGNAL*\n`;
+    msg += `    ${urgencyEmoji} ${signal.urgency} · ${this.getExitActionLabel(signal.recommendation)}\n`;
+    msg += `═══════════════════════════════\n\n`;
 
     msg += `*Token:* \`$${signal.tokenTicker}\`\n`;
     msg += `*Address:* \`${signal.tokenAddress}\`\n\n`;
 
-    msg += `${'━'.repeat(24)}\n\n`;
+    msg += `───────────────────────────────\n`;
 
     msg += `⚠️ *EXIT RECOMMENDATION*\n`;
     msg += `├─ Action: *${this.getExitActionLabel(signal.recommendation)}*\n`;
     msg += `├─ Urgency: ${urgencyEmoji} *${signal.urgency}*\n`;
     msg += `└─ Reason: ${signal.reason}\n\n`;
 
-    msg += `${'━'.repeat(24)}\n\n`;
+    msg += `───────────────────────────────\n`;
 
     msg += `📊 *POSITION STATUS*\n`;
     msg += `├─ Entry Price: $${this.formatPrice(signal.entryPrice)}\n`;
@@ -273,7 +284,7 @@ export class MatureTokenTelegramFormatter {
     msg += `├─ Hold Time: ${Math.floor(signal.holdTimeHours / 24)}d ${Math.floor(signal.holdTimeHours % 24)}h\n`;
     msg += `└─ Original Signal: ${signal.originalSignalType}\n\n`;
 
-    msg += `${'━'.repeat(24)}\n\n`;
+    msg += `───────────────────────────────\n`;
 
     msg += `🚨 *EXIT TRIGGERS:*\n`;
     for (const trigger of signal.triggers) {
@@ -281,12 +292,14 @@ export class MatureTokenTelegramFormatter {
     }
     msg += `\n`;
 
+    msg += `───────────────────────────────\n`;
     // Quick exit links
     msg += `💱 *Quick Exit:*\n`;
     msg += `[Jupiter](https://jup.ag/swap/${signal.tokenAddress}-SOL) | `;
     msg += `[Raydium](https://raydium.io/swap/?inputMint=${signal.tokenAddress})\n\n`;
 
-    msg += `⏱️ _${signal.generatedAt.toISOString().replace('T', ' ').slice(0, 19)} UTC_`;
+    msg += `⏱️ _${signal.generatedAt.toISOString().replace('T', ' ').slice(0, 19)} UTC_\n`;
+    msg += `═══════════════════════════════\n`;
 
     return msg;
   }
@@ -295,12 +308,17 @@ export class MatureTokenTelegramFormatter {
    * Format watchlist alert
    */
   private formatWatchlistAlert(item: MatureTokenWatchlist): string {
-    let msg = `👁️ *MATURE TOKEN WATCHLIST*\n\n`;
+    // Build the message with clear visual hierarchy
+    let msg = `\n`;
+    msg += `═══════════════════════════════\n`;
+    msg += `👁️  *MATURE TOKEN WATCHLIST*\n`;
+    msg += `    Score: ${item.currentScore}/100 · Target: ${item.targetScore}\n`;
+    msg += `═══════════════════════════════\n\n`;
 
     msg += `*Token:* \`$${item.tokenTicker}\`\n`;
     msg += `*Added to:* Mature Token Watchlist\n\n`;
 
-    msg += `${'━'.repeat(24)}\n\n`;
+    msg += `───────────────────────────────\n`;
 
     msg += `📊 *WATCH REASON*\n`;
     msg += `├─ Score: ${item.currentScore}/100 (Below buy threshold)\n`;
@@ -308,7 +326,7 @@ export class MatureTokenTelegramFormatter {
     msg += `├─ Missing: Score needs to reach ${item.targetScore}\n`;
     msg += `└─ Conditions: ${item.targetConditions.slice(0, 2).join(', ')}\n\n`;
 
-    msg += `${'━'.repeat(24)}\n\n`;
+    msg += `───────────────────────────────\n`;
 
     msg += `📈 *KEY LEVELS TO WATCH*\n`;
     msg += `├─ Resistance: $${this.formatPrice(item.resistanceLevel)}\n`;
@@ -316,11 +334,12 @@ export class MatureTokenTelegramFormatter {
     msg += `├─ Breakout Target: $${this.formatPrice(item.breakoutTarget)}\n`;
     msg += `└─ Volume Trigger: $${this.formatNumber(item.volumeTrigger)}\n\n`;
 
-    msg += `${'━'.repeat(24)}\n\n`;
+    msg += `───────────────────────────────\n`;
 
     msg += `🔔 _You'll be notified when conditions are met._\n\n`;
 
-    msg += `⏱️ _${item.addedAt.toISOString().replace('T', ' ').slice(0, 19)} UTC_`;
+    msg += `⏱️ _${item.addedAt.toISOString().replace('T', ' ').slice(0, 19)} UTC_\n`;
+    msg += `═══════════════════════════════\n`;
 
     return msg;
   }

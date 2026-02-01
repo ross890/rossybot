@@ -85,13 +85,13 @@ const THRESHOLDS = {
   RISK_MEDIUM: 50,
   RISK_HIGH: 35,
 
-  // Market structure ideals
-  IDEAL_LIQUIDITY_RATIO: 0.10,     // 10% of mcap
-  MIN_LIQUIDITY_USD: 15000,        // $15k minimum
-  IDEAL_TOP10_CONCENTRATION: 25,   // 25% max
-  MAX_TOP10_CONCENTRATION: 50,     // 50% reject threshold
-  MIN_HOLDER_COUNT: 100,
-  IDEAL_HOLDER_COUNT: 500,
+  // Market structure ideals - aligned with config for early tokens
+  IDEAL_LIQUIDITY_RATIO: 0.05,     // 5% of mcap (lowered from 10%)
+  MIN_LIQUIDITY_USD: 2000,         // $2k minimum (aligned with config)
+  IDEAL_TOP10_CONCENTRATION: 40,   // 40% max (relaxed for early tokens)
+  MAX_TOP10_CONCENTRATION: 75,     // 75% reject threshold (aligned with config)
+  MIN_HOLDER_COUNT: 20,            // 20 min holders (aligned with config)
+  IDEAL_HOLDER_COUNT: 200,         // 200 ideal (lowered from 500)
 
   // Timing ideals
   OPTIMAL_AGE_MIN: 30,             // 30 minutes minimum
@@ -364,19 +364,24 @@ export class OnChainScoringEngine {
       return 'CRITICAL';
     }
 
-    // Safety issues are serious
-    if (components.safety < 40) {
+    // Safety issues - only CRITICAL if very low (honeypot likely)
+    // Lowered threshold from 40 to 25 - most new tokens have low safety scores
+    if (components.safety < 25) {
       return 'CRITICAL';
     }
 
-    // Use score-based risk assessment
-    if (score >= THRESHOLDS.RISK_VERY_LOW && components.bundleSafety >= 70) {
+    // Use score-based risk assessment with relaxed thresholds
+    if (score >= THRESHOLDS.RISK_VERY_LOW && components.bundleSafety >= 60) {
       return 'VERY_LOW';
     }
     if (score >= THRESHOLDS.RISK_LOW) {
       return 'LOW';
     }
     if (score >= THRESHOLDS.RISK_MEDIUM) {
+      return 'MEDIUM';
+    }
+    // Only return HIGH if score is below 35, otherwise MEDIUM
+    if (score >= 30) {
       return 'MEDIUM';
     }
     if (score >= THRESHOLDS.RISK_HIGH) {
@@ -501,25 +506,26 @@ export class OnChainScoringEngine {
     }
 
     // Score-based recommendations with signal adjustments
+    // Thresholds lowered to generate more signals for early tokens
     let recommendation: OnChainScore['recommendation'];
 
-    if (score >= THRESHOLDS.STRONG_BUY && bullishSignals.length >= 3 && bearishSignals.length === 0) {
+    if (score >= THRESHOLDS.STRONG_BUY && bullishSignals.length >= 2 && bearishSignals.length === 0) {
       recommendation = 'STRONG_BUY';
       rationale.push(`Excellent score (${score}) with strong bullish signals`);
       rationale.push(`Bullish: ${bullishSignals.slice(0, 3).join(', ')}`);
-    } else if (score >= THRESHOLDS.BUY && bearishSignals.length <= 1) {
+    } else if (score >= THRESHOLDS.BUY && bearishSignals.length <= 2) {
       recommendation = 'BUY';
       rationale.push(`Good score (${score}) with acceptable risk`);
       if (bullishSignals.length > 0) {
         rationale.push(`Bullish: ${bullishSignals.slice(0, 2).join(', ')}`);
       }
-    } else if (score >= THRESHOLDS.WATCH) {
+    } else if (score >= 40) {  // Lowered from WATCH (50) to 40
       recommendation = 'WATCH';
       rationale.push(`Moderate score (${score}) - monitor for improvement`);
       if (warnings.length > 0) {
         rationale.push(`Watch for: ${warnings.slice(0, 2).join(', ')}`);
       }
-    } else if (score >= THRESHOLDS.AVOID) {
+    } else if (score >= 25) {  // Lowered from AVOID (35) to 25
       recommendation = 'AVOID';
       rationale.push(`Below threshold (${score})`);
       if (bearishSignals.length > 0) {
@@ -530,14 +536,15 @@ export class OnChainScoringEngine {
       rationale.push(`Poor score (${score}) with multiple risk factors`);
     }
 
-    // Downgrade for component failures
-    if (components.safety < 50 && recommendation !== 'STRONG_AVOID' && recommendation !== 'AVOID') {
-      recommendation = 'AVOID';
-      rationale.push(`Safety score too low (${components.safety})`);
+    // Downgrade for component failures - relaxed thresholds
+    if (components.safety < 30 && recommendation !== 'STRONG_AVOID' && recommendation !== 'AVOID') {
+      recommendation = 'WATCH';  // Downgrade to WATCH, not AVOID
+      rationale.push(`Safety score low (${components.safety}) - use caution`);
     }
-    if (components.bundleSafety < 40 && recommendation !== 'STRONG_AVOID') {
+    if (components.bundleSafety < 30 && recommendation !== 'STRONG_AVOID') {
+      // Only downgrade by one level
       recommendation = recommendation === 'STRONG_BUY' ? 'BUY' :
-                       recommendation === 'BUY' ? 'WATCH' : 'AVOID';
+                       recommendation === 'BUY' ? 'WATCH' : recommendation;
       rationale.push(`Bundle risk elevated (safety: ${components.bundleSafety})`);
     }
 
@@ -561,15 +568,15 @@ export class OnChainScoringEngine {
 
   /**
    * Check if score meets minimum threshold for trading
+   * Thresholds lowered to allow more early token signals
    */
   meetsMinimumThreshold(score: OnChainScore): boolean {
     return (
-      score.total >= 55 &&
-      score.recommendation !== 'AVOID' &&
-      score.recommendation !== 'STRONG_AVOID' &&
+      score.total >= 35 &&                          // Lowered from 55
+      score.recommendation !== 'STRONG_AVOID' &&    // Only block STRONG_AVOID
       score.riskLevel !== 'CRITICAL' &&
-      score.components.safety >= 50 &&
-      score.components.bundleSafety >= 40
+      score.components.safety >= 30 &&              // Lowered from 50
+      score.components.bundleSafety >= 30           // Lowered from 40
     );
   }
 }

@@ -400,7 +400,8 @@ export class SignalGenerator {
     }, 'On-chain scoring complete');
 
     // Step 2: Check if bundle/safety risk is too high
-    if (onChainScore.riskLevel === 'CRITICAL' || onChainScore.riskLevel === 'HIGH') {
+    // Only block CRITICAL risk - HIGH risk tokens can still generate signals with warnings
+    if (onChainScore.riskLevel === 'CRITICAL') {
       logger.debug({
         tokenAddress,
         riskLevel: onChainScore.riskLevel,
@@ -410,9 +411,9 @@ export class SignalGenerator {
     }
 
     // Step 3: Check minimum thresholds
-    // Using lower thresholds than KOL signals: momentum >= 35, total >= 45
-    const MIN_MOMENTUM_SCORE = 35;  // Lowered for more signals
-    const MIN_ONCHAIN_SCORE = 45;   // Lowered for more signals
+    // Aggressively lowered thresholds to generate more signals for early tokens
+    const MIN_MOMENTUM_SCORE = 20;  // Lowered from 35 - early tokens have less momentum data
+    const MIN_ONCHAIN_SCORE = 35;   // Lowered from 45 - allow more signals through
 
     if (onChainScore.components.momentum < MIN_MOMENTUM_SCORE) {
       logger.debug({

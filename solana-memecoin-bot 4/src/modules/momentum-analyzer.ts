@@ -197,19 +197,20 @@ export class MomentumAnalyzer {
   /**
    * Quick check if token has minimum momentum for consideration
    * Used for fast filtering before full analysis
+   * Thresholds lowered to catch very early tokens
    */
   async hasMinimumMomentum(tokenAddress: string): Promise<boolean> {
     const metrics = await this.analyze(tokenAddress);
     if (!metrics) return false;
 
-    // Must have basic buying activity
-    if (metrics.buyCount5m < 3) return false;
+    // Must have basic buying activity - lowered from 3 to 1
+    if (metrics.buyCount5m < 1) return false;
 
-    // Must have some volume
-    if (metrics.volume5m < 500) return false;
+    // Must have some volume - lowered from 500 to 100
+    if (metrics.volume5m < 100) return false;
 
-    // Must have positive or neutral buy/sell ratio
-    if (metrics.buySellRatio < 0.8) return false;
+    // Must have positive or neutral buy/sell ratio - lowered from 0.8 to 0.5
+    if (metrics.buySellRatio < 0.5) return false;
 
     return true;
   }

@@ -240,23 +240,30 @@ export class MomentumAnalyzer {
         const pairs = await dexScreenerClient.getTokenPairs(tokenAddress);
         if (pairs.length === 0) return null;
 
-        const pair = pairs[0];
+        // Cast to any since DexScreener API returns more fields than typed
+        const pair = pairs[0] as any;
+
+        // DexScreener may return extended data - use h24 as fallback
+        const vol24h = pair.volume?.h24 || 0;
+        const vol5m = pair.volume?.m5 || vol24h / 288; // Estimate 5m from 24h
+        const vol1h = pair.volume?.h1 || vol24h / 24;
+        const buys5m = pair.txns?.m5?.buys || 0;
+        const sells5m = pair.txns?.m5?.sells || 0;
+
         return {
-          buyCount5m: pair.txns?.m5?.buys || 0,
-          sellCount5m: pair.txns?.m5?.sells || 0,
-          buyVolume5m: (pair.volume?.m5 || 0) * 0.6, // Estimate 60% buy volume
-          sellVolume5m: (pair.volume?.m5 || 0) * 0.4,
-          volume5m: pair.volume?.m5 || 0,
-          volume1h: pair.volume?.h1 || 0,
+          buyCount5m: buys5m,
+          sellCount5m: sells5m,
+          buyVolume5m: vol5m * 0.6, // Estimate 60% buy volume
+          sellVolume5m: vol5m * 0.4,
+          volume5m: vol5m,
+          volume1h: vol1h,
           volumeAcceleration: this.calculateVolumeAcceleration(pair),
-          avgTradeSize: pair.volume?.m5 && pair.txns?.m5
-            ? pair.volume.m5 / (pair.txns.m5.buys + pair.txns.m5.sells)
-            : 0,
+          avgTradeSize: (buys5m + sells5m) > 0 ? vol5m / (buys5m + sells5m) : 0,
           medianTradeSize: 0, // Not available from DexScreener
           largeTradeCount: 0,
           smallTradeRatio: 0.5, // Default estimate
-          uniqueBuyers5m: pair.txns?.m5?.buys || 0, // Approximate
-          uniqueSellers5m: pair.txns?.m5?.sells || 0,
+          uniqueBuyers5m: buys5m, // Approximate
+          uniqueSellers5m: sells5m,
         };
       }
 
@@ -335,12 +342,17 @@ export class MomentumAnalyzer {
       const pairs = await dexScreenerClient.getTokenPairs(tokenAddress);
       if (pairs.length === 0) return null;
 
-      const pair = pairs[0];
+      // Cast to any since DexScreener API returns more fields than typed
+      const pair = pairs[0] as any;
+
+      // DexScreener may have priceChange data - default to 0 if not available
+      const priceChange5m = pair.priceChange?.m5 || 0;
+      const priceChange1h = pair.priceChange?.h1 || pair.priceChange?.h24 / 24 || 0;
 
       return {
-        priceChange5m: pair.priceChange?.m5 || 0,
-        priceChange1h: pair.priceChange?.h1 || 0,
-        priceVolatility: Math.abs(pair.priceChange?.m5 || 0) / 100, // Normalize
+        priceChange5m,
+        priceChange1h,
+        priceVolatility: Math.abs(priceChange5m) / 100, // Normalize
       };
     } catch (error) {
       logger.debug({ error, tokenAddress }, 'Failed to get price metrics');

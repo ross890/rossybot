@@ -28,6 +28,8 @@ import {
   TradeType,
   DiscoverySignal,
   SignalType,
+  DexScreenerTokenInfo,
+  CTOAnalysis,
 } from '../types/index.js';
 
 // ============ RATE LIMITING ============
@@ -529,17 +531,21 @@ export class TelegramAlertBot {
    * Format buy signal message
    */
   private formatBuySignal(signal: BuySignal): string {
-    const { kolActivity, score, tokenMetrics, socialMetrics, scamFilter } = signal;
+    const { kolActivity, score, tokenMetrics, socialMetrics, scamFilter, dexScreenerInfo, ctoAnalysis } = signal;
     const wallet = kolActivity.wallet;
     const tx = kolActivity.transaction;
     const perf = kolActivity.performance;
-    
+
     // Build the message
     let msg = `🎯 *ROSSYBOT BUY SIGNAL*\n\n`;
-    
+
     // Token info
     msg += `*Token:* \`$${signal.tokenTicker}\` (${this.truncateAddress(signal.tokenAddress)})\n`;
-    msg += `*Chain:* Solana\n\n`;
+    msg += `*Chain:* Solana\n`;
+
+    // DexScreener & CTO Status (NEW)
+    msg += this.formatDexScreenerCTOStatus(dexScreenerInfo, ctoAnalysis);
+    msg += `\n`;
     
     // Signal metrics
     msg += `📊 *SIGNAL METRICS*\n`;
@@ -1250,14 +1256,18 @@ export class TelegramAlertBot {
    * Format discovery signal message
    */
   private formatDiscoverySignal(signal: DiscoverySignal): string {
-    const { score, tokenMetrics, moonshotAssessment, safetyResult, scamFilter } = signal;
+    const { score, tokenMetrics, moonshotAssessment, safetyResult, scamFilter, dexScreenerInfo, ctoAnalysis } = signal;
 
     let msg = `🔍 *ROSSYBOT DISCOVERY SIGNAL*\n\n`;
 
     // Token info
     msg += `*Token:* \`$${signal.tokenTicker}\` (${this.truncateAddress(signal.tokenAddress)})\n`;
     msg += `*Name:* ${signal.tokenName}\n`;
-    msg += `*Chain:* Solana\n\n`;
+    msg += `*Chain:* Solana\n`;
+
+    // DexScreener & CTO Status (NEW)
+    msg += this.formatDexScreenerCTOStatus(dexScreenerInfo, ctoAnalysis);
+    msg += `\n`;
 
     // Discovery metrics
     msg += `📊 *DISCOVERY METRICS*\n`;
@@ -1455,6 +1465,8 @@ export class TelegramAlertBot {
     const bundleAnalysis = signal.bundleAnalysis || { riskLevel: 'UNKNOWN', riskScore: 0, flags: [] };
     const onChainScore = signal.onChainScore || { total: 0, recommendation: 'N/A', components: {}, signals: [] };
     const safetyResult = signal.safetyResult || { safetyScore: 0, mintAuthorityEnabled: false, freezeAuthorityEnabled: false };
+    const dexScreenerInfo = signal.dexScreenerInfo as DexScreenerTokenInfo | undefined;
+    const ctoAnalysis = signal.ctoAnalysis as CTOAnalysis | undefined;
 
     const ticker = signal.tokenTicker || 'UNKNOWN';
     const tokenName = signal.tokenName || 'Unknown';
@@ -1486,7 +1498,10 @@ export class TelegramAlertBot {
 
     // Token header with key info
     msg += `*$${ticker}* — ${tokenName}\n`;
-    msg += `\`${signal.tokenAddress || ''}\`\n\n`;
+    msg += `\`${signal.tokenAddress || ''}\`\n`;
+
+    // DexScreener & CTO Status (NEW)
+    msg += this.formatDexScreenerCTOStatus(dexScreenerInfo, ctoAnalysis);
 
     // Narrative - one sentence about what this token is
     msg += `_${this.generateNarrative(tokenName, ticker)}_\n\n`;
@@ -1602,7 +1617,7 @@ export class TelegramAlertBot {
    * Format KOL validation signal message
    */
   private formatKolValidationSignal(signal: BuySignal, previousDiscovery: DiscoverySignal): string {
-    const { kolActivity, score, tokenMetrics, scamFilter } = signal;
+    const { kolActivity, score, tokenMetrics, scamFilter, dexScreenerInfo, ctoAnalysis } = signal;
     const wallet = kolActivity.wallet;
     const tx = kolActivity.transaction;
     const perf = kolActivity.performance;
@@ -1623,7 +1638,11 @@ export class TelegramAlertBot {
 
     // Token info
     msg += `*Token:* \`$${signal.tokenTicker}\` (${this.truncateAddress(signal.tokenAddress)})\n`;
-    msg += `*Chain:* Solana\n\n`;
+    msg += `*Chain:* Solana\n`;
+
+    // DexScreener & CTO Status (NEW)
+    msg += this.formatDexScreenerCTOStatus(dexScreenerInfo, ctoAnalysis);
+    msg += `\n`;
 
     // Score boost
     const scoreBoost = signal.score.compositeScore - previousDiscovery.score.compositeScore;
@@ -1683,6 +1702,46 @@ export class TelegramAlertBot {
   }
 
   // ============ HELPER METHODS ============
+
+  /**
+   * Format DexScreener payment status and CTO analysis for display
+   */
+  private formatDexScreenerCTOStatus(
+    dexInfo?: DexScreenerTokenInfo,
+    ctoAnalysis?: CTOAnalysis
+  ): string {
+    let status = '';
+
+    // DexScreener Payment Status
+    if (dexInfo) {
+      if (dexInfo.hasPaidDexscreener) {
+        status += `*DEX:* 💰 PAID`;
+        if (dexInfo.boostCount > 0) {
+          status += ` (${dexInfo.boostCount} boost${dexInfo.boostCount > 1 ? 's' : ''})`;
+        }
+      } else {
+        status += `*DEX:* ⚪ Not Paid`;
+      }
+    } else {
+      status += `*DEX:* ⚪ Unknown`;
+    }
+
+    // CTO Status
+    if (ctoAnalysis) {
+      if (ctoAnalysis.isCTO) {
+        const ctoEmoji = ctoAnalysis.ctoConfidence === 'HIGH' ? '🔄' :
+                         ctoAnalysis.ctoConfidence === 'MEDIUM' ? '🔃' : '❓';
+        status += ` | *CTO:* ${ctoEmoji} ${ctoAnalysis.ctoConfidence}`;
+        if (ctoAnalysis.devAbandoned) {
+          status += ` (Dev gone)`;
+        }
+      } else {
+        status += ` | *CTO:* ❌ No`;
+      }
+    }
+
+    return status ? `${status}\n` : '';
+  }
 
   private truncateAddress(address: string): string {
     if (address.length <= 12) return address;

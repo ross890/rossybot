@@ -195,7 +195,7 @@ export class AccumulationDetector {
       const totalHolders = holderInfo.total || 0;
 
       // Get holder distribution
-      const topHolders = holderInfo.holders || [];
+      const topHolders = holderInfo.topHolders || [];
       const largeWallets = topHolders.filter((h: any) => {
         const balance = parseFloat(h.amount || '0');
         const totalSupply = topHolders.reduce((sum: number, holder: any) =>

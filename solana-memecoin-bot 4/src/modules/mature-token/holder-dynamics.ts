@@ -117,15 +117,15 @@ export class HolderDynamicsAnalyzer {
   }> {
     try {
       const holderData = await heliusClient.getTokenHolders(tokenAddress);
-      const holders = holderData.holders || [];
+      const holders = holderData.topHolders || [];
 
       if (holders.length === 0) {
         return this.getDefaultDistributionMetrics();
       }
 
       // Calculate holdings
-      const holdings = holders.map((h: any) => parseFloat(h.amount || '0')).sort((a, b) => b - a);
-      const totalSupply = holdings.reduce((sum, h) => sum + h, 0);
+      const holdings = holders.map((h) => h.amount).sort((a: number, b: number) => b - a);
+      const totalSupply = holdings.reduce((sum: number, h: number) => sum + h, 0);
 
       // Gini coefficient calculation
       const giniCoefficient = this.calculateGini(holdings);
@@ -208,7 +208,7 @@ export class HolderDynamicsAnalyzer {
   }> {
     try {
       const holderData = await heliusClient.getTokenHolders(tokenAddress);
-      const holders = holderData.holders || [];
+      const holders = holderData.topHolders || [];
 
       // Quality wallets = wallets with transaction history
       // In production, would check each wallet's history
@@ -218,10 +218,9 @@ export class HolderDynamicsAnalyzer {
       const smartMoneyHolders = Math.floor(holders.length * 0.05);
 
       // Institutional wallets (large stable holders)
-      const largeHolders = holders.filter((h: any) => {
-        const totalSupply = holders.reduce((sum: number, holder: any) =>
-          sum + parseFloat(holder.amount || '0'), 0);
-        const balance = parseFloat(h.amount || '0');
+      const totalSupply = holders.reduce((sum: number, holder) => sum + holder.amount, 0);
+      const largeHolders = holders.filter((h) => {
+        const balance = h.amount;
         return balance / totalSupply > 0.02; // > 2% of supply
       });
       const institutionalWallets = Math.floor(largeHolders.length * 0.3);

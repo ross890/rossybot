@@ -78,7 +78,7 @@ export class SmartMoneyTracker {
         dexScreenerClient.getTokenPairs(tokenAddress),
       ]);
 
-      const holders = holderData.holders || [];
+      const holders = holderData.topHolders || [];
       const pair = pairs[0] as any;
 
       if (!pair) {
@@ -86,12 +86,11 @@ export class SmartMoneyTracker {
       }
 
       // Calculate total supply
-      const totalSupply = holders.reduce((sum: number, h: any) =>
-        sum + parseFloat(h.amount || '0'), 0);
+      const totalSupply = holders.reduce((sum: number, h) => sum + h.amount, 0);
 
       // Identify whales (> 1% of supply)
-      const whales = holders.filter((h: any) => {
-        const balance = parseFloat(h.amount || '0');
+      const whales = holders.filter((h) => {
+        const balance = h.amount;
         return (balance / totalSupply) * 100 >= WHALE_THRESHOLD_PERCENT;
       });
 
@@ -139,7 +138,7 @@ export class SmartMoneyTracker {
   }> {
     try {
       const holderData = await heliusClient.getTokenHolders(tokenAddress);
-      const holders = holderData.holders || [];
+      const holders = holderData.topHolders || [];
 
       // In production, would cross-reference each wallet with performance data
       // For now, estimate based on holder patterns
@@ -149,16 +148,14 @@ export class SmartMoneyTracker {
       const profitableWalletRatio = 0.45; // Default estimate
 
       // Average wallet win rate (from known smart money database)
-      const knownHolders = holders.filter((h: any) =>
-        this.knownSmartWallets.has(h.owner)
+      const knownHolders = holders.filter((h) =>
+        this.knownSmartWallets.has(h.address)
       );
       const avgWalletWinRate = knownHolders.length > 0 ? SMART_MONEY_MIN_WIN_RATE : 0.5;
 
       // Top trader holdings (% held by top performers)
-      const totalSupply = holders.reduce((sum: number, h: any) =>
-        sum + parseFloat(h.amount || '0'), 0);
-      const topTraderBalance = knownHolders.reduce((sum: number, h: any) =>
-        sum + parseFloat(h.amount || '0'), 0);
+      const totalSupply = holders.reduce((sum: number, h) => sum + h.amount, 0);
+      const topTraderBalance = knownHolders.reduce((sum: number, h) => sum + h.amount, 0);
       const topTraderHoldings = totalSupply > 0
         ? (topTraderBalance / totalSupply) * 100
         : 0;

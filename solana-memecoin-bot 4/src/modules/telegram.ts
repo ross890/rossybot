@@ -1322,7 +1322,7 @@ export class TelegramAlertBot {
         if (w.includes('HIGH_CONCENTRATION')) return 'Concentrated';
         return w.slice(0, 20);
       });
-      msg += shortWarnings.join(' · ') + '\n\n`;
+      msg += shortWarnings.join(' · ') + '\n\n';
     }
 
     // Trade links

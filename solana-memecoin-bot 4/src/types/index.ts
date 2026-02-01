@@ -225,17 +225,21 @@ export interface BuySignal {
   tokenAddress: string;
   tokenTicker: string;
   tokenName: string;
-  
+
   // Metrics
   score: TokenScore;
   tokenMetrics: TokenMetrics;
   socialMetrics: SocialMetrics;
   volumeAuthenticity: VolumeAuthenticityScore;
   scamFilter: ScamFilterOutput;
-  
+
   // KOL Activity (REQUIRED)
   kolActivity: KolWalletActivity;
-  
+
+  // DexScreener & CTO Info
+  dexScreenerInfo?: DexScreenerTokenInfo;
+  ctoAnalysis?: CTOAnalysis;
+
   // Suggested Action
   entryZone: {
     low: number;
@@ -255,7 +259,7 @@ export interface BuySignal {
     percent: number;
   };
   timeLimitHours: number;
-  
+
   // Metadata
   generatedAt: Date;
   signalType: SignalType;
@@ -368,6 +372,46 @@ export interface DexScreenerPair {
   };
   fdv: number;
   pairCreatedAt?: number; // Unix timestamp in milliseconds when the pair was created
+  info?: {
+    imageUrl?: string;
+    header?: string;
+    openGraph?: string;
+    websites?: { label: string; url: string }[];
+    socials?: { type: string; url: string }[];
+  };
+  boosts?: {
+    active: number; // Number of active boosts
+  };
+}
+
+// ============ DEXSCREENER INFO TYPES ============
+
+export interface DexScreenerTokenInfo {
+  tokenAddress: string;
+  hasPaidDexscreener: boolean;
+  boostCount: number;
+  hasTokenProfile: boolean;
+  hasTokenAds: boolean;
+  socialLinks: {
+    twitter?: string;
+    telegram?: string;
+    website?: string;
+    discord?: string;
+  };
+  description?: string;
+}
+
+// ============ CTO (COMMUNITY TAKEOVER) TYPES ============
+
+export interface CTOAnalysis {
+  isCTO: boolean;
+  ctoConfidence: 'HIGH' | 'MEDIUM' | 'LOW' | 'NONE';
+  ctoIndicators: string[];
+  devAbandoned: boolean;
+  devSoldPercent: number;
+  communityDriven: boolean;
+  authoritiesRevoked: boolean;
+  hasCTOInName: boolean;
 }
 
 // ============ FEATURE 1 & 5: TOKEN SAFETY TYPES ============
@@ -573,6 +617,10 @@ export interface DiscoverySignal {
 
   // NO KOL activity required
   kolActivity: KolWalletActivity | null;
+
+  // DexScreener & CTO Info
+  dexScreenerInfo?: DexScreenerTokenInfo;
+  ctoAnalysis?: CTOAnalysis;
 
   // Suggested action (more conservative than BuySignal)
   suggestedPositionSize: number;  // Typically 50% of normal

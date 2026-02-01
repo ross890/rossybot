@@ -13,6 +13,8 @@ import {
   VolumeAuthenticityScore,
   BirdeyeTokenOverview,
   DexScreenerPair,
+  DexScreenerTokenInfo,
+  CTOAnalysis,
 } from '../types/index.js';
 import { Database } from '../utils/database.js';
 
@@ -550,6 +552,225 @@ class DexScreenerClient {
 
     return addresses;
   }
+
+  /**
+   * Get detailed token info including payment/boost status from DexScreener
+   * This checks if the token has paid for DexScreener advertising/boosts
+   */
+  async getTokenInfo(address: string): Promise<DexScreenerTokenInfo> {
+    const defaultInfo: DexScreenerTokenInfo = {
+      tokenAddress: address,
+      hasPaidDexscreener: false,
+      boostCount: 0,
+      hasTokenProfile: false,
+      hasTokenAds: false,
+      socialLinks: {},
+    };
+
+    try {
+      // First, get the token pairs data which includes boost info
+      const pairs = await this.getTokenPairs(address);
+
+      if (pairs.length === 0) {
+        return defaultInfo;
+      }
+
+      const primaryPair = pairs[0];
+
+      // Check for boosts (paid advertising)
+      const boostCount = primaryPair.boosts?.active || 0;
+      const hasPaidDexscreener = boostCount > 0;
+
+      // Check for token profile (paid feature)
+      const hasTokenProfile = !!(
+        primaryPair.info?.imageUrl ||
+        primaryPair.info?.header ||
+        primaryPair.info?.websites?.length ||
+        primaryPair.info?.socials?.length
+      );
+
+      // Extract social links
+      const socialLinks: DexScreenerTokenInfo['socialLinks'] = {};
+      if (primaryPair.info?.socials) {
+        for (const social of primaryPair.info.socials) {
+          if (social.type === 'twitter') socialLinks.twitter = social.url;
+          if (social.type === 'telegram') socialLinks.telegram = social.url;
+          if (social.type === 'discord') socialLinks.discord = social.url;
+        }
+      }
+      if (primaryPair.info?.websites && primaryPair.info.websites.length > 0) {
+        socialLinks.website = primaryPair.info.websites[0].url;
+      }
+
+      // Token ads are indicated by having both boosts AND a profile
+      const hasTokenAds = hasPaidDexscreener && hasTokenProfile;
+
+      const info: DexScreenerTokenInfo = {
+        tokenAddress: address,
+        hasPaidDexscreener,
+        boostCount,
+        hasTokenProfile,
+        hasTokenAds,
+        socialLinks,
+      };
+
+      logger.debug({
+        address: address.slice(0, 8),
+        hasPaid: hasPaidDexscreener,
+        boosts: boostCount,
+        hasProfile: hasTokenProfile
+      }, 'DexScreener token info fetched');
+
+      return info;
+    } catch (error: any) {
+      logger.debug({
+        error: error?.message,
+        address: address.slice(0, 8)
+      }, 'Failed to get DexScreener token info');
+      return defaultInfo;
+    }
+  }
+
+  /**
+   * Check if a token is in the boosted/paid tokens list
+   * Uses the token-boosts endpoint to check against recently boosted tokens
+   */
+  async isTokenBoosted(address: string): Promise<boolean> {
+    try {
+      const response = await this.client.get('/token-boosts/latest/v1');
+      const boostedTokens = response.data || [];
+
+      return boostedTokens.some((token: any) =>
+        token.chainId === 'solana' &&
+        token.tokenAddress?.toLowerCase() === address.toLowerCase()
+      );
+    } catch (error) {
+      // Fall back to checking via getTokenInfo
+      const info = await this.getTokenInfo(address);
+      return info.hasPaidDexscreener;
+    }
+  }
+}
+
+/**
+ * Analyze if a token is a CTO (Community Takeover)
+ * A CTO occurs when the original developer abandons a project and the community takes over
+ */
+export async function analyzeCTO(
+  address: string,
+  tokenName: string,
+  tokenTicker: string,
+  deployerHolding: number,
+  mintAuthorityRevoked: boolean,
+  freezeAuthorityRevoked: boolean,
+  tokenAgeMinutes: number,
+  dexScreenerInfo?: DexScreenerTokenInfo
+): Promise<CTOAnalysis> {
+  const indicators: string[] = [];
+  let ctoScore = 0;
+
+  // Check if "CTO" is in the name or ticker (strong indicator)
+  const nameUpper = (tokenName || '').toUpperCase();
+  const tickerUpper = (tokenTicker || '').toUpperCase();
+  const hasCTOInName =
+    nameUpper.includes('CTO') ||
+    nameUpper.includes('COMMUNITY TAKEOVER') ||
+    tickerUpper.includes('CTO');
+
+  if (hasCTOInName) {
+    indicators.push('CTO_IN_NAME');
+    ctoScore += 40;
+  }
+
+  // Check if dev has sold most/all holdings (> 95% sold = abandoned)
+  const devAbandoned = deployerHolding < 1;
+  const devSoldPercent = 100 - deployerHolding;
+
+  if (devAbandoned) {
+    indicators.push('DEV_ABANDONED');
+    ctoScore += 25;
+  } else if (deployerHolding < 5) {
+    indicators.push('DEV_MOSTLY_SOLD');
+    ctoScore += 15;
+  }
+
+  // Check if authorities are revoked (necessary for CTO)
+  const authoritiesRevoked = mintAuthorityRevoked && freezeAuthorityRevoked;
+  if (authoritiesRevoked) {
+    indicators.push('AUTHORITIES_REVOKED');
+    ctoScore += 15;
+  }
+
+  // Token age check - CTOs typically happen after initial launch period
+  // Most CTOs happen after 24+ hours when dev abandons
+  if (tokenAgeMinutes > 24 * 60) {
+    indicators.push('MATURE_TOKEN');
+    ctoScore += 10;
+  } else if (tokenAgeMinutes > 4 * 60) {
+    indicators.push('ESTABLISHED_TOKEN');
+    ctoScore += 5;
+  }
+
+  // Community-driven indicators from DexScreener
+  let communityDriven = false;
+  if (dexScreenerInfo) {
+    // Active social presence without paid promotion can indicate community
+    const hasSocials = !!(
+      dexScreenerInfo.socialLinks.twitter ||
+      dexScreenerInfo.socialLinks.telegram
+    );
+
+    if (hasSocials && !dexScreenerInfo.hasPaidDexscreener) {
+      // Has socials but not paid = likely community-driven
+      indicators.push('ORGANIC_SOCIALS');
+      ctoScore += 10;
+      communityDriven = true;
+    }
+
+    // If paid for Dex but dev abandoned, could be community funding
+    if (dexScreenerInfo.hasPaidDexscreener && devAbandoned) {
+      indicators.push('COMMUNITY_FUNDED_DEX');
+      ctoScore += 5;
+      communityDriven = true;
+    }
+  }
+
+  // Determine CTO confidence level
+  let ctoConfidence: CTOAnalysis['ctoConfidence'] = 'NONE';
+  let isCTO = false;
+
+  if (ctoScore >= 70) {
+    ctoConfidence = 'HIGH';
+    isCTO = true;
+  } else if (ctoScore >= 50) {
+    ctoConfidence = 'MEDIUM';
+    isCTO = true;
+  } else if (ctoScore >= 30) {
+    ctoConfidence = 'LOW';
+    isCTO = hasCTOInName; // Only mark as CTO if explicitly stated
+  }
+
+  const result: CTOAnalysis = {
+    isCTO,
+    ctoConfidence,
+    ctoIndicators: indicators,
+    devAbandoned,
+    devSoldPercent,
+    communityDriven,
+    authoritiesRevoked,
+    hasCTOInName,
+  };
+
+  if (isCTO) {
+    logger.info({
+      address: address.slice(0, 8),
+      confidence: ctoConfidence,
+      indicators,
+      devSold: devSoldPercent.toFixed(1)
+    }, 'CTO detected');
+  }
+
+  return result;
 }
 
 // ============ SINGLETON INSTANCES ============
@@ -857,4 +1078,5 @@ export default {
   analyzeBundles,
   analyzeDevWallet,
   calculateVolumeAuthenticity,
+  analyzeCTO,
 };

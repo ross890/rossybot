@@ -11,6 +11,7 @@ import {
   calculateVolumeAuthenticity,
   birdeyeClient,
   dexScreenerClient,
+  analyzeCTO,
 } from './onchain.js';
 import { scamFilter, quickScamCheck } from './scam-filter.js';
 import { kolWalletMonitor } from './kol-tracker.js';
@@ -48,6 +49,8 @@ import {
   TokenSafetyResult,
   DiscoverySignal,
   MoonshotAssessment,
+  DexScreenerTokenInfo,
+  CTOAnalysis,
 } from '../types/index.js';
 
 // ============ CONFIGURATION ============
@@ -343,6 +346,32 @@ export class SignalGenerator {
     // Get volume authenticity
     const volumeAuthenticity = await calculateVolumeAuthenticity(tokenAddress);
 
+    // NEW: Get DexScreener token info (payment status, boosts, socials)
+    const dexScreenerInfo = await dexScreenerClient.getTokenInfo(tokenAddress);
+
+    // NEW: Analyze CTO (Community Takeover) status
+    const ctoAnalysis = await analyzeCTO(
+      tokenAddress,
+      metrics.name,
+      metrics.ticker,
+      safetyResult.deployerHolding,
+      !safetyResult.mintAuthorityEnabled,    // mintAuthorityRevoked
+      !safetyResult.freezeAuthorityEnabled,  // freezeAuthorityRevoked
+      metrics.tokenAge,
+      dexScreenerInfo
+    );
+
+    // Log DexScreener/CTO status if notable
+    if (dexScreenerInfo.hasPaidDexscreener || ctoAnalysis.isCTO) {
+      logger.info({
+        address: tokenAddress.slice(0, 8),
+        dexPaid: dexScreenerInfo.hasPaidDexscreener,
+        boosts: dexScreenerInfo.boostCount,
+        isCTO: ctoAnalysis.isCTO,
+        ctoConfidence: ctoAnalysis.ctoConfidence,
+      }, 'DexScreener/CTO status detected');
+    }
+
     // Get KOL activity for this token
     const kolActivities = await kolWalletMonitor.getKolActivityForToken(
       tokenAddress,
@@ -383,7 +412,9 @@ export class SignalGenerator {
           scamResult,
           kolActivities,
           safetyResult,
-          previousDiscovery
+          previousDiscovery,
+          dexScreenerInfo,
+          ctoAnalysis
         );
       }
 
@@ -395,7 +426,9 @@ export class SignalGenerator {
         volumeAuthenticity,
         scamResult,
         kolActivities,
-        safetyResult
+        safetyResult,
+        dexScreenerInfo,
+        ctoAnalysis
       );
     }
 
@@ -490,7 +523,9 @@ export class SignalGenerator {
       safetyResult,
       positionSize,
       signalQuality,
-      momentumScore
+      momentumScore,
+      dexScreenerInfo,
+      ctoAnalysis
     );
 
     // Track for KOL follow-up (optional validation)
@@ -556,7 +591,9 @@ export class SignalGenerator {
     safetyResult: TokenSafetyResult,
     positionSize: any,
     signalQuality: SignalQuality,
-    momentumScore: any
+    momentumScore: any,
+    dexScreenerInfo?: DexScreenerTokenInfo,
+    ctoAnalysis?: CTOAnalysis
   ): DiscoverySignal {
     // Build risk warnings
     const riskWarnings: string[] = [];
@@ -620,6 +657,10 @@ export class SignalGenerator {
 
       kolActivity: null,
 
+      // DexScreener & CTO Info (NEW)
+      dexScreenerInfo,
+      ctoAnalysis,
+
       suggestedPositionSize: positionSize.solAmount,
       riskWarnings,
 
@@ -656,7 +697,9 @@ export class SignalGenerator {
     volumeAuthenticity: any,
     scamResult: any,
     kolActivities: KolWalletActivity[],
-    safetyResult: TokenSafetyResult
+    safetyResult: TokenSafetyResult,
+    dexScreenerInfo?: DexScreenerTokenInfo,
+    ctoAnalysis?: CTOAnalysis
   ): Promise<string> {
     // Calculate score with KOL activity
     const score = scoringEngine.calculateScore(
@@ -702,7 +745,9 @@ export class SignalGenerator {
       scamResult,
       score,
       primaryKol,
-      safetyResult
+      safetyResult,
+      dexScreenerInfo,
+      ctoAnalysis
     );
 
     // Adjust position size based on KOL performance weight
@@ -757,7 +802,9 @@ export class SignalGenerator {
     scamResult: any,
     kolActivities: KolWalletActivity[],
     safetyResult: TokenSafetyResult,
-    previousDiscovery: DiscoverySignal
+    previousDiscovery: DiscoverySignal,
+    dexScreenerInfo?: DexScreenerTokenInfo,
+    ctoAnalysis?: CTOAnalysis
   ): Promise<string> {
     // Apply KOL multiplier to the discovery score
     const boostedScore = scoringEngine.applyKolMultiplier(
@@ -787,7 +834,9 @@ export class SignalGenerator {
       scamResult,
       boostedScore,
       primaryKol,
-      safetyResult
+      safetyResult,
+      dexScreenerInfo,
+      ctoAnalysis
     );
 
     // Mark as KOL_VALIDATION signal
@@ -1010,7 +1059,9 @@ export class SignalGenerator {
     scamResult: any,
     score: any,
     primaryKolActivity: KolWalletActivity,
-    safetyResult?: TokenSafetyResult
+    safetyResult?: TokenSafetyResult,
+    dexScreenerInfo?: DexScreenerTokenInfo,
+    ctoAnalysis?: CTOAnalysis
   ): BuySignal {
     const price = metrics.price;
     
@@ -1028,15 +1079,19 @@ export class SignalGenerator {
       tokenAddress,
       tokenTicker: metrics.ticker,
       tokenName: metrics.name,
-      
+
       score,
       tokenMetrics: metrics,
       socialMetrics,
       volumeAuthenticity,
       scamFilter: scamResult,
-      
+
       kolActivity: primaryKolActivity,
-      
+
+      // DexScreener & CTO Info (NEW)
+      dexScreenerInfo,
+      ctoAnalysis,
+
       entryZone: {
         low: price * 0.95,
         high: price * 1.05,
@@ -1055,7 +1110,7 @@ export class SignalGenerator {
         percent: 150,
       },
       timeLimitHours: 72,
-      
+
       generatedAt: new Date(),
       signalType: SignalType.BUY,
     };

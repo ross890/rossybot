@@ -597,15 +597,23 @@ export async function getTokenMetrics(address: string): Promise<TokenMetrics | n
       : 50; // Default for very new tokens
 
     // Get token creation time for age calculation
+    // Priority: 1) DexScreener pairCreatedAt, 2) Birdeye creationInfo, 3) Default 5 min
     let ageMinutes = 5; // Default to 5 minutes for very new tokens
-    try {
-      const creationInfo = await birdeyeClient.getTokenCreationInfo(address);
-      if (creationInfo?.createdTime) {
-        const creationTimestamp = creationInfo.createdTime;
-        ageMinutes = (Date.now() - creationTimestamp) / (1000 * 60);
+
+    // Try DexScreener first (most reliable - already fetched)
+    if (primaryPair?.pairCreatedAt) {
+      ageMinutes = (Date.now() - primaryPair.pairCreatedAt) / (1000 * 60);
+    } else {
+      // Fall back to Birdeye API
+      try {
+        const creationInfo = await birdeyeClient.getTokenCreationInfo(address);
+        if (creationInfo?.createdTime) {
+          const creationTimestamp = creationInfo.createdTime;
+          ageMinutes = (Date.now() - creationTimestamp) / (1000 * 60);
+        }
+      } catch {
+        // Ignore creation info errors - use default age
       }
-    } catch {
-      // Ignore creation info errors - use default age
     }
 
     // For tokens with minimal data, use permissive defaults

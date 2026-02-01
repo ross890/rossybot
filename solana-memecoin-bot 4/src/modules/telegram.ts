@@ -164,13 +164,39 @@ export class TelegramAlertBot {
         name: 'rossybot',
         status: 'running',
         mode: 'webhook',
+        webhookUrl,
       });
+    });
+
+    // Debug endpoint to check webhook info
+    this.app.get('/debug/webhook', async (_req: Request, res: Response) => {
+      try {
+        if (this.bot) {
+          const webhookInfo = await this.bot.getWebHookInfo();
+          res.status(200).json({
+            configured: webhookUrl,
+            telegram: webhookInfo,
+          });
+        } else {
+          res.status(500).json({ error: 'Bot not initialized' });
+        }
+      } catch (error) {
+        res.status(500).json({ error: String(error) });
+      }
     });
 
     // Webhook endpoint for Telegram
     this.app.post('/webhook', (req: Request, res: Response) => {
+      const update = req.body;
+      logger.info({
+        updateId: update?.update_id,
+        hasMessage: !!update?.message,
+        text: update?.message?.text?.slice(0, 50),
+        chatId: update?.message?.chat?.id,
+      }, 'Webhook received update');
+
       if (this.bot) {
-        this.bot.processUpdate(req.body);
+        this.bot.processUpdate(update);
       }
       res.sendStatus(200);
     });

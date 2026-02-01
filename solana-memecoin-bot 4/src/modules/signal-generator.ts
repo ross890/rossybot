@@ -764,7 +764,7 @@ export class SignalGenerator {
     // AUTO-TRADING: Process signal for potential auto-buy
     try {
       // Get conviction info for this token
-      const conviction = await convictionTracker.getConviction(tokenAddress);
+      const conviction = await convictionTracker.getConvictionLevel(tokenAddress);
 
       // Process through auto-trader (handles auto-buy vs confirmation logic)
       const autoTradeResult = await autoTrader.processSignal(signal, conviction);
@@ -871,7 +871,7 @@ export class SignalGenerator {
 
     // AUTO-TRADING: Process KOL validation signal for potential auto-buy
     try {
-      const conviction = await convictionTracker.getConviction(tokenAddress);
+      const conviction = await convictionTracker.getConvictionLevel(tokenAddress);
       const autoTradeResult = await autoTrader.processSignal(signal, conviction);
 
       logger.info({

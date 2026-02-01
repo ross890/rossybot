@@ -73,7 +73,11 @@ export class RaydiumClient {
         return null;
       }
 
-      const data = await response.json();
+      const data = await response.json() as {
+        success: boolean;
+        msg?: string;
+        data?: { outputAmount: string; priceImpact?: number; fee?: number };
+      };
 
       if (!data.success) {
         logger.error({ error: data.msg || 'Unknown error' }, 'Raydium quote error');
@@ -84,9 +88,9 @@ export class RaydiumClient {
         inputMint,
         outputMint,
         inAmount: amount,
-        outAmount: parseInt(data.data.outputAmount) / 1e9,
-        priceImpact: data.data.priceImpact || 0,
-        fee: data.data.fee || 0,
+        outAmount: parseInt(data.data!.outputAmount) / 1e9,
+        priceImpact: data.data!.priceImpact || 0,
+        fee: data.data!.fee || 0,
       };
     } catch (error) {
       logger.error({ error }, 'Failed to get Raydium quote');
@@ -164,7 +168,11 @@ export class RaydiumClient {
         };
       }
 
-      const swapData = await swapResponse.json();
+      const swapData = await swapResponse.json() as {
+        success: boolean;
+        msg?: string;
+        data?: string[];
+      };
 
       if (!swapData.success) {
         return {
@@ -177,7 +185,7 @@ export class RaydiumClient {
       }
 
       // Step 3: Deserialize and sign transaction(s)
-      const transactions = swapData.data.map((txData: string) => {
+      const transactions = swapData.data!.map((txData: string) => {
         const txBuf = Buffer.from(txData, 'base64');
         return VersionedTransaction.deserialize(txBuf);
       });

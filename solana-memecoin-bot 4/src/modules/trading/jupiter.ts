@@ -100,14 +100,14 @@ export class JupiterClient {
         return null;
       }
 
-      const quote = await response.json();
+      const quote = await response.json() as JupiterQuote & { error?: string };
 
       if (quote.error) {
         logger.error({ error: quote.error }, 'Jupiter quote error');
         return null;
       }
 
-      return quote;
+      return quote as JupiterQuote;
     } catch (error) {
       logger.error({ error, inputMint, outputMint }, 'Failed to get Jupiter quote');
       return null;
@@ -170,7 +170,7 @@ export class JupiterClient {
           continue;
         }
 
-        const swapData = await swapResponse.json();
+        const swapData = await swapResponse.json() as { error?: string; swapTransaction?: string };
 
         if (swapData.error) {
           logger.error({ error: swapData.error }, 'Jupiter swap error');
@@ -179,7 +179,7 @@ export class JupiterClient {
         }
 
         // Step 3: Deserialize and sign transaction
-        const swapTransactionBuf = Buffer.from(swapData.swapTransaction, 'base64');
+        const swapTransactionBuf = Buffer.from(swapData.swapTransaction!, 'base64');
         const transaction = VersionedTransaction.deserialize(swapTransactionBuf);
 
         // Sign the transaction

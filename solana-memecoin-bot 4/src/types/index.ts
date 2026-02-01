@@ -361,6 +361,7 @@ export interface DexScreenerPair {
     usd: number;
   };
   fdv: number;
+  pairCreatedAt?: number; // Unix timestamp in milliseconds when the pair was created
 }
 
 // ============ FEATURE 1 & 5: TOKEN SAFETY TYPES ============

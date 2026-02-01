@@ -379,8 +379,11 @@ class DexScreenerClient {
     try {
       const response = await this.client.get(`/latest/dex/tokens/${address}`);
       return response.data.pairs?.filter((p: any) => p.chainId === 'solana') || [];
-    } catch (error) {
-      logger.error({ error, address }, 'Failed to get pairs from DexScreener');
+    } catch (error: any) {
+      const status = error?.response?.status;
+      const errorData = error?.response?.data;
+      const message = errorData?.message || errorData?.error || error?.message;
+      logger.error(`DexScreener getTokenPairs failed: status=${status} error=${message} address=${address.slice(0, 8)}...`);
       return [];
     }
   }
@@ -391,8 +394,10 @@ class DexScreenerClient {
         params: { q: query },
       });
       return response.data.pairs?.filter((p: any) => p.chainId === 'solana') || [];
-    } catch (error) {
-      logger.error({ error, query }, 'Failed to search tokens on DexScreener');
+    } catch (error: any) {
+      const status = error?.response?.status;
+      const message = error?.response?.data?.message || error?.message;
+      logger.error(`DexScreener searchTokens failed: status=${status} error=${message} query=${query}`);
       return [];
     }
   }

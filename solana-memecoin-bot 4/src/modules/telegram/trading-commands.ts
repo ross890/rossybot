@@ -326,9 +326,13 @@ export class TradingCommands {
 
       let message = '*BOT SETTINGS*\n\n';
 
-      for (const row of settings.rows) {
-        const key = row.key.replace(/_/g, ' ').replace(/\b\w/g, (l: string) => l.toUpperCase());
-        message += `${key}: \`${row.value}\`\n`;
+      if (settings.rows.length === 0) {
+        message += 'No settings configured yet.\n';
+      } else {
+        for (const row of settings.rows) {
+          const key = row.key.replace(/_/g, ' ').replace(/\b\w/g, (l: string) => l.toUpperCase());
+          message += `${key}: \`${row.value}\`\n`;
+        }
       }
 
       message += '\n*Commands:*\n';
@@ -340,7 +344,11 @@ export class TradingCommands {
       await this.bot.sendMessage(chatId, message, { parse_mode: 'Markdown' });
     } catch (error) {
       logger.error({ error }, 'Failed to get settings');
-      await this.bot.sendMessage(chatId, 'Failed to get settings');
+      if (String(error).includes('does not exist') || String(error).includes('bot_settings')) {
+        await this.bot.sendMessage(chatId, 'Trading tables not set up. Run: npm run db:migrate:trading');
+      } else {
+        await this.bot.sendMessage(chatId, 'Failed to get settings');
+      }
     }
   }
 
@@ -426,7 +434,11 @@ export class TradingCommands {
 
       await this.bot.sendMessage(chatId, message, { parse_mode: 'Markdown' });
     } catch (error) {
-      await this.bot.sendMessage(chatId, 'Failed to get blacklist');
+      if (String(error).includes('does not exist') || String(error).includes('token_blacklist')) {
+        await this.bot.sendMessage(chatId, 'Trading tables not set up. Run: npm run db:migrate:trading');
+      } else {
+        await this.bot.sendMessage(chatId, 'Failed to get blacklist');
+      }
     }
   }
 
@@ -556,7 +568,12 @@ export class TradingCommands {
       await this.bot.sendMessage(chatId, message, { parse_mode: 'Markdown' });
     } catch (error) {
       logger.error({ error }, 'Failed to get stats');
-      await this.bot.sendMessage(chatId, 'Failed to get stats');
+      // Check if it's a missing table error
+      if (String(error).includes('does not exist') || String(error).includes('trade_history')) {
+        await this.bot.sendMessage(chatId, 'Trading tables not set up. Run: npm run db:migrate:trading');
+      } else {
+        await this.bot.sendMessage(chatId, 'Failed to get stats');
+      }
     }
   }
 
@@ -588,7 +605,11 @@ export class TradingCommands {
       await this.bot.sendMessage(chatId, message, { parse_mode: 'Markdown' });
     } catch (error) {
       logger.error({ error }, 'Failed to get history');
-      await this.bot.sendMessage(chatId, 'Failed to get history');
+      if (String(error).includes('does not exist') || String(error).includes('trade_history')) {
+        await this.bot.sendMessage(chatId, 'Trading tables not set up. Run: npm run db:migrate:trading');
+      } else {
+        await this.bot.sendMessage(chatId, 'Failed to get history');
+      }
     }
   }
 

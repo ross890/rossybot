@@ -32,6 +32,10 @@ import {
   CTOAnalysis,
 } from '../types/index.js';
 
+// Trading module imports
+import { TradingCommands } from './telegram/trading-commands.js';
+import { tradeExecutor, positionManager, autoTrader } from './trading/index.js';
+
 // ============ RATE LIMITING ============
 
 const RATE_LIMITS = {
@@ -52,6 +56,7 @@ export class TelegramAlertBot {
   private lastKolSignalTime: Map<string, number> = new Map();
   private startTime: Date | null = null;
   private isWebhookMode: boolean = false;
+  private tradingCommands: TradingCommands | null = null;
 
   constructor() {
     this.chatId = appConfig.telegramChatId;
@@ -99,6 +104,33 @@ export class TelegramAlertBot {
       logger.info('Performance tracking and daily reports initialized');
     } catch (error) {
       logger.error({ error }, 'Failed to initialize performance tracking');
+    }
+
+    // Initialize trading system
+    try {
+      // Initialize trade executor
+      await tradeExecutor.initialize();
+
+      // Initialize trading commands
+      if (this.bot) {
+        this.tradingCommands = new TradingCommands(this.bot, this.chatId);
+        await this.tradingCommands.initialize();
+
+        // Connect auto-trader to confirmation callback
+        autoTrader.setConfirmationCallback(async (confirmation) => {
+          if (this.tradingCommands) {
+            return await this.tradingCommands.sendConfirmationRequest(confirmation);
+          }
+          return undefined;
+        });
+
+        // Start position manager
+        positionManager.start();
+
+        logger.info('Trading system initialized');
+      }
+    } catch (error) {
+      logger.error({ error }, 'Failed to initialize trading system');
     }
 
     logger.info({ mode: this.isWebhookMode ? 'webhook' : 'polling' }, 'Telegram bot (rossybot) initialized');

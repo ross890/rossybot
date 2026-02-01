@@ -1,0 +1,367 @@
+// ===========================================
+// POSITION MANAGER
+// Monitors positions for TP/SL and time decay
+// ===========================================
+
+import { logger } from '../../utils/logger.js';
+import { pool } from '../../utils/database.js';
+import { tradeExecutor, SignalCategory, DEFAULT_TRADE_CONFIG } from './trade-executor.js';
+import { getTokenMetrics } from '../onchain.js';
+
+// ============ TYPES ============
+
+export interface ManagedPosition {
+  id: string;
+  tokenAddress: string;
+  tokenTicker: string;
+  entryPrice: number;
+  currentPrice: number;
+  quantity: number;
+  entryTimestamp: Date;
+  signalCategory: SignalCategory;
+  stopLoss: number;
+  takeProfit1: number;
+  takeProfit2: number;
+  tp1SellPercent: number;
+  tp2SellPercent: number;
+  tp1Hit: boolean;
+  tp2Hit: boolean;
+  pnlPercent: number;
+  holdTimeHours: number;
+  currentStopLoss: number; // Adjusted stop loss after time decay
+}
+
+export interface PositionCheckResult {
+  action: 'NONE' | 'STOP_LOSS' | 'TAKE_PROFIT_1' | 'TAKE_PROFIT_2' | 'TIME_DECAY_STOP';
+  sellPercent: number;
+  reason: string;
+}
+
+// ============ POSITION MANAGER CLASS ============
+
+export class PositionManager {
+  private isRunning = false;
+  private monitorInterval: NodeJS.Timeout | null = null;
+  private readonly MONITOR_INTERVAL_MS = 30 * 1000; // Check every 30 seconds
+
+  /**
+   * Start monitoring positions
+   */
+  start(): void {
+    if (this.isRunning) {
+      logger.warn('Position manager already running');
+      return;
+    }
+
+    this.isRunning = true;
+    logger.info('Position manager started');
+
+    // Run immediately, then on interval
+    this.checkAllPositions();
+    this.monitorInterval = setInterval(() => this.checkAllPositions(), this.MONITOR_INTERVAL_MS);
+  }
+
+  /**
+   * Stop monitoring
+   */
+  stop(): void {
+    if (!this.isRunning) return;
+
+    this.isRunning = false;
+    if (this.monitorInterval) {
+      clearInterval(this.monitorInterval);
+      this.monitorInterval = null;
+    }
+
+    logger.info('Position manager stopped');
+  }
+
+  /**
+   * Check all open positions
+   */
+  async checkAllPositions(): Promise<void> {
+    if (!tradeExecutor.isAutoSellEnabled()) {
+      return;
+    }
+
+    try {
+      const positions = await this.getOpenPositions();
+
+      for (const position of positions) {
+        try {
+          await this.checkPosition(position);
+        } catch (error) {
+          logger.error({ error, positionId: position.id }, 'Error checking position');
+        }
+      }
+    } catch (error) {
+      logger.error({ error }, 'Error in position check cycle');
+    }
+  }
+
+  /**
+   * Check a single position
+   */
+  private async checkPosition(position: ManagedPosition): Promise<void> {
+    // Get current price
+    const metrics = await getTokenMetrics(position.tokenAddress);
+    if (!metrics) {
+      logger.warn({ tokenAddress: position.tokenAddress }, 'Could not get price for position check');
+      return;
+    }
+
+    const currentPrice = metrics.price;
+    const pnlPercent = ((currentPrice - position.entryPrice) / position.entryPrice) * 100;
+
+    // Update current price in database
+    await this.updatePositionPrice(position.id, currentPrice);
+
+    // Check what action to take
+    const checkResult = this.evaluatePosition(position, currentPrice, pnlPercent);
+
+    if (checkResult.action === 'NONE') {
+      return;
+    }
+
+    logger.info({
+      positionId: position.id,
+      tokenTicker: position.tokenTicker,
+      action: checkResult.action,
+      pnlPercent,
+      reason: checkResult.reason,
+    }, 'Position action triggered');
+
+    // Execute the sell
+    const sellResult = await tradeExecutor.executeSell({
+      tokenAddress: position.tokenAddress,
+      tokenTicker: position.tokenTicker,
+      positionId: position.id,
+      sellPercent: checkResult.sellPercent,
+      reason: checkResult.reason,
+    });
+
+    if (sellResult.success) {
+      // Update position state
+      if (checkResult.action === 'TAKE_PROFIT_1') {
+        await this.markTp1Hit(position.id);
+      } else if (checkResult.action === 'TAKE_PROFIT_2') {
+        await this.markTp2Hit(position.id);
+      }
+
+      // Notify via Telegram (would be called by signal generator/telegram bot)
+      // telegramBot.sendPositionUpdate(...)
+    }
+  }
+
+  /**
+   * Evaluate position and determine action
+   */
+  private evaluatePosition(
+    position: ManagedPosition,
+    currentPrice: number,
+    pnlPercent: number
+  ): PositionCheckResult {
+    const config = DEFAULT_TRADE_CONFIG;
+    const category = position.signalCategory;
+
+    // Calculate time-adjusted stop loss
+    const timeDecayConfig = config.timeDecayStops[category];
+    let effectiveStopLoss = config.stopLosses[category];
+
+    // Apply time decay if conditions met
+    if (
+      position.holdTimeHours >= timeDecayConfig.hours &&
+      pnlPercent <= timeDecayConfig.threshold
+    ) {
+      effectiveStopLoss = timeDecayConfig.tightenTo;
+    }
+
+    // Check stop loss
+    if (pnlPercent <= effectiveStopLoss) {
+      const isTimeDecay = effectiveStopLoss !== config.stopLosses[category];
+      return {
+        action: isTimeDecay ? 'TIME_DECAY_STOP' : 'STOP_LOSS',
+        sellPercent: 100,
+        reason: isTimeDecay
+          ? `TIME_DECAY_STOP: ${pnlPercent.toFixed(1)}% after ${position.holdTimeHours.toFixed(1)}h`
+          : `STOP_LOSS: ${pnlPercent.toFixed(1)}%`,
+      };
+    }
+
+    // Check Take Profit 2 (only if TP1 already hit)
+    const tp2Percent = config.takeProfits[category].tp2Percent;
+    if (position.tp1Hit && !position.tp2Hit && pnlPercent >= tp2Percent) {
+      return {
+        action: 'TAKE_PROFIT_2',
+        sellPercent: 100, // Sell remaining
+        reason: `TAKE_PROFIT_2: ${pnlPercent.toFixed(1)}%`,
+      };
+    }
+
+    // Check Take Profit 1
+    const tp1Percent = config.takeProfits[category].tp1Percent;
+    if (!position.tp1Hit && pnlPercent >= tp1Percent) {
+      return {
+        action: 'TAKE_PROFIT_1',
+        sellPercent: position.tp1SellPercent,
+        reason: `TAKE_PROFIT_1: ${pnlPercent.toFixed(1)}%`,
+      };
+    }
+
+    return { action: 'NONE', sellPercent: 0, reason: '' };
+  }
+
+  /**
+   * Get all open positions with config
+   */
+  private async getOpenPositions(): Promise<ManagedPosition[]> {
+    const result = await pool.query(`
+      SELECT
+        p.id,
+        p.token_address,
+        p.token_ticker,
+        p.entry_price,
+        p.current_price,
+        p.quantity,
+        p.entry_timestamp,
+        p.stop_loss,
+        p.take_profit_1,
+        p.take_profit_2,
+        p.take_profit_1_hit,
+        p.take_profit_2_hit,
+        COALESCE(pc.signal_category, 'MANUAL_CONFIRM') as signal_category,
+        COALESCE(pc.tp1_sell_percent, 50) as tp1_sell_percent,
+        COALESCE(pc.tp2_sell_percent, 50) as tp2_sell_percent
+      FROM positions p
+      LEFT JOIN position_config pc ON p.id = pc.position_id
+      WHERE p.status = 'OPEN'
+      ORDER BY p.entry_timestamp DESC
+    `);
+
+    return result.rows.map(row => {
+      const entryPrice = parseFloat(row.entry_price);
+      const currentPrice = parseFloat(row.current_price || row.entry_price);
+      const entryTime = new Date(row.entry_timestamp);
+      const holdTimeHours = (Date.now() - entryTime.getTime()) / (1000 * 60 * 60);
+
+      return {
+        id: row.id,
+        tokenAddress: row.token_address,
+        tokenTicker: row.token_ticker,
+        entryPrice,
+        currentPrice,
+        quantity: parseFloat(row.quantity),
+        entryTimestamp: entryTime,
+        signalCategory: row.signal_category as SignalCategory,
+        stopLoss: parseFloat(row.stop_loss),
+        takeProfit1: parseFloat(row.take_profit_1),
+        takeProfit2: parseFloat(row.take_profit_2),
+        tp1SellPercent: row.tp1_sell_percent,
+        tp2SellPercent: row.tp2_sell_percent,
+        tp1Hit: row.take_profit_1_hit,
+        tp2Hit: row.take_profit_2_hit,
+        pnlPercent: ((currentPrice - entryPrice) / entryPrice) * 100,
+        holdTimeHours,
+        currentStopLoss: parseFloat(row.stop_loss),
+      };
+    });
+  }
+
+  /**
+   * Get position summary for display
+   */
+  async getPositionSummary(): Promise<{
+    totalPositions: number;
+    totalPnlPercent: number;
+    totalPnlSol: number;
+    positions: Array<{
+      tokenTicker: string;
+      pnlPercent: number;
+      holdTimeHours: number;
+      status: string;
+    }>;
+  }> {
+    const positions = await this.getOpenPositions();
+
+    let totalPnlSol = 0;
+    const summaries = positions.map(p => {
+      // Estimate SOL value of position
+      const positionValue = p.quantity * p.currentPrice;
+      const entryValue = p.quantity * p.entryPrice;
+      totalPnlSol += positionValue - entryValue;
+
+      let status = 'HOLDING';
+      if (p.tp1Hit) status = 'TP1_HIT';
+      if (p.pnlPercent <= DEFAULT_TRADE_CONFIG.stopLosses[p.signalCategory]) status = 'NEAR_STOP';
+
+      return {
+        tokenTicker: p.tokenTicker,
+        pnlPercent: p.pnlPercent,
+        holdTimeHours: p.holdTimeHours,
+        status,
+      };
+    });
+
+    const avgPnl = positions.length > 0
+      ? positions.reduce((sum, p) => sum + p.pnlPercent, 0) / positions.length
+      : 0;
+
+    return {
+      totalPositions: positions.length,
+      totalPnlPercent: avgPnl,
+      totalPnlSol,
+      positions: summaries,
+    };
+  }
+
+  /**
+   * Manually close a position
+   */
+  async closePosition(tokenAddress: string, reason: string = 'MANUAL_CLOSE'): Promise<boolean> {
+    const positions = await this.getOpenPositions();
+    const position = positions.find(p => p.tokenAddress === tokenAddress);
+
+    if (!position) {
+      return false;
+    }
+
+    const result = await tradeExecutor.executeSell({
+      tokenAddress: position.tokenAddress,
+      tokenTicker: position.tokenTicker,
+      positionId: position.id,
+      sellPercent: 100,
+      reason,
+    });
+
+    return result.success;
+  }
+
+  // ============ DATABASE HELPERS ============
+
+  private async updatePositionPrice(positionId: string, currentPrice: number): Promise<void> {
+    await pool.query(
+      `UPDATE positions SET current_price = $2, updated_at = NOW() WHERE id = $1`,
+      [positionId, currentPrice]
+    );
+  }
+
+  private async markTp1Hit(positionId: string): Promise<void> {
+    await pool.query(
+      `UPDATE positions SET take_profit_1_hit = true, updated_at = NOW() WHERE id = $1`,
+      [positionId]
+    );
+  }
+
+  private async markTp2Hit(positionId: string): Promise<void> {
+    await pool.query(
+      `UPDATE positions SET take_profit_2_hit = true, updated_at = NOW() WHERE id = $1`,
+      [positionId]
+    );
+  }
+}
+
+// ============ SINGLETON EXPORT ============
+
+export const positionManager = new PositionManager();
+
+export default positionManager;

@@ -40,6 +40,9 @@ import { signalPerformanceTracker, thresholdOptimizer } from './performance/inde
 // Social/X integration
 import { socialAnalyzer } from './social/index.js';
 
+// Auto-trading integration
+import { autoTrader } from './trading/index.js';
+
 import {
   TokenMetrics,
   SocialMetrics,
@@ -758,6 +761,23 @@ export class SignalGenerator {
 
     await telegramBot.sendBuySignal(signal);
 
+    // AUTO-TRADING: Process signal for potential auto-buy
+    try {
+      // Get conviction info for this token
+      const conviction = await convictionTracker.getConviction(tokenAddress);
+
+      // Process through auto-trader (handles auto-buy vs confirmation logic)
+      const autoTradeResult = await autoTrader.processSignal(signal, conviction);
+
+      logger.info({
+        tokenAddress,
+        action: autoTradeResult.action,
+        success: autoTradeResult.tradeResult?.success,
+      }, 'Auto-trade signal processed');
+    } catch (error) {
+      logger.error({ error, tokenAddress }, 'Auto-trade processing failed');
+    }
+
     // Record signal for performance tracking with additional metrics
     try {
       await signalPerformanceTracker.recordSignal(
@@ -848,6 +868,20 @@ export class SignalGenerator {
 
     // Send the validation signal
     await telegramBot.sendKolValidationSignal(signal, previousDiscovery);
+
+    // AUTO-TRADING: Process KOL validation signal for potential auto-buy
+    try {
+      const conviction = await convictionTracker.getConviction(tokenAddress);
+      const autoTradeResult = await autoTrader.processSignal(signal, conviction);
+
+      logger.info({
+        tokenAddress,
+        action: autoTradeResult.action,
+        success: autoTradeResult.tradeResult?.success,
+      }, 'Auto-trade KOL validation processed');
+    } catch (error) {
+      logger.error({ error, tokenAddress }, 'Auto-trade KOL validation failed');
+    }
 
     // Remove from discovery tracking (it's now validated)
     this.discoverySignals.delete(tokenAddress);

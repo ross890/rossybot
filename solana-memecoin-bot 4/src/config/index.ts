@@ -14,20 +14,23 @@ const envSchema = z.object({
   // Database
   DATABASE_URL: z.string().min(1),
   REDIS_URL: z.string().min(1),
-  
+
   // APIs
   HELIUS_API_KEY: z.string().min(1),
   HELIUS_RPC_URL: z.string().url(),
   BIRDEYE_API_KEY: z.string().min(1),
-  
+
   // Twitter/X API - supports both Bearer Token or Consumer Key/Secret
   TWITTER_BEARER_TOKEN: z.string().optional(),
   TWITTER_CONSUMER_KEY: z.string().optional(),
   TWITTER_CONSUMER_SECRET: z.string().optional(),
-  
+
   // Telegram
   TELEGRAM_BOT_TOKEN: z.string().min(1),
   TELEGRAM_CHAT_ID: z.string().min(1),
+
+  // Trading Wallet (optional - trading disabled if not set)
+  BOT_WALLET_PRIVATE_KEY: z.string().optional(),
   
   // System
   NODE_ENV: z.enum(['development', 'production', 'test']).default('development'),

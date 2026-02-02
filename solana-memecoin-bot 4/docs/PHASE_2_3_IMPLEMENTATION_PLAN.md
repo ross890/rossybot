@@ -32,8 +32,8 @@ Based on analysis of the existing codebase, we have **strong foundations** for b
 ```
 
 **Key Metrics to Track**:
-- `mentionsPerHour`: Current hourly rate
-- `velocityAcceleration`: (current hour / avg of last 6h)
+- `mentionsPer30Min`: Current 30-minute rate (crypto moves fast)
+- `velocityAcceleration`: (current 30min / avg of last 3h in 30min buckets)
 - `engagementRate`: (retweets + likes + replies) / mentions
 - `uniqueAccounts`: Deduplicated account mentions (anti-spam)
 - `avgAccountQuality`: Based on age, followers, verified status
@@ -41,8 +41,8 @@ Based on analysis of the existing codebase, we have **strong foundations** for b
 **Thresholds for Signals**:
 | Metric | WATCH | BUY Signal |
 |--------|-------|------------|
-| Velocity Acceleration | >2x | >5x |
-| Unique Mentions/Hour | >20 | >50 |
+| Velocity Acceleration (30min) | >2x | >5x |
+| Unique Mentions/30min | >10 | >25 |
 | Engagement Rate | >10 | >25 |
 | Avg Account Quality | >40 | >60 |
 
@@ -77,10 +77,64 @@ Based on analysis of the existing codebase, we have **strong foundations** for b
 └─────────────────────────────────────────────────────────────┘
 ```
 
-**Existing KOL Data** (from `scripts/seed-kols.ts`):
-- **Tier S**: blknoiz06 (Ansem), MustStopMurad, JADAWGS, Pain
-- **Tier A**: degenspartan, 0xsun, CryptoGodJohn
-- **Tier B+**: Extended list of 50+ tracked KOLs
+**KOL Size Tiers** (IMPORTANT: Size ≠ Signal Quality):
+
+Large KOLs (200K+ followers) are often **lagging indicators** - by the time they post,
+smart money has already accumulated. We track by SIZE tier for timing purposes:
+
+| Size Tier | Followers | Signal Timing | Use Case |
+|-----------|-----------|---------------|----------|
+| **EMERGING** | 1K-50K | EARLIEST | Best alpha, track closely |
+| **MID-SIZE** | 50K-200K | EARLY | Confirmation signal |
+| **LARGE** | 200K+ | LATE (potential top) | Caution - exit liquidity? |
+
+```typescript
+interface KolSizeTier {
+  tier: 'EMERGING' | 'MID_SIZE' | 'LARGE';
+  signalTiming: 'EARLIEST' | 'EARLY' | 'LATE';
+  followWeight: number;  // EMERGING: 1.3x, MID: 1.1x, LARGE: 0.8x (caution)
+}
+```
+
+**Dynamic KOL Ranking System** (Performance-Based Promotion):
+
+KOLs are ranked dynamically based on how their calls perform:
+
+```
+KOL mentions token → Track price over 24h → Score the call → Adjust KOL reputation
+```
+
+| Price Change After Mention | Points Awarded | Notes |
+|---------------------------|----------------|-------|
+| +50% within 24h | +5 points | Good call |
+| +200% within 24h | +20 points | Great call |
+| +500% within 24h | +50 points | Excellent - fast track to higher tier |
+| +5000% within 24h | Auto-promote to S-TIER | Exceptional alpha |
+| -50% within 24h | -10 points | Bad call |
+| -80% within 24h | -25 points | Rug/scam call |
+
+**Tier Thresholds (Performance-Based)**:
+| Performance Tier | Points Required | Min Calls |
+|-----------------|-----------------|-----------|
+| S-TIER | 100+ points | 5+ calls |
+| A-TIER | 50-99 points | 3+ calls |
+| B-TIER | 20-49 points | 2+ calls |
+| UNPROVEN | <20 points | Any |
+| DEMOTED | <0 points | Tracked but deprioritized |
+
+```typescript
+interface KolPerformanceTracking {
+  kolId: string;
+  totalCalls: number;
+  performancePoints: number;
+  avgPriceChangeAfterMention: number;
+  bestCall: { token: string; priceChange: number };
+  worstCall: { token: string; priceChange: number };
+  lastCallAt: Date;
+  performanceTier: 'S' | 'A' | 'B' | 'UNPROVEN' | 'DEMOTED';
+  sizeTier: 'EMERGING' | 'MID_SIZE' | 'LARGE';
+}
+```
 
 **Token Extraction Patterns**:
 ```typescript
@@ -94,13 +148,26 @@ const TICKER_PATTERN = /\$([A-Z]{2,10})/g;
 const DEX_LINK_PATTERN = /dexscreener\.com\/solana\/([a-zA-Z0-9]+)/g;
 ```
 
-**Signal Weighting by KOL Tier**:
-| KOL Tier | Signal Weight | Min Hold Time Check |
-|----------|---------------|---------------------|
-| S-Tier | 1.5x | Yes (>1h avg) |
-| A-Tier | 1.3x | Yes (>1h avg) |
-| B-Tier | 1.1x | Yes (>30m avg) |
-| Unproven | 1.0x | No |
+**Signal Weighting (Combined Performance + Size)**:
+
+Final weight = Performance Weight × Size Modifier
+
+| Performance Tier | Base Weight | Notes |
+|-----------------|-------------|-------|
+| S-TIER | 1.5x | Proven alpha, high trust |
+| A-TIER | 1.3x | Good track record |
+| B-TIER | 1.1x | Some success |
+| UNPROVEN | 1.0x | New/unknown |
+| DEMOTED | 0.5x | Poor track record |
+
+| Size Tier | Size Modifier | Notes |
+|-----------|---------------|-------|
+| EMERGING (1K-50K) | 1.2x | Earliest signals, boost |
+| MID-SIZE (50K-200K) | 1.0x | Neutral |
+| LARGE (200K+) | 0.7x | Potential top signal, reduce |
+
+**Example**: S-TIER emerging KOL = 1.5 × 1.2 = **1.8x weight**
+**Example**: S-TIER large KOL = 1.5 × 0.7 = **1.05x weight** (caution despite reputation)
 
 **Integration**:
 - Link to `kolAnalytics.getKolStats(kolId)` for performance data
@@ -178,7 +245,7 @@ interface CorrelatedSignal {
 ### Phase 2 Database Schema Additions
 
 ```sql
--- KOL Twitter Mentions
+-- KOL Twitter Mentions (with performance tracking)
 CREATE TABLE kol_twitter_mentions (
   id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
   kol_id UUID REFERENCES kols(id),
@@ -189,23 +256,57 @@ CREATE TABLE kol_twitter_mentions (
   tweet_text TEXT,
   engagement_count INTEGER,
   mentioned_at TIMESTAMP NOT NULL,
+
+  -- Performance tracking for dynamic KOL ranking
+  price_at_mention DECIMAL(20, 10),
+  price_after_1h DECIMAL(20, 10),
+  price_after_24h DECIMAL(20, 10),
+  price_change_1h_percent DECIMAL(10, 2),
+  price_change_24h_percent DECIMAL(10, 2),
+  points_awarded INTEGER DEFAULT 0,
+
   processed BOOLEAN DEFAULT FALSE,
   created_at TIMESTAMP DEFAULT NOW()
 );
 
--- Twitter Velocity Tracking
+-- KOL Dynamic Performance Ranking
+CREATE TABLE kol_performance_ranking (
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  kol_id UUID REFERENCES kols(id) UNIQUE,
+  twitter_handle VARCHAR(50),
+  follower_count INTEGER,
+  size_tier VARCHAR(20),            -- EMERGING, MID_SIZE, LARGE
+
+  -- Performance metrics
+  total_calls INTEGER DEFAULT 0,
+  performance_points INTEGER DEFAULT 0,
+  avg_price_change_after_mention DECIMAL(10, 2),
+  best_call_token VARCHAR(64),
+  best_call_price_change DECIMAL(10, 2),
+  worst_call_token VARCHAR(64),
+  worst_call_price_change DECIMAL(10, 2),
+
+  -- Tier classification
+  performance_tier VARCHAR(20),     -- S, A, B, UNPROVEN, DEMOTED
+  last_call_at TIMESTAMP,
+
+  created_at TIMESTAMP DEFAULT NOW(),
+  updated_at TIMESTAMP DEFAULT NOW()
+);
+
+-- Twitter Velocity Tracking (30-minute buckets for fast crypto pace)
 CREATE TABLE twitter_velocity_tracking (
   id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
   token_address VARCHAR(64) NOT NULL,
   ticker VARCHAR(20),
-  hour_bucket TIMESTAMP NOT NULL,
+  bucket_30min TIMESTAMP NOT NULL,    -- 30-minute time bucket
   mention_count INTEGER,
   unique_accounts INTEGER,
   total_engagement INTEGER,
   avg_account_quality DECIMAL(5, 2),
-  velocity_acceleration DECIMAL(5, 2),
+  velocity_acceleration DECIMAL(5, 2), -- vs avg of last 3h (6 buckets)
   created_at TIMESTAMP DEFAULT NOW(),
-  UNIQUE(token_address, hour_bucket)
+  UNIQUE(token_address, bucket_30min)
 );
 
 -- Correlated Signals
@@ -347,13 +448,20 @@ async function analyzeWalletWinRate(address: string): Promise<WalletProfile> {
 ```
 
 **Minimum Thresholds for "Smart Money" Classification**:
-| Metric | Threshold |
-|--------|-----------|
-| Win Rate | >40% |
-| Total Trades | >20 |
-| Avg ROI | >50% |
-| Last Active | Within 7 days |
-| Avg Entry Timing | <10% from launch MCap |
+
+| Metric | Threshold | Reasoning |
+|--------|-----------|-----------|
+| Win Rate | >30% | Matches bot target; crypto volatile, 30% with good R:R is profitable |
+| Total Trades | >15 | Faster qualification, more wallets tracked sooner |
+| Avg ROI | >30% | More inclusive; a few big winners skew averages anyway |
+| Last Active | Within 7 days | Ensures wallet is still active |
+| Avg Entry Timing | <15% from launch MCap | Slightly relaxed - still early but not impossible |
+
+**Why these thresholds are reasonable**:
+- **30% win rate**: If avg winner is 3x and avg loser is -50%, this is still profitable
+- **15 trades**: Statistical significance starts around 15-20; we can require more later
+- **30% avg ROI**: Accounts for the reality that most trades are small losses, few are big wins
+- Original thresholds (40%/20/50%) would filter too aggressively and miss good wallets
 
 ---
 
@@ -368,59 +476,70 @@ async function analyzeWalletWinRate(address: string): Promise<WalletProfile> {
 ┌─────────────────────────────────────────────────────────────┐
 │              REAL-TIME WALLET MONITORING                     │
 ├─────────────────────────────────────────────────────────────┤
-│  Option A: Helius Webhook (RECOMMENDED)                      │
+│  POLLING-BASED APPROACH (Cost-Effective)                     │
 │  ───────────────────────────────────────                     │
-│  • Register webhooks for each smart money wallet            │
-│  • Receive push notifications on new transactions           │
-│  • Latency: <1 second                                       │
-│  • Cost: Helius plan dependent                              │
-│                                                              │
-│  Option B: Polling (FALLBACK)                                │
-│  ─────────────────────────────                               │
 │  • Poll each wallet every 30 seconds                        │
 │  • Compare transaction list to cached version               │
-│  • Latency: 30 seconds average                              │
-│  • Cost: Higher API usage                                   │
+│  • Detect new token buys since last poll                    │
+│  • Latency: 15-30 seconds average                           │
+│  • Cost: FREE (uses existing Helius RPC)                    │
+│                                                              │
+│  BATCHING OPTIMIZATION                                       │
+│  ────────────────────────                                    │
+│  • Group wallets into batches of 10                         │
+│  • Stagger polls to avoid rate limits                       │
+│  • Priority polling for higher-tier wallets                 │
 └─────────────────────────────────────────────────────────────┘
 ```
 
-**Helius Webhook Setup**:
+**Why Not Webhooks**:
+- Helius webhooks cost $49-199 USD/month (~$76-309 AUD/month)
+- Free tier only allows 10 webhooks (not enough for 50+ wallets)
+- Polling with 30s intervals is acceptable for our use case
+- Most alpha comes from tracking the *right* wallets, not sub-second latency
+
+**Polling Implementation**:
 ```typescript
-// src/modules/smart-money/helius-webhook.ts
-import { Helius } from 'helius-sdk';
+// src/modules/smart-money/wallet-monitor.ts
+class WalletMonitor {
+  private lastSeenTxs: Map<string, string> = new Map(); // wallet -> last tx signature
+  private pollInterval = 30_000; // 30 seconds
 
-const helius = new Helius(config.HELIUS_API_KEY);
-
-async function registerWalletWebhook(walletAddress: string): Promise<void> {
-  await helius.createWebhook({
-    webhookURL: `${config.WEBHOOK_BASE_URL}/smart-money/alert`,
-    accountAddresses: [walletAddress],
-    transactionTypes: ['SWAP', 'TRANSFER'],
-    webhookType: 'enhanced',
-  });
-}
-
-// Express endpoint to receive webhooks
-app.post('/smart-money/alert', async (req, res) => {
-  const { transactions } = req.body;
-
-  for (const tx of transactions) {
-    if (isTokenBuy(tx)) {
-      await processSmartMoneyBuy(tx);
+  async startMonitoring(wallets: string[]): Promise<void> {
+    // Stagger initial polls to avoid rate limit spike
+    for (let i = 0; i < wallets.length; i++) {
+      setTimeout(() => this.pollWallet(wallets[i]), i * 1000);
     }
+
+    // Set up recurring polls
+    setInterval(() => this.pollAllWallets(wallets), this.pollInterval);
   }
 
-  res.sendStatus(200);
-});
+  async pollWallet(address: string): Promise<void> {
+    const txs = await heliusClient.getRecentTransactions(address, 5);
+    const lastSeen = this.lastSeenTxs.get(address);
+
+    for (const tx of txs) {
+      if (tx.signature === lastSeen) break; // Already processed
+      if (this.isTokenBuy(tx)) {
+        await this.processSmartMoneyBuy(address, tx);
+      }
+    }
+
+    if (txs.length > 0) {
+      this.lastSeenTxs.set(address, txs[0].signature);
+    }
+  }
+}
 ```
 
 **Alert Processing Flow**:
 ```
-Webhook Received → Parse Transaction → Is Token Buy?
-                                           ↓ Yes
-                         Get Wallet Profile → Calculate Signal Weight
-                                           ↓
-                         Create Conviction Signal → Feed to Signal Generator
+Poll Wallet → New Transaction? → Is Token Buy?
+                                      ↓ Yes
+                    Get Wallet Profile → Calculate Signal Weight
+                                      ↓
+                    Create Conviction Signal → Feed to Signal Generator
 ```
 
 **Signal Weight by Wallet Category**:
@@ -599,25 +718,23 @@ CREATE INDEX idx_dev_alerts_severity ON dev_wallet_alerts(severity);
 src/modules/smart-money/
 ├── index.ts                    # Unified smart money engine
 ├── wallet-profiler.ts          # Profile wallets, calculate win rates
-├── wallet-monitor.ts           # Real-time monitoring (webhook/polling)
-├── helius-webhook.ts           # Helius webhook integration
+├── wallet-monitor.ts           # Polling-based real-time monitoring
 ├── dev-wallet-tracker.ts       # Dev wallet behavior monitoring
 └── types.ts                    # Shared types and interfaces
 ```
 
 ---
 
-### Phase 3 Timeline (7 Days)
+### Phase 3 Timeline (6 Days)
 
 | Day | Task | Deliverable |
 |-----|------|-------------|
 | 1 | Database Schema | Create tables, indexes |
 | 2 | Wallet Profiler | Win rate analysis algorithm |
 | 3 | Wallet Profiler | Historical data backfill |
-| 4 | Wallet Monitor | Helius webhook setup |
-| 5 | Wallet Monitor | Polling fallback + alerting |
-| 6 | Dev Wallet Tracker | Identification + behavior monitoring |
-| 7 | Integration | Connect to signal generator, test end-to-end |
+| 4 | Wallet Monitor | Polling implementation + batching |
+| 5 | Dev Wallet Tracker | Identification + behavior monitoring |
+| 6 | Integration | Connect to signal generator, test end-to-end |
 
 ---
 
@@ -662,20 +779,25 @@ src/modules/smart-money/
 - **Mitigation**: Aggressive caching, prioritize KOL feeds over general search
 - **Cost**: May need Twitter API Pro ($100/mo) for higher limits
 
-### Helius Webhook Costs
-- **Free Tier**: 10 webhooks
-- **Paid Tier**: $49/mo for 100 webhooks, $199/mo for unlimited
-- **Mitigation**: Start with top 10 smart money wallets, expand based on ROI
+### Wallet Polling Latency
+- **Issue**: 30-second polling means 15-30s average delay vs <1s webhooks
+- **Mitigation**: This is acceptable - most alpha comes from tracking the *right* wallets
+- **Optimization**: Priority polling for S-tier wallets (every 15s)
 
 ### False Positives
 - **Twitter Velocity**: Bots can inflate mention counts
 - **Mitigation**: Account quality scoring, unique account filtering
 - **Smart Money**: Wallets can have lucky streaks
-- **Mitigation**: Require 20+ trades, 30-day window, confidence decay
+- **Mitigation**: Require 15+ trades, 30-day window, confidence decay
 
 ### Dev Wallet Tracking
 - **False Alerts**: Not all large sells are rugs
 - **Mitigation**: Severity levels, confirmation windows, % thresholds
+
+### KOL Size Bias
+- **Issue**: Large KOLs often signal tops, not bottoms
+- **Mitigation**: Size tier modifiers reduce weight for large KOLs
+- **Strategy**: Prioritize emerging KOLs (1K-50K followers) for early alpha
 
 ---
 
@@ -684,11 +806,12 @@ src/modules/smart-money/
 ### Phase 2 KPIs
 - **Twitter Signal Accuracy**: >30% of velocity signals lead to >50% gains
 - **KOL Mention Lead Time**: Average 15 minutes before price pump
+- **Emerging KOL Discovery**: Find 10+ new profitable KOLs per month via dynamic ranking
 - **Correlation Boost**: Correlated signals 20% more accurate than single-source
 
 ### Phase 3 KPIs
-- **Smart Money Identification**: 50+ profiled wallets with >40% win rate
-- **Alert Latency**: <5 seconds from on-chain activity to signal
+- **Smart Money Identification**: 50+ profiled wallets with >30% win rate
+- **Alert Latency**: <30 seconds from on-chain activity to signal (polling-based)
 - **Dev Alert Accuracy**: <10% false positive rate on HIGH/CRITICAL alerts
 
 ---

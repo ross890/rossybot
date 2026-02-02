@@ -8,7 +8,6 @@ import { logger } from './logger.js';
 import type {
   Kol,
   KolWallet,
-  KolPerformance,
   KolTrade,
   Position,
   KolTier,
@@ -665,51 +664,9 @@ export class Database {
   }
   
   // ============ PERFORMANCE OPERATIONS ============
-  
-  static async getKolPerformance(kolId: string): Promise<KolPerformance | null> {
-    const result = await pool.query(
-      'SELECT * FROM kol_performance WHERE kol_id = $1',
-      [kolId]
-    );
-    if (result.rows.length === 0) return null;
-    return this.mapPerformanceRow(result.rows[0]);
-  }
-  
-  static async updateKolPerformance(kolId: string): Promise<KolPerformance> {
-    // Calculate performance from trades
-    const stats = await pool.query(
-      `SELECT 
-         COUNT(*) as total_trades,
-         COUNT(*) FILTER (WHERE is_win = true) as wins,
-         COUNT(*) FILTER (WHERE is_win = false) as losses,
-         AVG(roi) as avg_roi,
-         PERCENTILE_CONT(0.5) WITHIN GROUP (ORDER BY roi) as median_roi
-       FROM kol_trades
-       WHERE kol_id = $1 AND roi IS NOT NULL`,
-      [kolId]
-    );
-    
-    const s = stats.rows[0];
-    const winRate = s.total_trades > 0 ? s.wins / s.total_trades : 0;
-    
-    const result = await pool.query(
-      `INSERT INTO kol_performance (kol_id, total_trades, wins, losses, win_rate, avg_roi, median_roi, last_calculated)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, NOW())
-       ON CONFLICT (kol_id) DO UPDATE SET
-         total_trades = EXCLUDED.total_trades,
-         wins = EXCLUDED.wins,
-         losses = EXCLUDED.losses,
-         win_rate = EXCLUDED.win_rate,
-         avg_roi = EXCLUDED.avg_roi,
-         median_roi = EXCLUDED.median_roi,
-         last_calculated = NOW()
-       RETURNING *`,
-      [kolId, s.total_trades, s.wins, s.losses, winRate, s.avg_roi || 0, s.median_roi || 0]
-    );
-    
-    return this.mapPerformanceRow(result.rows[0]);
-  }
-  
+  // NOTE: KOL performance is now calculated by kol-analytics.ts (single source of truth)
+  // The kol_performance table is deprecated - use kol_extended_performance via kolAnalytics.getKolStats()
+
   // ============ TRADE OPERATIONS ============
   
   static async recordTrade(
@@ -824,19 +781,8 @@ export class Database {
     };
   }
   
-  private static mapPerformanceRow(row: any): KolPerformance {
-    return {
-      kolId: row.kol_id,
-      totalTrades: row.total_trades,
-      wins: row.wins,
-      losses: row.losses,
-      winRate: parseFloat(row.win_rate),
-      avgRoi: parseFloat(row.avg_roi),
-      medianRoi: parseFloat(row.median_roi),
-      lastCalculated: row.last_calculated,
-    };
-  }
-  
+  // mapPerformanceRow removed - use kolAnalytics.getKolStats() instead
+
   private static mapTradeRow(row: any): KolTrade {
     return {
       id: row.id,

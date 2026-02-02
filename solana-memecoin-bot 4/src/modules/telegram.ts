@@ -67,13 +67,60 @@ interface SignalSnapshot {
   mentionVelocity: number;
   kolHandle: string;
   kolCount: number;
+  // Enhanced fields for better resend analysis
+  buySellRatio?: number;
+  uniqueBuyers5m?: number;
+  top10Concentration?: number;
+  prediction?: {
+    winProbability: number;
+    confidence: string;
+    matchedPatterns?: string[];
+    riskFactors?: string[];
+  };
 }
 
-// Follow-up signal context
+// Resend classification based on momentum assessment
+type ResendClassification =
+  | 'MOMENTUM_CONFIRMED'  // Multiple metrics improving, thesis strengthening
+  | 'NEW_CATALYST'        // New KOL entry, volume spike, or holder explosion
+  | 'MIXED_SIGNALS'       // Some better, some worse
+  | 'DETERIORATING'       // Metrics declining but still above thresholds
+  | 'SUPPRESS';           // Don't send - momentum clearly dead
+
+// Before/after metric comparison for rich context
+interface MetricComparison {
+  name: string;
+  emoji: string;
+  previous: number;
+  current: number;
+  change: number;
+  changePercent: number;
+  direction: 'up' | 'down' | 'flat';
+  isPositive: boolean; // Whether this direction is good for the trade
+}
+
+// Follow-up signal context with enhanced analysis
 interface FollowUpContext {
   isFollowUp: boolean;
   timeSinceFirst: number; // minutes
-  changes: string[];
+  changes: string[]; // Legacy format for backward compatibility
+  // Enhanced fields
+  classification?: ResendClassification;
+  shouldSuppress?: boolean;
+  suppressReason?: string;
+  momentumScore?: number; // -5 to +5 based on metric directions
+  positiveChanges: number;
+  negativeChanges: number;
+  metricsComparison?: MetricComparison[];
+  narrative?: string; // One-line summary of why this resend matters
+  predictionComparison?: {
+    previousWinProb: number;
+    currentWinProb: number;
+    probChange: number;
+    newRiskFactors?: string[];
+    lostPatterns?: string[];
+    gainedPatterns?: string[];
+  };
 }
 
 export class TelegramAlertBot {
@@ -1471,8 +1518,28 @@ export class TelegramAlertBot {
         return false;
       }
 
+      // Get prediction if available (for ML comparison in follow-ups)
+      const prediction = (signal as any).prediction;
+
       // Analyze follow-up context BEFORE recording (so we compare to previous state)
-      const followUpContext = this.analyzeFollowUpContext(signal);
+      const followUpContext = this.analyzeFollowUpContext(signal, prediction);
+
+      // QUALITY GATE: Suppress resends with clearly negative momentum
+      if (followUpContext.isFollowUp && followUpContext.shouldSuppress) {
+        logger.info({
+          tokenAddress: signal.tokenAddress,
+          ticker: signal.tokenTicker,
+          classification: followUpContext.classification,
+          suppressReason: followUpContext.suppressReason,
+          positiveChanges: followUpContext.positiveChanges,
+          negativeChanges: followUpContext.negativeChanges,
+          timeSinceFirst: followUpContext.timeSinceFirst,
+        }, 'Follow-up signal SUPPRESSED - momentum clearly negative');
+
+        // Still record in history to track the decline, but don't send
+        this.recordSignalHistory(signal, prediction);
+        return false;
+      }
 
       const message = this.formatBuySignal(signal, followUpContext);
 
@@ -1494,7 +1561,7 @@ export class TelegramAlertBot {
       this.lastKolSignalTime.set(signal.kolActivity.kol.handle, Date.now());
 
       // Record signal in history for follow-up tracking
-      this.recordSignalHistory(signal);
+      this.recordSignalHistory(signal, prediction);
 
       logger.info({
         tokenAddress: signal.tokenAddress,
@@ -1502,8 +1569,10 @@ export class TelegramAlertBot {
         score: signal.score.compositeScore,
         kol: signal.kolActivity.kol.handle,
         isFollowUp: followUpContext.isFollowUp,
-        changes: followUpContext.changes,
-      }, followUpContext.isFollowUp ? 'Follow-up signal sent' : 'Buy signal sent');
+        classification: followUpContext.classification,
+        narrative: followUpContext.narrative,
+        momentumScore: followUpContext.momentumScore,
+      }, followUpContext.isFollowUp ? `Follow-up signal sent (${followUpContext.classification})` : 'Buy signal sent');
 
       return true;
     } catch (error) {
@@ -1530,16 +1599,54 @@ export class TelegramAlertBot {
 
     // Different header for follow-up signals
     if (followUpContext?.isFollowUp) {
-      msg += `🔄  *FOLLOW-UP SIGNAL*\n`;
+      // Classification-based header with visual cue
+      const classificationHeader = this.getClassificationHeader(followUpContext.classification);
+      msg += `${classificationHeader.emoji}  *${classificationHeader.title}*\n`;
       msg += `    Score: *${score.compositeScore}/100* · ${score.confidence}\n`;
       msg += `═══════════════════════════════\n\n`;
 
-      // Show what changed since first signal
-      msg += `⚡ *WHAT CHANGED* (${followUpContext.timeSinceFirst}min)\n`;
-      for (const change of followUpContext.changes) {
-        msg += `├─ ${change}\n`;
+      // Momentum indicator
+      const momentumIndicator = this.getMomentumIndicator(followUpContext);
+      msg += `${momentumIndicator}\n\n`;
+
+      // Narrative summary - the key insight
+      if (followUpContext.narrative) {
+        msg += `💡 *${followUpContext.narrative}*\n\n`;
       }
-      msg += `\n`;
+
+      // Rich before/after comparison
+      if (followUpContext.metricsComparison && followUpContext.metricsComparison.length > 0) {
+        msg += `📊 *METRICS COMPARISON* (${followUpContext.timeSinceFirst}min)\n`;
+        for (const m of followUpContext.metricsComparison) {
+          if (m.direction === 'flat') continue; // Skip unchanged metrics
+          const arrow = m.direction === 'up' ? '↑' : '↓';
+          const sentiment = m.isPositive ? '✅' : '⚠️';
+          const prevStr = this.formatMetricValue(m.name, m.previous);
+          const currStr = this.formatMetricValue(m.name, m.current);
+          const changeStr = m.changePercent >= 0 ? `+${m.changePercent.toFixed(0)}%` : `${m.changePercent.toFixed(0)}%`;
+          msg += `├─ ${sentiment} ${m.emoji} ${m.name}: ${prevStr} → ${currStr} (${arrow}${changeStr})\n`;
+        }
+        msg += `\n`;
+      }
+
+      // ML Prediction comparison (if available)
+      if (followUpContext.predictionComparison) {
+        const pc = followUpContext.predictionComparison;
+        const probArrow = pc.probChange >= 0 ? '↑' : '↓';
+        const probEmoji = pc.probChange >= 0 ? '🎯' : '⚠️';
+        msg += `${probEmoji} *ML Win Prob:* ${pc.previousWinProb}% → ${pc.currentWinProb}% (${probArrow}${pc.probChange >= 0 ? '+' : ''}${pc.probChange.toFixed(0)}%)\n`;
+
+        if (pc.newRiskFactors && pc.newRiskFactors.length > 0) {
+          msg += `🚨 *New Risks:* ${pc.newRiskFactors.slice(0, 2).join(', ')}\n`;
+        }
+        if (pc.lostPatterns && pc.lostPatterns.length > 0) {
+          msg += `❌ *Lost Patterns:* ${pc.lostPatterns.slice(0, 2).join(', ')}\n`;
+        }
+        if (pc.gainedPatterns && pc.gainedPatterns.length > 0) {
+          msg += `✅ *New Patterns:* ${pc.gainedPatterns.slice(0, 2).join(', ')}\n`;
+        }
+        msg += `\n`;
+      }
     } else {
       msg += `🎯  *KOL CONFIRMED BUY SIGNAL*\n`;
       msg += `    Score: *${score.compositeScore}/100* · ${score.confidence}\n`;
@@ -1962,8 +2069,9 @@ export class TelegramAlertBot {
 
   /**
    * Create a snapshot of signal metrics for comparison
+   * Enhanced to capture additional fields for rich resend analysis
    */
-  private createSignalSnapshot(signal: BuySignal): SignalSnapshot {
+  private createSignalSnapshot(signal: BuySignal, prediction?: any): SignalSnapshot {
     return {
       timestamp: Date.now(),
       ticker: signal.tokenTicker,
@@ -1976,91 +2084,287 @@ export class TelegramAlertBot {
       mentionVelocity: signal.socialMetrics.mentionVelocity1h,
       kolHandle: signal.kolActivity.kol.handle,
       kolCount: 1,
+      // Enhanced fields
+      buySellRatio: signal.tokenMetrics.buySellRatio5m,
+      uniqueBuyers5m: signal.tokenMetrics.uniqueBuyers5m,
+      top10Concentration: signal.tokenMetrics.top10Concentration,
+      prediction: prediction ? {
+        winProbability: prediction.winProbability,
+        confidence: prediction.confidence,
+        matchedPatterns: prediction.matchedPatterns,
+        riskFactors: prediction.riskFactors,
+      } : undefined,
     };
   }
 
   /**
    * Analyze if this is a follow-up signal and what changed
+   * Enhanced with momentum quality gate, classification, and rich context
    */
-  private analyzeFollowUpContext(signal: BuySignal): FollowUpContext {
+  private analyzeFollowUpContext(signal: BuySignal, currentPrediction?: any): FollowUpContext {
     const previous = this.signalHistory.get(signal.tokenAddress);
 
     if (!previous) {
-      return { isFollowUp: false, timeSinceFirst: 0, changes: [] };
+      return { isFollowUp: false, timeSinceFirst: 0, changes: [], positiveChanges: 0, negativeChanges: 0 };
     }
 
     const timeSinceFirst = Math.round((Date.now() - previous.timestamp) / 60000); // minutes
-    const changes: string[] = [];
-    const current = this.createSignalSnapshot(signal);
+    const current = this.createSignalSnapshot(signal, currentPrediction);
 
-    // Score change
-    const scoreDelta = current.compositeScore - previous.compositeScore;
-    if (scoreDelta >= 5) {
-      changes.push(`📈 Momentum building (+${scoreDelta.toFixed(0)} score)`);
-    } else if (scoreDelta <= -5) {
-      changes.push(`📉 Score dropped (${scoreDelta.toFixed(0)})`);
+    // Build comprehensive metrics comparison
+    const metricsComparison: MetricComparison[] = [];
+    let positiveChanges = 0;
+    let negativeChanges = 0;
+
+    // Helper to add metric comparison
+    const addMetric = (
+      name: string,
+      emoji: string,
+      prev: number,
+      curr: number,
+      positiveDirection: 'up' | 'down' = 'up',
+      significantThreshold: number = 10 // percent change to be considered significant
+    ) => {
+      const change = curr - prev;
+      const changePercent = prev > 0 ? (change / prev) * 100 : (curr > 0 ? 100 : 0);
+      const direction: 'up' | 'down' | 'flat' =
+        changePercent > 5 ? 'up' : changePercent < -5 ? 'down' : 'flat';
+      const isPositive = direction === positiveDirection || direction === 'flat';
+
+      // Only count significant changes
+      if (Math.abs(changePercent) >= significantThreshold) {
+        if (isPositive && direction !== 'flat') positiveChanges++;
+        else if (!isPositive) negativeChanges++;
+      }
+
+      metricsComparison.push({
+        name, emoji, previous: prev, current: curr, change, changePercent, direction, isPositive
+      });
+    };
+
+    // Core metrics (all tracked for comparison)
+    addMetric('MC', '💰', previous.marketCap, current.marketCap, 'up', 15);
+    addMetric('Score', '📊', previous.compositeScore, current.compositeScore, 'up', 5);
+    addMetric('Holders', '👥', previous.holderCount, current.holderCount, 'up', 10);
+    addMetric('Volume', '📈', previous.volume24h, current.volume24h, 'up', 20);
+    addMetric('Social', '🔊', previous.mentionVelocity, current.mentionVelocity, 'up', 25);
+
+    // Buy pressure (if available)
+    if (previous.buySellRatio !== undefined && current.buySellRatio !== undefined) {
+      addMetric('Buy/Sell', '⚖️', previous.buySellRatio, current.buySellRatio || 0, 'up', 15);
     }
 
-    // Holder surge
-    const holderDelta = current.holderCount - previous.holderCount;
-    const holderPctChange = previous.holderCount > 0 ? (holderDelta / previous.holderCount) * 100 : 0;
-    if (holderDelta >= 20 || holderPctChange >= 15) {
-      changes.push(`👥 Holder surge (+${holderDelta} holders)`);
+    // Check for new KOL entry (strong catalyst)
+    const newKolEntry = current.kolHandle !== previous.kolHandle;
+    if (newKolEntry) {
+      positiveChanges += 2; // New KOL is worth 2 positive points
     }
 
-    // Volume spike
-    const volumeDelta = current.volume24h - previous.volume24h;
-    const volumePctChange = previous.volume24h > 0 ? (volumeDelta / previous.volume24h) * 100 : 0;
-    if (volumePctChange >= 30) {
-      const volumeK = (volumeDelta / 1000).toFixed(1);
-      changes.push(`💰 Volume spike (+$${volumeK}k)`);
+    // ML Prediction comparison
+    let predictionComparison: FollowUpContext['predictionComparison'] | undefined;
+    if (previous.prediction && currentPrediction) {
+      const probChange = currentPrediction.winProbability - previous.prediction.winProbability;
+      const prevPatterns = new Set(previous.prediction.matchedPatterns || []);
+      const currPatterns = new Set(currentPrediction.matchedPatterns || []);
+      const prevRisks = new Set(previous.prediction.riskFactors || []);
+      const currRisks = new Set(currentPrediction.riskFactors || []);
+
+      predictionComparison = {
+        previousWinProb: previous.prediction.winProbability,
+        currentWinProb: currentPrediction.winProbability,
+        probChange,
+        lostPatterns: [...prevPatterns].filter(p => !currPatterns.has(p)),
+        gainedPatterns: [...currPatterns].filter(p => !prevPatterns.has(p)),
+        newRiskFactors: [...currRisks].filter(r => !prevRisks.has(r)),
+      };
+
+      // Factor prediction change into momentum score
+      if (probChange >= 10) positiveChanges++;
+      else if (probChange <= -10) negativeChanges++;
     }
 
-    // Social velocity
-    const velocityRatio = previous.mentionVelocity > 0
-      ? current.mentionVelocity / previous.mentionVelocity
-      : current.mentionVelocity > 0 ? 999 : 1;
-    if (velocityRatio >= 1.5) {
-      changes.push(`🔊 Social velocity up ${velocityRatio.toFixed(1)}x`);
+    // Calculate momentum score (-5 to +5)
+    const momentumScore = Math.max(-5, Math.min(5, positiveChanges - negativeChanges));
+
+    // Determine classification based on momentum assessment
+    let classification: ResendClassification;
+    let shouldSuppress = false;
+    let suppressReason: string | undefined;
+
+    if (newKolEntry || (positiveChanges >= 3 && negativeChanges === 0)) {
+      classification = 'NEW_CATALYST';
+    } else if (positiveChanges >= 2 && positiveChanges > negativeChanges) {
+      classification = 'MOMENTUM_CONFIRMED';
+    } else if (positiveChanges > 0 && negativeChanges > 0) {
+      classification = 'MIXED_SIGNALS';
+    } else if (negativeChanges >= 3 || (negativeChanges >= 2 && positiveChanges === 0)) {
+      // Quality gate: suppress if clearly deteriorating
+      classification = 'SUPPRESS';
+      shouldSuppress = true;
+      suppressReason = this.generateSuppressionReason(metricsComparison, predictionComparison);
+    } else {
+      classification = 'DETERIORATING';
     }
 
-    // Market cap change
-    const mcDelta = current.marketCap - previous.marketCap;
-    const mcPctChange = previous.marketCap > 0 ? (mcDelta / previous.marketCap) * 100 : 0;
-    if (mcPctChange >= 20) {
-      changes.push(`🚀 MC up +${mcPctChange.toFixed(0)}%`);
-    } else if (mcPctChange <= -20) {
-      changes.push(`⚠️ MC down ${mcPctChange.toFixed(0)}%`);
-    }
+    // Generate legacy changes array for backward compatibility
+    const changes = this.generateLegacyChanges(metricsComparison, newKolEntry, current.kolHandle, timeSinceFirst);
 
-    // New KOL bought in
-    if (current.kolHandle !== previous.kolHandle) {
-      changes.push(`🐋 New KOL: @${current.kolHandle}`);
-    }
-
-    // If no significant changes detected, note the re-signal
-    if (changes.length === 0) {
-      changes.push(`🔄 Re-triggered after ${timeSinceFirst}min`);
-    }
+    // Generate narrative summary
+    const narrative = this.generateResendNarrative(
+      classification,
+      metricsComparison,
+      newKolEntry,
+      current.kolHandle,
+      predictionComparison
+    );
 
     return {
       isFollowUp: true,
       timeSinceFirst,
       changes,
+      classification,
+      shouldSuppress,
+      suppressReason,
+      momentumScore,
+      positiveChanges,
+      negativeChanges,
+      metricsComparison,
+      narrative,
+      predictionComparison,
     };
+  }
+
+  /**
+   * Generate suppression reason for logging
+   */
+  private generateSuppressionReason(
+    metrics: MetricComparison[],
+    prediction?: FollowUpContext['predictionComparison']
+  ): string {
+    const declining = metrics
+      .filter(m => !m.isPositive && m.direction !== 'flat')
+      .map(m => m.name.toLowerCase());
+
+    let reason = `Momentum fading: ${declining.join(', ')} declining`;
+
+    if (prediction && prediction.probChange < -15) {
+      reason += `, ML win prob dropped ${Math.abs(prediction.probChange).toFixed(0)}%`;
+    }
+
+    return reason;
+  }
+
+  /**
+   * Generate legacy changes array for backward compatibility
+   */
+  private generateLegacyChanges(
+    metrics: MetricComparison[],
+    newKolEntry: boolean,
+    kolHandle: string,
+    timeSinceFirst: number
+  ): string[] {
+    const changes: string[] = [];
+
+    for (const m of metrics) {
+      if (m.direction === 'flat') continue;
+
+      const changeStr = m.changePercent >= 0 ? `+${m.changePercent.toFixed(0)}%` : `${m.changePercent.toFixed(0)}%`;
+
+      if (m.name === 'MC') {
+        if (m.changePercent >= 20) changes.push(`🚀 MC up ${changeStr}`);
+        else if (m.changePercent <= -20) changes.push(`⚠️ MC down ${changeStr}`);
+      } else if (m.name === 'Score') {
+        if (m.change >= 5) changes.push(`📈 Score up (+${m.change.toFixed(0)})`);
+        else if (m.change <= -5) changes.push(`📉 Score down (${m.change.toFixed(0)})`);
+      } else if (m.name === 'Holders') {
+        if (m.change >= 20 || m.changePercent >= 15) changes.push(`👥 Holders +${m.change.toFixed(0)}`);
+        else if (m.change <= -10) changes.push(`👥 Holders ${m.change.toFixed(0)}`);
+      } else if (m.name === 'Volume') {
+        if (m.changePercent >= 30) changes.push(`💰 Volume ${changeStr}`);
+        else if (m.changePercent <= -30) changes.push(`💰 Volume ${changeStr}`);
+      } else if (m.name === 'Social') {
+        if (m.changePercent >= 50) changes.push(`🔊 Social ${changeStr}`);
+      }
+    }
+
+    if (newKolEntry) {
+      changes.push(`🐋 New KOL: @${kolHandle}`);
+    }
+
+    if (changes.length === 0) {
+      changes.push(`🔄 Re-triggered after ${timeSinceFirst}min`);
+    }
+
+    return changes;
+  }
+
+  /**
+   * Generate a one-line narrative explaining why this resend matters
+   */
+  private generateResendNarrative(
+    classification: ResendClassification,
+    metrics: MetricComparison[],
+    newKolEntry: boolean,
+    kolHandle: string,
+    prediction?: FollowUpContext['predictionComparison']
+  ): string {
+    const mcMetric = metrics.find(m => m.name === 'MC');
+    const holdersMetric = metrics.find(m => m.name === 'Holders');
+    const volumeMetric = metrics.find(m => m.name === 'Volume');
+    const scoreMetric = metrics.find(m => m.name === 'Score');
+
+    switch (classification) {
+      case 'NEW_CATALYST':
+        if (newKolEntry) {
+          return `New whale entry: @${kolHandle} buying in${mcMetric && mcMetric.changePercent < -10 ? ' while MC consolidating' : ''}`;
+        }
+        return 'Strong momentum: multiple metrics surging simultaneously';
+
+      case 'MOMENTUM_CONFIRMED':
+        const improving = metrics.filter(m => m.isPositive && m.direction === 'up').map(m => m.name.toLowerCase());
+        if (holdersMetric?.isPositive && volumeMetric?.isPositive) {
+          return `Accumulation confirmed: holder growth + volume surge indicates strong interest`;
+        }
+        return `Momentum building: ${improving.slice(0, 2).join(' + ')} trending up`;
+
+      case 'MIXED_SIGNALS':
+        const positive = metrics.filter(m => m.isPositive && m.direction !== 'flat').map(m => m.name.toLowerCase());
+        const negative = metrics.filter(m => !m.isPositive && m.direction !== 'flat').map(m => m.name.toLowerCase());
+
+        if (mcMetric && mcMetric.changePercent < -20 && holdersMetric?.isPositive) {
+          return `Potential dip opportunity: MC down ${Math.abs(mcMetric.changePercent).toFixed(0)}% but holders accumulating`;
+        }
+        return `Mixed: ${positive[0] || 'some metrics'} up, ${negative[0] || 'others'} down - use caution`;
+
+      case 'DETERIORATING':
+        if (prediction && prediction.probChange < -10) {
+          return `Caution: ML win probability dropped from ${prediction.previousWinProb}% to ${prediction.currentWinProb}%`;
+        }
+        return `Weakening: metrics declining but still above signal thresholds`;
+
+      case 'SUPPRESS':
+        return `Suppressed: momentum clearly negative, not worth your attention`;
+
+      default:
+        return 'Follow-up signal detected';
+    }
   }
 
   /**
    * Record signal in history for follow-up tracking
    */
-  private recordSignalHistory(signal: BuySignal): void {
+  private recordSignalHistory(signal: BuySignal, prediction?: any): void {
     const existing = this.signalHistory.get(signal.tokenAddress);
-    const snapshot = this.createSignalSnapshot(signal);
+    const snapshot = this.createSignalSnapshot(signal, prediction);
 
     if (existing) {
       // Keep original timestamp, update metrics, increment KOL count
       snapshot.timestamp = existing.timestamp;
       snapshot.kolCount = existing.kolCount + (signal.kolActivity.kol.handle !== existing.kolHandle ? 1 : 0);
+      // Preserve original prediction if new one not provided
+      if (!snapshot.prediction && existing.prediction) {
+        snapshot.prediction = existing.prediction;
+      }
     }
 
     this.signalHistory.set(signal.tokenAddress, snapshot);
@@ -2068,50 +2372,132 @@ export class TelegramAlertBot {
 
   /**
    * Analyze follow-up context for on-chain signals
+   * Enhanced with momentum quality gate, classification, and rich context
    */
   private analyzeOnChainFollowUp(signal: any, previous: SignalSnapshot | undefined): FollowUpContext {
     if (!previous) {
-      return { isFollowUp: false, timeSinceFirst: 0, changes: [] };
+      return { isFollowUp: false, timeSinceFirst: 0, changes: [], positiveChanges: 0, negativeChanges: 0 };
     }
 
     const timeSinceFirst = Math.round((Date.now() - previous.timestamp) / 60000);
-    const changes: string[] = [];
+    const currentPrediction = signal.prediction;
 
-    // Score change
+    // Build comprehensive metrics comparison
+    const metricsComparison: MetricComparison[] = [];
+    let positiveChanges = 0;
+    let negativeChanges = 0;
+
+    // Helper to add metric comparison
+    const addMetric = (
+      name: string,
+      emoji: string,
+      prev: number,
+      curr: number,
+      positiveDirection: 'up' | 'down' = 'up',
+      significantThreshold: number = 10
+    ) => {
+      const change = curr - prev;
+      const changePercent = prev > 0 ? (change / prev) * 100 : (curr > 0 ? 100 : 0);
+      const direction: 'up' | 'down' | 'flat' =
+        changePercent > 5 ? 'up' : changePercent < -5 ? 'down' : 'flat';
+      const isPositive = direction === positiveDirection || direction === 'flat';
+
+      if (Math.abs(changePercent) >= significantThreshold) {
+        if (isPositive && direction !== 'flat') positiveChanges++;
+        else if (!isPositive) negativeChanges++;
+      }
+
+      metricsComparison.push({
+        name, emoji, previous: prev, current: curr, change, changePercent, direction, isPositive
+      });
+    };
+
+    // Core metrics
     const currentScore = signal.onChainScore?.total || 0;
-    const scoreDelta = currentScore - previous.compositeScore;
-    if (scoreDelta >= 5) {
-      changes.push(`📈 Momentum building (+${scoreDelta.toFixed(0)} score)`);
+    const currentMC = signal.metrics?.marketCap || signal.tokenMetrics?.marketCap || 0;
+    const currentHolders = signal.metrics?.holderCount || signal.tokenMetrics?.holderCount || 0;
+    const currentVolume = signal.metrics?.volume24h || signal.tokenMetrics?.volume24h || 0;
+    const currentBuySell = signal.momentumScore?.metrics?.buySellRatio || 0;
+
+    addMetric('MC', '💰', previous.marketCap, currentMC, 'up', 15);
+    addMetric('Score', '📊', previous.compositeScore, currentScore, 'up', 5);
+    addMetric('Holders', '👥', previous.holderCount, currentHolders, 'up', 10);
+    addMetric('Volume', '📈', previous.volume24h, currentVolume, 'up', 20);
+
+    if (previous.buySellRatio !== undefined && currentBuySell > 0) {
+      addMetric('Buy/Sell', '⚖️', previous.buySellRatio, currentBuySell, 'up', 15);
     }
 
-    // Holder surge
-    const currentHolders = signal.metrics?.holderCount || 0;
-    const holderDelta = currentHolders - previous.holderCount;
-    if (holderDelta >= 20 || (previous.holderCount > 0 && holderDelta / previous.holderCount >= 0.15)) {
-      changes.push(`👥 Holder surge (+${holderDelta} holders)`);
+    // ML Prediction comparison
+    let predictionComparison: FollowUpContext['predictionComparison'] | undefined;
+    if (previous.prediction && currentPrediction) {
+      const probChange = currentPrediction.winProbability - previous.prediction.winProbability;
+      const prevPatterns = new Set(previous.prediction.matchedPatterns || []);
+      const currPatterns = new Set(currentPrediction.matchedPatterns || []);
+      const prevRisks = new Set(previous.prediction.riskFactors || []);
+      const currRisks = new Set(currentPrediction.riskFactors || []);
+
+      predictionComparison = {
+        previousWinProb: previous.prediction.winProbability,
+        currentWinProb: currentPrediction.winProbability,
+        probChange,
+        lostPatterns: [...prevPatterns].filter(p => !currPatterns.has(p)),
+        gainedPatterns: [...currPatterns].filter(p => !prevPatterns.has(p)),
+        newRiskFactors: [...currRisks].filter(r => !prevRisks.has(r)),
+      };
+
+      if (probChange >= 10) positiveChanges++;
+      else if (probChange <= -10) negativeChanges++;
     }
 
-    // Volume spike
-    const currentVolume = signal.metrics?.volume24h || 0;
-    const volumeDelta = currentVolume - previous.volume24h;
-    const volumePctChange = previous.volume24h > 0 ? (volumeDelta / previous.volume24h) * 100 : 0;
-    if (volumePctChange >= 30) {
-      changes.push(`💰 Volume spike (+${(volumeDelta / 1000).toFixed(1)}k)`);
+    // Calculate momentum score
+    const momentumScore = Math.max(-5, Math.min(5, positiveChanges - negativeChanges));
+
+    // Determine classification
+    let classification: ResendClassification;
+    let shouldSuppress = false;
+    let suppressReason: string | undefined;
+
+    if (positiveChanges >= 3 && negativeChanges === 0) {
+      classification = 'NEW_CATALYST';
+    } else if (positiveChanges >= 2 && positiveChanges > negativeChanges) {
+      classification = 'MOMENTUM_CONFIRMED';
+    } else if (positiveChanges > 0 && negativeChanges > 0) {
+      classification = 'MIXED_SIGNALS';
+    } else if (negativeChanges >= 3 || (negativeChanges >= 2 && positiveChanges === 0)) {
+      classification = 'SUPPRESS';
+      shouldSuppress = true;
+      suppressReason = this.generateSuppressionReason(metricsComparison, predictionComparison);
+    } else {
+      classification = 'DETERIORATING';
     }
 
-    // Market cap change
-    const currentMC = signal.metrics?.marketCap || 0;
-    const mcDelta = currentMC - previous.marketCap;
-    const mcPctChange = previous.marketCap > 0 ? (mcDelta / previous.marketCap) * 100 : 0;
-    if (mcPctChange >= 20) {
-      changes.push(`🚀 MC up +${mcPctChange.toFixed(0)}%`);
-    }
+    // Generate legacy changes array
+    const changes = this.generateLegacyChanges(metricsComparison, false, 'ONCHAIN', timeSinceFirst);
 
-    if (changes.length === 0) {
-      changes.push(`🔄 Re-triggered after ${timeSinceFirst}min`);
-    }
+    // Generate narrative
+    const narrative = this.generateResendNarrative(
+      classification,
+      metricsComparison,
+      false,
+      'ONCHAIN',
+      predictionComparison
+    );
 
-    return { isFollowUp: true, timeSinceFirst, changes };
+    return {
+      isFollowUp: true,
+      timeSinceFirst,
+      changes,
+      classification,
+      shouldSuppress,
+      suppressReason,
+      momentumScore,
+      positiveChanges,
+      negativeChanges,
+      metricsComparison,
+      narrative,
+      predictionComparison,
+    };
   }
 
   /**
@@ -2119,19 +2505,29 @@ export class TelegramAlertBot {
    */
   private recordOnChainSignalHistory(signal: any): void {
     const existing = this.signalHistory.get(signal.tokenAddress);
+    const prediction = signal.prediction;
 
     const snapshot: SignalSnapshot = {
       timestamp: existing?.timestamp || Date.now(),
       ticker: signal.tokenTicker || '',
-      price: signal.metrics?.price || 0,
-      marketCap: signal.metrics?.marketCap || 0,
-      volume24h: signal.metrics?.volume24h || 0,
-      holderCount: signal.metrics?.holderCount || 0,
+      price: signal.metrics?.price || signal.tokenMetrics?.price || 0,
+      marketCap: signal.metrics?.marketCap || signal.tokenMetrics?.marketCap || 0,
+      volume24h: signal.metrics?.volume24h || signal.tokenMetrics?.volume24h || 0,
+      holderCount: signal.metrics?.holderCount || signal.tokenMetrics?.holderCount || 0,
       compositeScore: signal.onChainScore?.total || 0,
       socialMomentum: 0,
       mentionVelocity: 0,
       kolHandle: 'ONCHAIN',
       kolCount: 0,
+      // Enhanced fields
+      buySellRatio: signal.momentumScore?.metrics?.buySellRatio,
+      uniqueBuyers5m: signal.momentumScore?.metrics?.uniqueBuyers5m,
+      prediction: prediction ? {
+        winProbability: prediction.winProbability,
+        confidence: prediction.confidence,
+        matchedPatterns: prediction.matchedPatterns,
+        riskFactors: prediction.riskFactors,
+      } : existing?.prediction,
     };
 
     this.signalHistory.set(signal.tokenAddress, snapshot);
@@ -2677,6 +3073,23 @@ export class TelegramAlertBot {
       // Analyze follow-up context for on-chain signals
       const followUpContext = this.analyzeOnChainFollowUp(signal, previousSnapshot);
 
+      // QUALITY GATE: Suppress resends with clearly negative momentum
+      if (followUpContext.isFollowUp && followUpContext.shouldSuppress) {
+        logger.info({
+          tokenAddress: signal.tokenAddress,
+          ticker: signal.tokenTicker,
+          classification: followUpContext.classification,
+          suppressReason: followUpContext.suppressReason,
+          positiveChanges: followUpContext.positiveChanges,
+          negativeChanges: followUpContext.negativeChanges,
+          timeSinceFirst: followUpContext.timeSinceFirst,
+        }, 'On-chain follow-up SUPPRESSED - momentum clearly negative');
+
+        // Still record in history to track the decline, but don't send
+        this.recordOnChainSignalHistory(signal);
+        return false;
+      }
+
       const message = this.formatOnChainSignal(signal, followUpContext);
 
       await this.bot.sendMessage(this.chatId, message, {
@@ -2702,7 +3115,10 @@ export class TelegramAlertBot {
         momentumScore: signal.momentumScore?.total,
         onChainScore: signal.onChainScore?.total,
         isFollowUp: followUpContext.isFollowUp,
-      }, followUpContext.isFollowUp ? 'On-chain follow-up signal sent' : 'On-chain momentum signal sent');
+        classification: followUpContext.classification,
+        narrative: followUpContext.narrative,
+        momentumScore: followUpContext.momentumScore,
+      }, followUpContext.isFollowUp ? `On-chain follow-up sent (${followUpContext.classification})` : 'On-chain momentum signal sent');
 
       return true;
     } catch (error) {
@@ -2824,16 +3240,54 @@ export class TelegramAlertBot {
 
     // Different header for follow-up signals
     if (followUpContext?.isFollowUp) {
-      msg += `🔄  *FOLLOW-UP: ON-CHAIN SIGNAL*\n`;
+      // Classification-based header with visual cue
+      const classificationHeader = this.getClassificationHeader(followUpContext.classification);
+      msg += `${classificationHeader.emoji}  *${classificationHeader.title}*\n`;
       msg += `    ${recEmoji} ${recommendation} · Score: *${totalScore}/100*\n`;
       msg += `═══════════════════════════════\n\n`;
 
-      // Show what changed
-      msg += `⚡ *WHAT CHANGED* (${followUpContext.timeSinceFirst}min)\n`;
-      for (const change of followUpContext.changes) {
-        msg += `├─ ${change}\n`;
+      // Momentum indicator
+      const momentumIndicator = this.getMomentumIndicator(followUpContext);
+      msg += `${momentumIndicator}\n\n`;
+
+      // Narrative summary - the key insight
+      if (followUpContext.narrative) {
+        msg += `💡 *${followUpContext.narrative}*\n\n`;
       }
-      msg += `\n`;
+
+      // Rich before/after comparison
+      if (followUpContext.metricsComparison && followUpContext.metricsComparison.length > 0) {
+        msg += `📊 *METRICS COMPARISON* (${followUpContext.timeSinceFirst}min)\n`;
+        for (const m of followUpContext.metricsComparison) {
+          if (m.direction === 'flat') continue; // Skip unchanged metrics
+          const arrow = m.direction === 'up' ? '↑' : '↓';
+          const sentiment = m.isPositive ? '✅' : '⚠️';
+          const prevStr = this.formatMetricValue(m.name, m.previous);
+          const currStr = this.formatMetricValue(m.name, m.current);
+          const changeStr = m.changePercent >= 0 ? `+${m.changePercent.toFixed(0)}%` : `${m.changePercent.toFixed(0)}%`;
+          msg += `├─ ${sentiment} ${m.emoji} ${m.name}: ${prevStr} → ${currStr} (${arrow}${changeStr})\n`;
+        }
+        msg += `\n`;
+      }
+
+      // ML Prediction comparison (if available)
+      if (followUpContext.predictionComparison) {
+        const pc = followUpContext.predictionComparison;
+        const probArrow = pc.probChange >= 0 ? '↑' : '↓';
+        const probEmoji = pc.probChange >= 0 ? '🎯' : '⚠️';
+        msg += `${probEmoji} *ML Win Prob:* ${pc.previousWinProb}% → ${pc.currentWinProb}% (${probArrow}${pc.probChange >= 0 ? '+' : ''}${pc.probChange.toFixed(0)}%)\n`;
+
+        if (pc.newRiskFactors && pc.newRiskFactors.length > 0) {
+          msg += `🚨 *New Risks:* ${pc.newRiskFactors.slice(0, 2).join(', ')}\n`;
+        }
+        if (pc.lostPatterns && pc.lostPatterns.length > 0) {
+          msg += `❌ *Lost Patterns:* ${pc.lostPatterns.slice(0, 2).join(', ')}\n`;
+        }
+        if (pc.gainedPatterns && pc.gainedPatterns.length > 0) {
+          msg += `✅ *New Patterns:* ${pc.gainedPatterns.slice(0, 2).join(', ')}\n`;
+        }
+        msg += `\n`;
+      }
     } else {
       msg += `${scoreEmoji}  *ON-CHAIN MOMENTUM SIGNAL*\n`;
       msg += `    ${recEmoji} ${recommendation} · Score: *${totalScore}/100*\n`;
@@ -3187,6 +3641,67 @@ export class TelegramAlertBot {
     if (price >= 1) return price.toFixed(4);
     if (price >= 0.0001) return price.toFixed(6);
     return price.toExponential(4);
+  }
+
+  /**
+   * Get classification header for follow-up signals
+   */
+  private getClassificationHeader(classification?: ResendClassification): { emoji: string; title: string } {
+    switch (classification) {
+      case 'NEW_CATALYST':
+        return { emoji: '🚀', title: 'NEW CATALYST DETECTED' };
+      case 'MOMENTUM_CONFIRMED':
+        return { emoji: '📈', title: 'MOMENTUM CONFIRMED' };
+      case 'MIXED_SIGNALS':
+        return { emoji: '⚖️', title: 'MIXED SIGNALS - REVIEW' };
+      case 'DETERIORATING':
+        return { emoji: '⚠️', title: 'CAUTION: WEAKENING' };
+      case 'SUPPRESS':
+        return { emoji: '🛑', title: 'SUPPRESSED' };
+      default:
+        return { emoji: '🔄', title: 'FOLLOW-UP SIGNAL' };
+    }
+  }
+
+  /**
+   * Get momentum direction indicator for follow-up signals
+   */
+  private getMomentumIndicator(context: FollowUpContext): string {
+    const { positiveChanges, negativeChanges, momentumScore } = context;
+    const total = positiveChanges + negativeChanges;
+
+    if (total === 0) {
+      return '📊 MOMENTUM: ➡️ STABLE (no significant changes)';
+    }
+
+    if (momentumScore && momentumScore >= 2) {
+      return `📈 MOMENTUM: ↗️ BUILDING (${positiveChanges}/${total} metrics improving)`;
+    } else if (momentumScore && momentumScore <= -2) {
+      return `📉 MOMENTUM: ↘️ FADING (${negativeChanges}/${total} metrics declining)`;
+    } else {
+      return `📊 MOMENTUM: ↔️ MIXED (${positiveChanges} up, ${negativeChanges} down)`;
+    }
+  }
+
+  /**
+   * Format metric value for display in comparison
+   */
+  private formatMetricValue(name: string, value: number): string {
+    switch (name) {
+      case 'MC':
+      case 'Volume':
+        return `$${this.formatNumber(value)}`;
+      case 'Score':
+        return `${value.toFixed(0)}`;
+      case 'Holders':
+        return `${value.toFixed(0)}`;
+      case 'Social':
+        return `${value.toFixed(0)}/hr`;
+      case 'Buy/Sell':
+        return `${value.toFixed(2)}x`;
+      default:
+        return `${value.toFixed(2)}`;
+    }
   }
 
   /**

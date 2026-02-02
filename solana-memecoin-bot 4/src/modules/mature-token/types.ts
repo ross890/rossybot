@@ -537,7 +537,7 @@ export const DEFAULT_MATURE_TOKEN_CONFIG: MatureTokenConfig = {
 
   tokenAgeRange: {
     minHours: 24,
-    maxDays: 14,
+    maxDays: 90,  // Extended from 14 days to catch more opportunities
   },
 
   rateLimits: {
@@ -571,7 +571,7 @@ export const DEFAULT_MATURE_TOKEN_CONFIG: MatureTokenConfig = {
 
 export const DEFAULT_ELIGIBILITY: MatureTokenEligibility = {
   minTokenAgeHours: 24,
-  maxTokenAgeDays: 14,
+  maxTokenAgeDays: 90,  // Extended from 14 days to discover older opportunities
   minMarketCap: 100_000,
   maxMarketCap: 50_000_000,
   minLiquidity: 50_000,

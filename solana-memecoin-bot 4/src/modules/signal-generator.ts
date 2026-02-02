@@ -43,6 +43,9 @@ import { socialAnalyzer } from './social/index.js';
 // Auto-trading integration
 import { autoTrader } from './trading/index.js';
 
+// Multi-source token discovery
+import { discoveryEngine } from './discovery/index.js';
+
 import {
   TokenMetrics,
   SocialMetrics,
@@ -152,6 +155,14 @@ export class SignalGenerator {
       logger.warn({ error }, 'Failed to sync optimizer thresholds');
     }
 
+    // Initialize multi-source token discovery engine
+    try {
+      await discoveryEngine.initialize();
+      logger.info('Discovery engine initialized - multi-source token scanning active');
+    } catch (error) {
+      logger.warn({ error }, 'Failed to initialize discovery engine - using basic discovery');
+    }
+
     // Log learning mode status prominently
     const learningMode = appConfig.trading.learningMode;
     logger.info({
@@ -176,10 +187,18 @@ export class SignalGenerator {
       logger.warn('Signal generator already running');
       return;
     }
-    
+
     this.isRunning = true;
     logger.info('Starting signal generation loop');
-    
+
+    // Start discovery engine for multi-source token scanning
+    try {
+      discoveryEngine.start();
+      logger.info('Discovery engine started - volume anomalies, holder growth, and narrative scanning active');
+    } catch (error) {
+      logger.warn({ error }, 'Failed to start discovery engine');
+    }
+
     // Run immediately, then on interval
     this.runScanCycle();
     this.scanTimer = setInterval(() => this.runScanCycle(), SCAN_INTERVAL_MS);
@@ -190,13 +209,20 @@ export class SignalGenerator {
    */
   stop(): void {
     if (!this.isRunning) return;
-    
+
     this.isRunning = false;
     if (this.scanTimer) {
       clearInterval(this.scanTimer);
       this.scanTimer = null;
     }
-    
+
+    // Stop discovery engine
+    try {
+      discoveryEngine.stop();
+    } catch {
+      // Ignore errors on stop
+    }
+
     logger.info('Signal generator stopped');
   }
   
@@ -290,52 +316,76 @@ export class SignalGenerator {
   
   /**
    * Get candidate tokens to evaluate
+   * Now uses multi-source discovery: Birdeye, DexScreener, volume anomalies,
+   * holder growth velocity, and narrative-based searches
    */
   private async getCandidateTokens(): Promise<string[]> {
     const candidates: Set<string> = new Set();
-    
+
     // Check WebSocket connection status
     const wsConnected = birdeyeClient.isWebSocketConnected();
     logger.debug({ wsConnected }, 'Birdeye WebSocket status');
-    
-    // Try Birdeye first (will use WebSocket buffer if connected, REST API otherwise)
+
+    // ===== SOURCE 1: Birdeye New Listings (real-time new tokens) =====
     try {
       const newListings = await birdeyeClient.getNewListings(50);
-      
+
       for (const listing of newListings) {
         if (listing.address) {
           candidates.add(listing.address);
         }
       }
-      
+
       if (candidates.size > 0) {
-        logger.info({
+        logger.debug({
           count: candidates.size,
-          source: 'Birdeye WebSocket'
-        }, 'Got candidates from Birdeye');
+          source: 'Birdeye'
+        }, 'Candidates from Birdeye new listings');
       }
     } catch (error) {
-      logger.warn({ error }, 'Birdeye new listings failed, using DexScreener fallback');
+      logger.debug({ error }, 'Birdeye new listings failed');
     }
-    
-    // Use DexScreener as fallback/supplement
-    if (candidates.size < 20) {
-      try {
-        const dexTokens = await dexScreenerClient.getTrendingSolanaTokens(50);
-        
-        for (const address of dexTokens) {
-          candidates.add(address);
-        }
-        
-        logger.info({ count: candidates.size }, 'Supplemented with DexScreener candidates');
-      } catch (error) {
-        logger.error({ error }, 'DexScreener fallback also failed');
+
+    // ===== SOURCE 2: DexScreener Trending (active tokens) =====
+    try {
+      const dexTokens = await dexScreenerClient.getTrendingSolanaTokens(50);
+
+      for (const address of dexTokens) {
+        candidates.add(address);
       }
+
+      logger.debug({
+        count: dexTokens.length,
+        source: 'DexScreener trending'
+      }, 'Candidates from DexScreener');
+    } catch (error) {
+      logger.debug({ error }, 'DexScreener trending failed');
     }
-    
-    // Also check tokens that KOLs have recently interacted with
-    // This would require additional tracking infrastructure
-    
+
+    // ===== SOURCE 3: Discovery Engine (volume anomalies, holder growth, narratives) =====
+    try {
+      const discoveryTokens = await discoveryEngine.getAllDiscoveredTokens();
+
+      for (const address of discoveryTokens) {
+        candidates.add(address);
+      }
+
+      if (discoveryTokens.length > 0) {
+        logger.debug({
+          count: discoveryTokens.length,
+          source: 'Discovery Engine'
+        }, 'Candidates from discovery engine');
+      }
+    } catch (error) {
+      logger.debug({ error }, 'Discovery engine failed');
+    }
+
+    // Log final candidate pool composition
+    logger.info({
+      totalCandidates: candidates.size,
+      sources: 'Birdeye + DexScreener + Discovery Engine (volume/holder/narrative)',
+    }, 'Candidate token pool assembled');
+
     return Array.from(candidates);
   }
   

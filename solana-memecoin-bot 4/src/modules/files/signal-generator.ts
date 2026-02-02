@@ -20,6 +20,7 @@ import {
   SocialMetrics,
   BuySignal,
   SignalType,
+  SignalTrack,
   KolWalletActivity,
 } from '../../types/index.js';
 
@@ -397,9 +398,12 @@ export class SignalGenerator {
         percent: 150,
       },
       timeLimitHours: 72,
-      
+
       generatedAt: new Date(),
       signalType: SignalType.BUY,
+
+      // Dual-track strategy (default to PROVEN_RUNNER for legacy file)
+      signalTrack: SignalTrack.PROVEN_RUNNER,
     };
   }
 }

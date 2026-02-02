@@ -7,105 +7,35 @@
 import { pool } from '../utils/database.js';
 import { logger } from '../utils/logger.js';
 import { KolReputation, KolReputationTier } from '../types/index.js';
+import { kolAnalytics } from './kol/kol-analytics.js';
 
 // ============ CONSTANTS ============
 
-// Tier thresholds based on win rate
+// Tier thresholds based on win rate AND hold time
+// Research shows 76% of KOL-promoted tokens fail, and most "top KOLs"
+// have 5-15 second hold times (front-running). We require:
+// 1. Proven win rate over minimum picks
+// 2. Minimum average hold time to filter front-runners
 const TIER_THRESHOLDS = {
   S_TIER: 50,    // 50%+ win rate
   A_TIER: 40,    // 40%+ win rate
   B_TIER: 30,    // 30%+ win rate
   MIN_PICKS: 30, // Minimum picks to be considered "proven"
+  MIN_HOLD_TIME_HOURS: 1, // Minimum 1 hour avg hold time (filters front-runners)
 };
 
-// Top KOLs from KOLscan (seeded data)
-// These are verified profitable traders from the leaderboard
-const KOLSCAN_SEED_DATA: Omit<KolReputation, 'kolId' | 'lastUpdated'>[] = [
-  {
-    handle: 'Cented',
-    tier: KolReputationTier.S_TIER,
-    totalPicks: 198,
-    wins: 135,
-    losses: 63,
-    winRate: 68.2,
-    avgReturn: 124,
-    profitSol: 245.46,
-    lastPickAt: null,
-    source: 'KOLSCAN',
-  },
-  {
-    handle: 'clukz',
-    tier: KolReputationTier.S_TIER,
-    totalPicks: 17,
-    wins: 13,
-    losses: 4,
-    winRate: 76.5,
-    avgReturn: 156,
-    profitSol: 103.01,
-    lastPickAt: null,
-    source: 'KOLSCAN',
-  },
-  {
-    handle: 'Jijo',
-    tier: KolReputationTier.S_TIER,
-    totalPicks: 62,
-    wins: 39,
-    losses: 23,
-    winRate: 62.9,
-    avgReturn: 89,
-    profitSol: 89.55,
-    lastPickAt: null,
-    source: 'KOLSCAN',
-  },
-  {
-    handle: 'Cupsey',
-    tier: KolReputationTier.S_TIER,
-    totalPicks: 330,
-    wins: 182,
-    losses: 148,
-    winRate: 55.2,
-    avgReturn: 45,
-    profitSol: 82.41,
-    lastPickAt: null,
-    source: 'KOLSCAN',
-  },
-  {
-    handle: 'Ramset',
-    tier: KolReputationTier.S_TIER,
-    totalPicks: 34,
-    wins: 18,
-    losses: 16,
-    winRate: 52.9,
-    avgReturn: 67,
-    profitSol: 65.92,
-    lastPickAt: null,
-    source: 'KOLSCAN',
-  },
-  {
-    handle: 'Smokez',
-    tier: KolReputationTier.S_TIER,
-    totalPicks: 15,
-    wins: 8,
-    losses: 7,
-    winRate: 53.3,
-    avgReturn: 112,
-    profitSol: 65.78,
-    lastPickAt: null,
-    source: 'KOLSCAN',
-  },
-  {
-    handle: 'Insyder',
-    tier: KolReputationTier.A_TIER,
-    totalPicks: 37,
-    wins: 14,
-    losses: 23,
-    winRate: 37.8,
-    avgReturn: 78,
-    profitSol: 49.33,
-    lastPickAt: null,
-    source: 'KOLSCAN',
-  },
-];
+// NO SEEDED DATA - KOLs must prove themselves through our own tracking
+//
+// Why we don't seed external data:
+// 1. Research shows 76% of KOL-promoted tokens are "dead"
+// 2. 86% of KOL-promoted tokens lost 90%+ value within 3 months
+// 3. "Top KOLs" on leaderboards often have 5-15 second hold times (front-running)
+// 4. Larger influencers (200K+ followers) performed WORSE than smaller ones
+// 5. External platforms don't verify hold times or filter front-runners
+//
+// Instead, we track KOLs through our own system using verified on-chain data
+// from kol-analytics.ts which calculates actual avgHoldTimeHours from trades.
+// A KOL must meet BOTH win rate AND hold time requirements to be trusted.
 
 // ============ KOL REPUTATION MANAGER ============
 
@@ -115,17 +45,33 @@ export class KolReputationManager {
   private readonly CACHE_TTL_MS = 30 * 60 * 1000; // 30 minutes
 
   async initialize(): Promise<void> {
-    logger.info('Initializing KOL reputation system...');
+    logger.info('Initializing KOL reputation system (no seeded data - KOLs must prove themselves)...');
 
     await this.createTables();
-    await this.seedKolscanData();
+    // NO seeding - KOLs must prove themselves through our tracking
     await this.refreshCache();
+
+    const sTierCount = this.getKolsByTier(KolReputationTier.S_TIER).length;
+    const aTierCount = this.getKolsByTier(KolReputationTier.A_TIER).length;
+    const trustedKolCount = sTierCount + aTierCount;
+    const earlyQualityAvailable = trustedKolCount > 0;
 
     logger.info({
       kolCount: this.reputationCache.size,
-      sTierCount: this.getKolsByTier(KolReputationTier.S_TIER).length,
-      aTierCount: this.getKolsByTier(KolReputationTier.A_TIER).length,
+      sTierCount,
+      aTierCount,
+      trustedKolCount,
+      earlyQualityAvailable,
+      minHoldTimeHours: TIER_THRESHOLDS.MIN_HOLD_TIME_HOURS,
     }, 'KOL reputation system initialized');
+
+    if (!earlyQualityAvailable) {
+      logger.warn({
+        reason: 'No KOLs have proven themselves yet (need 30+ picks, 40%+ win rate, 1h+ avg hold time)',
+        impact: 'EARLY_QUALITY track disabled - only PROVEN_RUNNER track will generate signals',
+        howToUnlock: 'Track KOL picks and wait for them to prove profitable with sufficient hold times',
+      }, 'EARLY_QUALITY track unavailable - cold start mode');
+    }
   }
 
   // ============ TIER CHECKING ============
@@ -230,7 +176,8 @@ export class KolReputationManager {
   // ============ REPUTATION CALCULATION ============
 
   /**
-   * Recalculate reputation tier for a KOL based on their picks
+   * Recalculate reputation tier for a KOL based on their picks AND hold time
+   * Both win rate and hold time must meet thresholds to be trusted
    */
   private async recalculateReputation(handle: string): Promise<void> {
     try {
@@ -253,9 +200,23 @@ export class KolReputationManager {
       // Calculate win rate
       const winRate = totalPicks > 0 ? (wins / totalPicks) * 100 : 0;
 
-      // Determine tier
+      // Get verified hold time from kol-analytics (on-chain data)
+      const avgHoldTimeHours = await this.getVerifiedHoldTime(handle);
+      const hasMinHoldTime = avgHoldTimeHours >= TIER_THRESHOLDS.MIN_HOLD_TIME_HOURS;
+
+      // Determine tier - BOTH win rate AND hold time must meet thresholds
+      // This filters out front-runners who have high win rates but 5-15 second holds
       let tier: KolReputationTier;
       if (totalPicks < TIER_THRESHOLDS.MIN_PICKS) {
+        tier = KolReputationTier.UNPROVEN;
+      } else if (!hasMinHoldTime) {
+        // Front-runner detected: high win rate but very short hold times
+        logger.warn({
+          handle,
+          avgHoldTimeHours,
+          minRequired: TIER_THRESHOLDS.MIN_HOLD_TIME_HOURS,
+          winRate,
+        }, 'KOL has insufficient hold time - possible front-runner, downgrading to UNPROVEN');
         tier = KolReputationTier.UNPROVEN;
       } else if (winRate >= TIER_THRESHOLDS.S_TIER) {
         tier = KolReputationTier.S_TIER;
@@ -301,9 +262,43 @@ export class KolReputationManager {
         tier,
         winRate: winRate.toFixed(1),
         totalPicks,
+        avgHoldTimeHours: avgHoldTimeHours.toFixed(2),
+        hasMinHoldTime,
       }, 'KOL reputation recalculated');
     } catch (error) {
       logger.error({ error, handle }, 'Failed to recalculate KOL reputation');
+    }
+  }
+
+  /**
+   * Get verified average hold time for a KOL from on-chain data
+   * Uses kol-analytics which tracks actual entry/exit timestamps
+   * This is verified data, not self-reported leaderboard stats
+   */
+  private async getVerifiedHoldTime(handle: string): Promise<number> {
+    try {
+      // Look up KOL by handle in our tracking system
+      const kolResult = await pool.query(
+        `SELECT id FROM kols WHERE LOWER(handle) = $1`,
+        [handle.toLowerCase()]
+      );
+
+      if (kolResult.rows.length === 0) {
+        // KOL not yet tracked, return 0 (unverified)
+        return 0;
+      }
+
+      const kolId = kolResult.rows[0].id;
+      const stats = await kolAnalytics.getKolStats(kolId);
+
+      if (!stats) {
+        return 0;
+      }
+
+      return stats.avgHoldTimeHours;
+    } catch (error) {
+      logger.warn({ error, handle }, 'Failed to get verified hold time for KOL');
+      return 0;
     }
   }
 
@@ -354,37 +349,6 @@ export class KolReputationManager {
     } catch (error) {
       logger.error({ error }, 'Failed to create KOL reputation tables');
       throw error;
-    }
-  }
-
-  private async seedKolscanData(): Promise<void> {
-    try {
-      for (const kol of KOLSCAN_SEED_DATA) {
-        await pool.query(`
-          INSERT INTO kol_reputation (
-            handle, tier, total_picks, wins, losses, win_rate, avg_return,
-            profit_sol, source, last_updated
-          ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, NOW())
-          ON CONFLICT (handle) DO UPDATE SET
-            profit_sol = GREATEST(kol_reputation.profit_sol, EXCLUDED.profit_sol),
-            last_updated = NOW()
-          WHERE kol_reputation.source = 'KOLSCAN'
-        `, [
-          this.normalizeHandle(kol.handle),
-          kol.tier,
-          kol.totalPicks,
-          kol.wins,
-          kol.losses,
-          kol.winRate,
-          kol.avgReturn,
-          kol.profitSol,
-          kol.source,
-        ]);
-      }
-
-      logger.info({ count: KOLSCAN_SEED_DATA.length }, 'KOLscan seed data loaded');
-    } catch (error) {
-      logger.error({ error }, 'Failed to seed KOLscan data');
     }
   }
 

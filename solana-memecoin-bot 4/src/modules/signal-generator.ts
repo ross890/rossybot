@@ -1406,7 +1406,9 @@ export class SignalGenerator {
     scamResult: any,
     safetyResult: TokenSafetyResult,
     moonshotAssessment: MoonshotAssessment,
-    socialMetrics?: SocialMetrics
+    socialMetrics?: SocialMetrics,
+    signalTrack: SignalTrack = SignalTrack.PROVEN_RUNNER,
+    kolReputation?: KolReputationTier
   ): DiscoverySignal {
     // Calculate suggested position size (50% of normal for discovery)
     let positionSize = appConfig.trading.defaultPositionSizePercent * 0.5;
@@ -1468,6 +1470,10 @@ export class SignalGenerator {
 
       generatedAt: new Date(),
       signalType: SignalType.DISCOVERY,
+
+      // Dual-track strategy
+      signalTrack,
+      kolReputation,
 
       discoveredAt: new Date(),
       kolValidatedAt: null,
@@ -1694,7 +1700,9 @@ export class SignalGenerator {
     primaryKolActivity: KolWalletActivity,
     safetyResult?: TokenSafetyResult,
     dexScreenerInfo?: DexScreenerTokenInfo,
-    ctoAnalysis?: CTOAnalysis
+    ctoAnalysis?: CTOAnalysis,
+    signalTrack: SignalTrack = SignalTrack.PROVEN_RUNNER,
+    kolReputation?: KolReputationTier
   ): BuySignal {
     const price = metrics.price;
     
@@ -1746,6 +1754,10 @@ export class SignalGenerator {
 
       generatedAt: new Date(),
       signalType: SignalType.BUY,
+
+      // Dual-track strategy
+      signalTrack,
+      kolReputation,
     };
   }
 }

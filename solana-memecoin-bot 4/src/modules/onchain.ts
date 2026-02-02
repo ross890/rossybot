@@ -154,7 +154,41 @@ class BirdeyeClient {
   private reconnectAttempts = 0;
   private maxReconnectAttempts = 5;
   private onNewListingCallback: ((listing: any) => void) | null = null;
-  
+
+  // ============ CACHING SYSTEM ============
+  // Different TTLs for different data types based on how often they change
+  // This dramatically reduces API costs (estimated 60-80% reduction)
+
+  // Token overview cache (prices, volume, market cap) - changes frequently
+  private overviewCache: Map<string, { data: BirdeyeTokenOverview | null; expiry: number }> = new Map();
+  private readonly OVERVIEW_CACHE_TTL_MS = 45 * 1000; // 45 seconds
+
+  // Token security cache (mint/freeze authority) - rarely changes
+  private securityCache: Map<string, { data: any; expiry: number }> = new Map();
+  private readonly SECURITY_CACHE_TTL_MS = 5 * 60 * 1000; // 5 minutes
+
+  // Token creation info cache (creator, creation time) - NEVER changes
+  private creationCache: Map<string, { data: any; expiry: number }> = new Map();
+  private readonly CREATION_CACHE_TTL_MS = 24 * 60 * 60 * 1000; // 24 hours
+
+  // Token trade data cache (24h buys/sells) - changes frequently
+  private tradeDataCache: Map<string, { data: any; expiry: number }> = new Map();
+  private readonly TRADE_DATA_CACHE_TTL_MS = 60 * 1000; // 60 seconds
+
+  // Request deduplication - prevents duplicate in-flight requests
+  private inflightRequests: Map<string, Promise<any>> = new Map();
+
+  // Cache size limits to prevent memory bloat
+  private readonly MAX_CACHE_SIZE = 1000;
+
+  // Cache statistics for monitoring
+  private cacheStats = {
+    hits: 0,
+    misses: 0,
+    deduped: 0,
+    lastLogTime: Date.now(),
+  };
+
   constructor() {
     this.client = axios.create({
       baseURL: 'https://public-api.birdeye.so',
@@ -164,6 +198,118 @@ class BirdeyeClient {
         'x-chain': 'solana',
       },
     });
+
+    // Clean up expired cache entries every 2 minutes
+    setInterval(() => this.cleanupCaches(), 2 * 60 * 1000);
+
+    // Log cache statistics every 5 minutes
+    setInterval(() => this.logCacheStats(), 5 * 60 * 1000);
+  }
+
+  /**
+   * Clean up expired cache entries across all caches
+   */
+  private cleanupCaches(): void {
+    const now = Date.now();
+    let totalCleaned = 0;
+
+    // Clean each cache type
+    for (const [key, value] of this.overviewCache) {
+      if (value.expiry < now) {
+        this.overviewCache.delete(key);
+        totalCleaned++;
+      }
+    }
+
+    for (const [key, value] of this.securityCache) {
+      if (value.expiry < now) {
+        this.securityCache.delete(key);
+        totalCleaned++;
+      }
+    }
+
+    for (const [key, value] of this.creationCache) {
+      if (value.expiry < now) {
+        this.creationCache.delete(key);
+        totalCleaned++;
+      }
+    }
+
+    for (const [key, value] of this.tradeDataCache) {
+      if (value.expiry < now) {
+        this.tradeDataCache.delete(key);
+        totalCleaned++;
+      }
+    }
+
+    if (totalCleaned > 0) {
+      logger.debug({
+        cleaned: totalCleaned,
+        remaining: {
+          overview: this.overviewCache.size,
+          security: this.securityCache.size,
+          creation: this.creationCache.size,
+          tradeData: this.tradeDataCache.size,
+        },
+      }, 'Birdeye cache cleanup');
+    }
+  }
+
+  /**
+   * Evict oldest entries if cache exceeds size limit
+   */
+  private evictIfNeeded(cache: Map<string, any>): void {
+    if (cache.size > this.MAX_CACHE_SIZE) {
+      // Remove oldest 20% of entries
+      const keysToDelete = Array.from(cache.keys()).slice(0, Math.floor(this.MAX_CACHE_SIZE * 0.2));
+      keysToDelete.forEach(k => cache.delete(k));
+    }
+  }
+
+  /**
+   * Log cache statistics to monitor API cost savings
+   */
+  private logCacheStats(): void {
+    const total = this.cacheStats.hits + this.cacheStats.misses;
+    const hitRate = total > 0 ? ((this.cacheStats.hits / total) * 100).toFixed(1) : '0';
+    const savedCalls = this.cacheStats.hits + this.cacheStats.deduped;
+
+    logger.info({
+      hits: this.cacheStats.hits,
+      misses: this.cacheStats.misses,
+      deduped: this.cacheStats.deduped,
+      hitRate: `${hitRate}%`,
+      estimatedSavedCalls: savedCalls,
+      cacheSizes: {
+        overview: this.overviewCache.size,
+        security: this.securityCache.size,
+        creation: this.creationCache.size,
+        tradeData: this.tradeDataCache.size,
+      },
+    }, '📊 Birdeye API cache statistics (5 min window)');
+
+    // Reset stats for next window
+    this.cacheStats = {
+      hits: 0,
+      misses: 0,
+      deduped: 0,
+      lastLogTime: Date.now(),
+    };
+  }
+
+  /**
+   * Get cache statistics (for external monitoring)
+   */
+  getCacheStats(): typeof this.cacheStats & { cacheSizes: Record<string, number> } {
+    return {
+      ...this.cacheStats,
+      cacheSizes: {
+        overview: this.overviewCache.size,
+        security: this.securityCache.size,
+        creation: this.creationCache.size,
+        tradeData: this.tradeDataCache.size,
+      },
+    };
   }
   
   /**
@@ -298,51 +444,187 @@ class BirdeyeClient {
   }
 
   async getTokenOverview(address: string): Promise<BirdeyeTokenOverview | null> {
-    try {
-      const response = await this.client.get(`/defi/token_overview`, {
-        params: { address },
-      });
-      return response.data.data;
-    } catch (error) {
-      logger.error({ error, address }, 'Failed to get token overview from Birdeye');
-      return null;
+    const cacheKey = `overview:${address}`;
+    const now = Date.now();
+
+    // Check cache first
+    const cached = this.overviewCache.get(address);
+    if (cached && cached.expiry > now) {
+      this.cacheStats.hits++;
+      return cached.data;
     }
+
+    // Check for in-flight request (deduplication)
+    const inflight = this.inflightRequests.get(cacheKey);
+    if (inflight) {
+      this.cacheStats.deduped++;
+      return inflight;
+    }
+
+    // Make the API request
+    const requestPromise = (async () => {
+      try {
+        this.cacheStats.misses++;
+        const response = await this.client.get(`/defi/token_overview`, {
+          params: { address },
+        });
+        const data = response.data.data;
+
+        // Cache the result
+        this.overviewCache.set(address, { data, expiry: now + this.OVERVIEW_CACHE_TTL_MS });
+        this.evictIfNeeded(this.overviewCache);
+
+        return data;
+      } catch (error) {
+        logger.error({ error, address }, 'Failed to get token overview from Birdeye');
+        // Cache null result briefly to prevent hammering on errors
+        this.overviewCache.set(address, { data: null, expiry: now + 10000 });
+        return null;
+      } finally {
+        this.inflightRequests.delete(cacheKey);
+      }
+    })();
+
+    this.inflightRequests.set(cacheKey, requestPromise);
+    return requestPromise;
   }
 
   async getTokenSecurity(address: string): Promise<any> {
-    try {
-      const response = await this.client.get(`/defi/token_security`, {
-        params: { address },
-      });
-      return response.data.data;
-    } catch (error) {
-      logger.error({ error, address }, 'Failed to get token security from Birdeye');
-      return null;
+    const cacheKey = `security:${address}`;
+    const now = Date.now();
+
+    // Check cache first (5 min TTL - security info rarely changes)
+    const cached = this.securityCache.get(address);
+    if (cached && cached.expiry > now) {
+      this.cacheStats.hits++;
+      return cached.data;
     }
+
+    // Check for in-flight request (deduplication)
+    const inflight = this.inflightRequests.get(cacheKey);
+    if (inflight) {
+      this.cacheStats.deduped++;
+      return inflight;
+    }
+
+    // Make the API request
+    const requestPromise = (async () => {
+      try {
+        this.cacheStats.misses++;
+        const response = await this.client.get(`/defi/token_security`, {
+          params: { address },
+        });
+        const data = response.data.data;
+
+        // Cache the result (5 minute TTL)
+        this.securityCache.set(address, { data, expiry: now + this.SECURITY_CACHE_TTL_MS });
+        this.evictIfNeeded(this.securityCache);
+
+        return data;
+      } catch (error) {
+        logger.error({ error, address }, 'Failed to get token security from Birdeye');
+        // Cache null result briefly to prevent hammering on errors
+        this.securityCache.set(address, { data: null, expiry: now + 30000 });
+        return null;
+      } finally {
+        this.inflightRequests.delete(cacheKey);
+      }
+    })();
+
+    this.inflightRequests.set(cacheKey, requestPromise);
+    return requestPromise;
   }
 
   async getTokenCreationInfo(address: string): Promise<any> {
-    try {
-      const response = await this.client.get(`/defi/token_creation_info`, {
-        params: { address },
-      });
-      return response.data.data;
-    } catch (error) {
-      logger.error({ error, address }, 'Failed to get token creation info from Birdeye');
-      return null;
+    const cacheKey = `creation:${address}`;
+    const now = Date.now();
+
+    // Check cache first (24h TTL - creation info NEVER changes)
+    const cached = this.creationCache.get(address);
+    if (cached && cached.expiry > now) {
+      this.cacheStats.hits++;
+      return cached.data;
     }
+
+    // Check for in-flight request (deduplication)
+    const inflight = this.inflightRequests.get(cacheKey);
+    if (inflight) {
+      this.cacheStats.deduped++;
+      return inflight;
+    }
+
+    // Make the API request
+    const requestPromise = (async () => {
+      try {
+        this.cacheStats.misses++;
+        const response = await this.client.get(`/defi/token_creation_info`, {
+          params: { address },
+        });
+        const data = response.data.data;
+
+        // Cache the result (24 hour TTL - this data never changes)
+        this.creationCache.set(address, { data, expiry: now + this.CREATION_CACHE_TTL_MS });
+        this.evictIfNeeded(this.creationCache);
+
+        return data;
+      } catch (error) {
+        logger.error({ error, address }, 'Failed to get token creation info from Birdeye');
+        // Cache null result for 5 minutes to prevent hammering on errors
+        this.creationCache.set(address, { data: null, expiry: now + 5 * 60 * 1000 });
+        return null;
+      } finally {
+        this.inflightRequests.delete(cacheKey);
+      }
+    })();
+
+    this.inflightRequests.set(cacheKey, requestPromise);
+    return requestPromise;
   }
 
   async getTokenTradeData(address: string, timeframe = '24h'): Promise<any> {
-    try {
-      const response = await this.client.get(`/defi/v3/token/trade-data/single`, {
-        params: { address, type: timeframe },
-      });
-      return response.data.data;
-    } catch (error) {
-      logger.error({ error, address }, 'Failed to get token trade data from Birdeye');
-      return null;
+    const cacheKey = `tradeData:${address}:${timeframe}`;
+    const now = Date.now();
+
+    // Check cache first (60s TTL - trade data changes frequently)
+    const cached = this.tradeDataCache.get(cacheKey);
+    if (cached && cached.expiry > now) {
+      this.cacheStats.hits++;
+      return cached.data;
     }
+
+    // Check for in-flight request (deduplication)
+    const inflight = this.inflightRequests.get(cacheKey);
+    if (inflight) {
+      this.cacheStats.deduped++;
+      return inflight;
+    }
+
+    // Make the API request
+    const requestPromise = (async () => {
+      try {
+        this.cacheStats.misses++;
+        const response = await this.client.get(`/defi/v3/token/trade-data/single`, {
+          params: { address, type: timeframe },
+        });
+        const data = response.data.data;
+
+        // Cache the result (60 second TTL)
+        this.tradeDataCache.set(cacheKey, { data, expiry: now + this.TRADE_DATA_CACHE_TTL_MS });
+        this.evictIfNeeded(this.tradeDataCache);
+
+        return data;
+      } catch (error) {
+        logger.error({ error, address }, 'Failed to get token trade data from Birdeye');
+        // Cache null result briefly to prevent hammering on errors
+        this.tradeDataCache.set(cacheKey, { data: null, expiry: now + 15000 });
+        return null;
+      } finally {
+        this.inflightRequests.delete(cacheKey);
+      }
+    })();
+
+    this.inflightRequests.set(cacheKey, requestPromise);
+    return requestPromise;
   }
 
   async getNewListings(limit = 50): Promise<any[]> {

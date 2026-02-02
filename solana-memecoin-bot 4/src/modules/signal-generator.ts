@@ -58,9 +58,6 @@ import {
   KolReputationTier,
 } from '../types/index.js';
 
-// KOL reputation for Early Quality track
-import { kolReputationManager } from './kol-reputation.js';
-
 // ============ CONFIGURATION ============
 
 const SCAN_INTERVAL_MS = 60 * 1000; // 1 minute
@@ -597,7 +594,8 @@ export class SignalGenerator {
         let bestKolTier: KolReputationTier = KolReputationTier.UNPROVEN;
 
         for (const activity of kolActivity) {
-          const kolCheck = await kolReputationManager.isHighTierKol(activity.kol.handle);
+          // Use consolidated kol-analytics for tier checking (single source of truth)
+          const kolCheck = await kolAnalytics.isHighTierKolByHandle(activity.kol.handle);
           if (kolCheck.isTrusted) {
             // Found a trusted KOL
             if (kolCheck.tier === KolReputationTier.S_TIER) {

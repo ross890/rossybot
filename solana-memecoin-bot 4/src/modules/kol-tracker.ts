@@ -15,6 +15,8 @@ import {
   WalletType,
   AttributionConfidence,
   LinkMethod,
+  AlphaWallet,
+  AlphaWalletStatus,
 } from '../types/index.js';
 
 // ============ CONSTANTS ============
@@ -221,6 +223,129 @@ export class KolWalletMonitor {
     }
   }
   
+  /**
+   * Check if any alpha wallets have bought a specific token recently
+   * Returns activity that can be used alongside KOL activity
+   */
+  async getAlphaWalletActivityForToken(
+    tokenAddress: string,
+    windowMs: number = ACTIVITY_WINDOW_MS
+  ): Promise<Array<{
+    wallet: AlphaWallet;
+    transaction: {
+      signature: string;
+      solAmount: number;
+      tokensAcquired: number;
+      timestamp: Date;
+    };
+    signalWeight: number;
+  }>> {
+    const activities: Array<{
+      wallet: AlphaWallet;
+      transaction: {
+        signature: string;
+        solAmount: number;
+        tokensAcquired: number;
+        timestamp: Date;
+      };
+      signalWeight: number;
+    }> = [];
+
+    const cutoffTime = Date.now() - windowMs;
+
+    // Get all active alpha wallets
+    const alphaWallets = await Database.getActiveAlphaWallets();
+
+    for (const wallet of alphaWallets) {
+      // Skip suspended/removed wallets
+      if (wallet.status === AlphaWalletStatus.SUSPENDED ||
+          wallet.status === AlphaWalletStatus.REMOVED) {
+        continue;
+      }
+
+      try {
+        // Get recent transactions for this wallet
+        const txs = await heliusClient.getRecentTransactions(wallet.address, 20);
+
+        for (const tx of txs) {
+          // Skip if transaction is too old
+          if (tx.blockTime && tx.blockTime * 1000 < cutoffTime) continue;
+
+          // Get full transaction details
+          const txDetails = await heliusClient.getTransaction(tx.signature);
+          if (!txDetails) continue;
+
+          // Check if this transaction involves the target token
+          const tokenBuy = this.parseTokenBuy(txDetails, tokenAddress, wallet.address);
+          if (!tokenBuy) continue;
+
+          activities.push({
+            wallet,
+            transaction: {
+              signature: tx.signature,
+              solAmount: tokenBuy.solAmount,
+              tokensAcquired: tokenBuy.tokensAcquired,
+              timestamp: new Date(tx.blockTime * 1000),
+            },
+            signalWeight: wallet.signalWeight,
+          });
+        }
+      } catch (error) {
+        logger.error({ error, walletAddress: wallet.address }, 'Error checking alpha wallet activity');
+      }
+    }
+
+    // Sort by timestamp descending (most recent first)
+    activities.sort((a, b) =>
+      b.transaction.timestamp.getTime() - a.transaction.timestamp.getTime()
+    );
+
+    return activities;
+  }
+
+  /**
+   * Combined check for both KOL and alpha wallet activity on a token
+   */
+  async getAllWalletActivityForToken(
+    tokenAddress: string,
+    windowMs: number = ACTIVITY_WINDOW_MS
+  ): Promise<{
+    kolActivity: KolWalletActivity[];
+    alphaActivity: Array<{
+      wallet: AlphaWallet;
+      transaction: {
+        signature: string;
+        solAmount: number;
+        tokensAcquired: number;
+        timestamp: Date;
+      };
+      signalWeight: number;
+    }>;
+    totalSignalWeight: number;
+  }> {
+    const [kolActivity, alphaActivity] = await Promise.all([
+      this.getKolActivityForToken(tokenAddress, windowMs),
+      this.getAlphaWalletActivityForToken(tokenAddress, windowMs),
+    ]);
+
+    // Calculate total signal weight
+    let totalSignalWeight = 0;
+
+    for (const activity of kolActivity) {
+      totalSignalWeight += this.calculateSignalWeight(activity);
+    }
+
+    for (const activity of alphaActivity) {
+      totalSignalWeight += activity.signalWeight;
+    }
+
+    return {
+      kolActivity,
+      alphaActivity,
+      totalSignalWeight,
+    };
+  }
+
   /**
    * Calculate signal weight for a KOL activity
    */

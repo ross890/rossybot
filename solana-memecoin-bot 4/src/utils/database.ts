@@ -182,6 +182,20 @@ EXCEPTION
   WHEN duplicate_object THEN null;
 END $$;
 
+-- Wallet Source enum (verified vs manual alpha)
+DO $$ BEGIN
+  CREATE TYPE wallet_source AS ENUM ('VERIFIED', 'MANUAL');
+EXCEPTION
+  WHEN duplicate_object THEN null;
+END $$;
+
+-- Alpha Wallet Status enum
+DO $$ BEGIN
+  CREATE TYPE alpha_wallet_status AS ENUM ('PROBATION', 'ACTIVE', 'TRUSTED', 'SUSPENDED', 'REMOVED');
+EXCEPTION
+  WHEN duplicate_object THEN null;
+END $$;
+
 -- Token Safety Cache table (Feature 1 & 5)
 CREATE TABLE IF NOT EXISTS token_safety_cache (
   token_address VARCHAR(64) PRIMARY KEY,
@@ -276,6 +290,86 @@ CREATE TABLE IF NOT EXISTS kol_extended_performance (
   consistency_score DECIMAL(5, 2) DEFAULT 0,
   last_calculated TIMESTAMP DEFAULT NOW()
 );
+
+-- ============ ALPHA WALLET TABLES ============
+
+-- Alpha Wallets table - user-submitted wallets for tracking
+CREATE TABLE IF NOT EXISTS alpha_wallets (
+  id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+  address VARCHAR(64) NOT NULL UNIQUE,
+  label VARCHAR(100),
+  source wallet_source DEFAULT 'MANUAL',
+  status alpha_wallet_status DEFAULT 'PROBATION',
+  added_by VARCHAR(50) NOT NULL,  -- Telegram user ID
+  added_at TIMESTAMP DEFAULT NOW(),
+
+  -- Performance metrics (rolling 30 days)
+  total_trades INTEGER DEFAULT 0,
+  wins INTEGER DEFAULT 0,
+  losses INTEGER DEFAULT 0,
+  win_rate DECIMAL(5, 4) DEFAULT 0,
+  avg_roi DECIMAL(10, 4) DEFAULT 0,
+
+  -- Lifecycle tracking
+  probation_ends_at TIMESTAMP,
+  last_trade_at TIMESTAMP,
+  last_evaluated_at TIMESTAMP,
+  suspended_at TIMESTAMP,
+  suspension_count INTEGER DEFAULT 0,
+
+  -- Signal weight (0-1.0)
+  signal_weight DECIMAL(3, 2) DEFAULT 0.30,
+
+  updated_at TIMESTAMP DEFAULT NOW()
+);
+
+-- Alpha Wallet Trades table - track all trades from alpha wallets
+CREATE TABLE IF NOT EXISTS alpha_wallet_trades (
+  id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+  wallet_id UUID REFERENCES alpha_wallets(id) ON DELETE CASCADE,
+  wallet_address VARCHAR(64) NOT NULL,
+  token_address VARCHAR(64) NOT NULL,
+  token_ticker VARCHAR(20),
+  trade_type trade_type NOT NULL,
+  sol_amount DECIMAL(20, 10),
+  token_amount DECIMAL(30, 10),
+  price_at_trade DECIMAL(30, 18),
+  tx_signature VARCHAR(128) UNIQUE,
+  timestamp TIMESTAMP NOT NULL,
+
+  -- For completed round-trips (sell linked to buy)
+  entry_trade_id UUID REFERENCES alpha_wallet_trades(id),
+  roi DECIMAL(10, 4),
+  is_win BOOLEAN,
+  hold_time_hours DECIMAL(10, 2),
+
+  created_at TIMESTAMP DEFAULT NOW()
+);
+
+-- Alpha Wallet Evaluation Log - audit trail of status changes
+CREATE TABLE IF NOT EXISTS alpha_wallet_evaluations (
+  id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+  wallet_id UUID REFERENCES alpha_wallets(id) ON DELETE CASCADE,
+  wallet_address VARCHAR(64) NOT NULL,
+  previous_status alpha_wallet_status,
+  new_status alpha_wallet_status NOT NULL,
+  win_rate DECIMAL(5, 4),
+  total_trades INTEGER,
+  avg_roi DECIMAL(10, 4),
+  recommendation VARCHAR(20) NOT NULL,
+  reason TEXT NOT NULL,
+  evaluated_at TIMESTAMP DEFAULT NOW()
+);
+
+-- Alpha wallet indexes
+CREATE INDEX IF NOT EXISTS idx_alpha_wallets_address ON alpha_wallets(address);
+CREATE INDEX IF NOT EXISTS idx_alpha_wallets_status ON alpha_wallets(status);
+CREATE INDEX IF NOT EXISTS idx_alpha_wallets_added_by ON alpha_wallets(added_by);
+CREATE INDEX IF NOT EXISTS idx_alpha_wallet_trades_wallet ON alpha_wallet_trades(wallet_id);
+CREATE INDEX IF NOT EXISTS idx_alpha_wallet_trades_token ON alpha_wallet_trades(token_address);
+CREATE INDEX IF NOT EXISTS idx_alpha_wallet_trades_timestamp ON alpha_wallet_trades(timestamp DESC);
+CREATE INDEX IF NOT EXISTS idx_alpha_wallet_trades_signature ON alpha_wallet_trades(tx_signature);
+CREATE INDEX IF NOT EXISTS idx_alpha_wallet_evaluations_wallet ON alpha_wallet_evaluations(wallet_id);
 
 -- Indexes for performance
 CREATE INDEX IF NOT EXISTS idx_kol_wallets_address ON kol_wallets(address);
@@ -1079,6 +1173,287 @@ export class Database {
       recommendation: row.recommendation,
       generatedAt: row.generated_at,
     }));
+  }
+
+  // ============ ALPHA WALLET OPERATIONS ============
+
+  static async createAlphaWallet(
+    address: string,
+    addedBy: string,
+    label?: string
+  ): Promise<{ id: string; isNew: boolean }> {
+    // Check if wallet already exists
+    const existing = await pool.query(
+      'SELECT id FROM alpha_wallets WHERE address = $1',
+      [address]
+    );
+
+    if (existing.rows.length > 0) {
+      return { id: existing.rows[0].id, isNew: false };
+    }
+
+    const result = await pool.query(
+      `INSERT INTO alpha_wallets (address, label, added_by, status, signal_weight)
+       VALUES ($1, $2, $3, 'PROBATION', 0.30)
+       RETURNING id`,
+      [address, label || null, addedBy]
+    );
+
+    return { id: result.rows[0].id, isNew: true };
+  }
+
+  static async getAlphaWalletByAddress(address: string): Promise<any | null> {
+    const result = await pool.query(
+      'SELECT * FROM alpha_wallets WHERE address = $1',
+      [address]
+    );
+    if (result.rows.length === 0) return null;
+    return this.mapAlphaWalletRow(result.rows[0]);
+  }
+
+  static async getAlphaWalletById(id: string): Promise<any | null> {
+    const result = await pool.query(
+      'SELECT * FROM alpha_wallets WHERE id = $1',
+      [id]
+    );
+    if (result.rows.length === 0) return null;
+    return this.mapAlphaWalletRow(result.rows[0]);
+  }
+
+  static async getAllAlphaWallets(includeRemoved: boolean = false): Promise<any[]> {
+    const query = includeRemoved
+      ? 'SELECT * FROM alpha_wallets ORDER BY added_at DESC'
+      : `SELECT * FROM alpha_wallets WHERE status != 'REMOVED' ORDER BY added_at DESC`;
+
+    const result = await pool.query(query);
+    return result.rows.map(this.mapAlphaWalletRow);
+  }
+
+  static async getActiveAlphaWallets(): Promise<any[]> {
+    const result = await pool.query(
+      `SELECT * FROM alpha_wallets
+       WHERE status IN ('PROBATION', 'ACTIVE', 'TRUSTED')
+       ORDER BY signal_weight DESC, win_rate DESC`
+    );
+    return result.rows.map(this.mapAlphaWalletRow);
+  }
+
+  static async updateAlphaWalletStatus(
+    walletId: string,
+    status: string,
+    signalWeight: number
+  ): Promise<void> {
+    const updates: string[] = [
+      `status = '${status}'`,
+      `signal_weight = ${signalWeight}`,
+      'updated_at = NOW()',
+    ];
+
+    if (status === 'SUSPENDED') {
+      updates.push('suspended_at = NOW()');
+      updates.push('suspension_count = suspension_count + 1');
+    }
+
+    await pool.query(
+      `UPDATE alpha_wallets SET ${updates.join(', ')} WHERE id = $1`,
+      [walletId]
+    );
+  }
+
+  static async updateAlphaWalletPerformance(
+    walletId: string,
+    totalTrades: number,
+    wins: number,
+    losses: number,
+    winRate: number,
+    avgRoi: number
+  ): Promise<void> {
+    await pool.query(
+      `UPDATE alpha_wallets SET
+        total_trades = $2,
+        wins = $3,
+        losses = $4,
+        win_rate = $5,
+        avg_roi = $6,
+        last_evaluated_at = NOW(),
+        updated_at = NOW()
+       WHERE id = $1`,
+      [walletId, totalTrades, wins, losses, winRate, avgRoi]
+    );
+  }
+
+  static async removeAlphaWallet(walletId: string): Promise<void> {
+    await pool.query(
+      `UPDATE alpha_wallets SET status = 'REMOVED', updated_at = NOW() WHERE id = $1`,
+      [walletId]
+    );
+  }
+
+  static async deleteAlphaWallet(walletId: string): Promise<void> {
+    await pool.query('DELETE FROM alpha_wallets WHERE id = $1', [walletId]);
+  }
+
+  static async recordAlphaWalletTrade(trade: {
+    walletId: string;
+    walletAddress: string;
+    tokenAddress: string;
+    tokenTicker?: string;
+    tradeType: 'BUY' | 'SELL';
+    solAmount: number;
+    tokenAmount: number;
+    priceAtTrade: number;
+    txSignature: string;
+    timestamp: Date;
+    entryTradeId?: string;
+    roi?: number;
+    isWin?: boolean;
+    holdTimeHours?: number;
+  }): Promise<string> {
+    const result = await pool.query(
+      `INSERT INTO alpha_wallet_trades (
+        wallet_id, wallet_address, token_address, token_ticker,
+        trade_type, sol_amount, token_amount, price_at_trade,
+        tx_signature, timestamp, entry_trade_id, roi, is_win, hold_time_hours
+      ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)
+      ON CONFLICT (tx_signature) DO NOTHING
+      RETURNING id`,
+      [
+        trade.walletId, trade.walletAddress, trade.tokenAddress, trade.tokenTicker,
+        trade.tradeType, trade.solAmount, trade.tokenAmount, trade.priceAtTrade,
+        trade.txSignature, trade.timestamp, trade.entryTradeId,
+        trade.roi, trade.isWin, trade.holdTimeHours
+      ]
+    );
+
+    // Update last_trade_at
+    await pool.query(
+      `UPDATE alpha_wallets SET last_trade_at = $2, updated_at = NOW() WHERE id = $1`,
+      [trade.walletId, trade.timestamp]
+    );
+
+    return result.rows[0]?.id || '';
+  }
+
+  static async getAlphaWalletTrades(
+    walletId: string,
+    limit: number = 100
+  ): Promise<any[]> {
+    const result = await pool.query(
+      `SELECT * FROM alpha_wallet_trades
+       WHERE wallet_id = $1
+       ORDER BY timestamp DESC
+       LIMIT $2`,
+      [walletId, limit]
+    );
+    return result.rows.map(this.mapAlphaWalletTradeRow);
+  }
+
+  static async getAlphaWalletTradesInWindow(
+    walletId: string,
+    windowDays: number = 30
+  ): Promise<any[]> {
+    const result = await pool.query(
+      `SELECT * FROM alpha_wallet_trades
+       WHERE wallet_id = $1
+         AND timestamp > NOW() - INTERVAL '${windowDays} days'
+       ORDER BY timestamp DESC`,
+      [walletId]
+    );
+    return result.rows.map(this.mapAlphaWalletTradeRow);
+  }
+
+  static async getOpenBuyTrades(walletId: string, tokenAddress: string): Promise<any[]> {
+    const result = await pool.query(
+      `SELECT * FROM alpha_wallet_trades
+       WHERE wallet_id = $1
+         AND token_address = $2
+         AND trade_type = 'BUY'
+         AND id NOT IN (
+           SELECT entry_trade_id FROM alpha_wallet_trades
+           WHERE entry_trade_id IS NOT NULL
+         )
+       ORDER BY timestamp ASC`,
+      [walletId, tokenAddress]
+    );
+    return result.rows.map(this.mapAlphaWalletTradeRow);
+  }
+
+  static async logAlphaWalletEvaluation(evaluation: {
+    walletId: string;
+    walletAddress: string;
+    previousStatus: string | null;
+    newStatus: string;
+    winRate: number;
+    totalTrades: number;
+    avgRoi: number;
+    recommendation: string;
+    reason: string;
+  }): Promise<void> {
+    await pool.query(
+      `INSERT INTO alpha_wallet_evaluations (
+        wallet_id, wallet_address, previous_status, new_status,
+        win_rate, total_trades, avg_roi, recommendation, reason
+      ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)`,
+      [
+        evaluation.walletId, evaluation.walletAddress,
+        evaluation.previousStatus, evaluation.newStatus,
+        evaluation.winRate, evaluation.totalTrades, evaluation.avgRoi,
+        evaluation.recommendation, evaluation.reason
+      ]
+    );
+  }
+
+  static async isAlphaWalletTracked(address: string): Promise<boolean> {
+    const result = await pool.query(
+      `SELECT 1 FROM alpha_wallets WHERE address = $1 AND status != 'REMOVED'`,
+      [address]
+    );
+    return result.rows.length > 0;
+  }
+
+  private static mapAlphaWalletRow(row: any): any {
+    return {
+      id: row.id,
+      address: row.address,
+      label: row.label,
+      source: row.source,
+      status: row.status,
+      addedBy: row.added_by,
+      addedAt: row.added_at,
+      totalTrades: row.total_trades,
+      wins: row.wins,
+      losses: row.losses,
+      winRate: parseFloat(row.win_rate) || 0,
+      avgRoi: parseFloat(row.avg_roi) || 0,
+      probationEndsAt: row.probation_ends_at,
+      lastTradeAt: row.last_trade_at,
+      lastEvaluatedAt: row.last_evaluated_at,
+      suspendedAt: row.suspended_at,
+      suspensionCount: row.suspension_count,
+      signalWeight: parseFloat(row.signal_weight) || 0.30,
+      updatedAt: row.updated_at,
+    };
+  }
+
+  private static mapAlphaWalletTradeRow(row: any): any {
+    return {
+      id: row.id,
+      walletId: row.wallet_id,
+      walletAddress: row.wallet_address,
+      tokenAddress: row.token_address,
+      tokenTicker: row.token_ticker,
+      tradeType: row.trade_type,
+      solAmount: parseFloat(row.sol_amount) || 0,
+      tokenAmount: parseFloat(row.token_amount) || 0,
+      priceAtTrade: parseFloat(row.price_at_trade) || 0,
+      txSignature: row.tx_signature,
+      timestamp: row.timestamp,
+      entryTradeId: row.entry_trade_id,
+      roi: row.roi ? parseFloat(row.roi) : null,
+      isWin: row.is_win,
+      holdTimeHours: row.hold_time_hours ? parseFloat(row.hold_time_hours) : null,
+      createdAt: row.created_at,
+    };
   }
 }
 

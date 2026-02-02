@@ -13,6 +13,7 @@ import { createTelegramInlineKeyboard, formatLinksAsMarkdown } from '../utils/tr
 import { tokenSafetyChecker } from './safety/token-safety-checker.js';
 import { convictionTracker } from './signals/conviction-tracker.js';
 import { kolAnalytics } from './kol/kol-analytics.js';
+import { alphaWalletManager } from './alpha/index.js';
 import { bondingCurveMonitor } from './pumpfun/bonding-monitor.js';
 import { dailyDigestGenerator } from './telegram/daily-digest.js';
 import { dailyReportGenerator, signalPerformanceTracker, thresholdOptimizer, winPredictor } from './performance/index.js';
@@ -162,6 +163,19 @@ export class TelegramAlertBot {
     // Trading system disabled - using signal-only mode
     // Wallet integration and auto-trading can be re-enabled later
     logger.info('Running in signal-only mode (trading system disabled)');
+
+    // Initialize alpha wallet manager with notification callback
+    try {
+      await alphaWalletManager.initialize();
+      alphaWalletManager.setNotifyCallback(async (message: string) => {
+        if (this.bot && this.chatId) {
+          await this.bot.sendMessage(this.chatId, message, { parse_mode: 'Markdown' });
+        }
+      });
+      logger.info('Alpha wallet manager initialized');
+    } catch (error) {
+      logger.error({ error }, 'Failed to initialize alpha wallet manager');
+    }
 
     logger.info({ mode: this.isWebhookMode ? 'webhook' : 'polling' }, 'Telegram bot (rossybot) initialized');
   }
@@ -378,6 +392,9 @@ export class TelegramAlertBot {
       { command: 'conviction', description: 'High-conviction tokens (2+ KOLs)' },
       { command: 'leaderboard', description: 'KOL performance rankings' },
       { command: 'pumpfun', description: 'Tokens approaching migration' },
+      { command: 'addwallet', description: 'Add alpha wallet: /addwallet <address>' },
+      { command: 'wallets', description: 'List tracked alpha wallets' },
+      { command: 'removewallet', description: 'Remove alpha wallet: /removewallet <address>' },
       { command: 'thresholds', description: 'View current signal thresholds' },
       { command: 'adjust_thresholds', description: 'Manually adjust thresholds' },
       { command: 'optimize', description: 'Run threshold optimization analysis' },
@@ -407,6 +424,10 @@ export class TelegramAlertBot {
         '/leaderboard - KOL performance rankings\n' +
         '/pumpfun - Tokens approaching migration\n' +
         '/test - Send a test signal\n\n' +
+        '*Alpha Wallet Commands:*\n' +
+        '/addwallet <address> - Add wallet to track\n' +
+        '/wallets - List tracked alpha wallets\n' +
+        '/removewallet <address> - Remove wallet\n\n' +
         '*Threshold Commands:*\n' +
         '/thresholds - View current signal thresholds\n' +
         '/adjust\\_thresholds - Manually adjust each threshold\n' +
@@ -440,7 +461,7 @@ export class TelegramAlertBot {
     this.bot.onText(/\/help/, async (msg) => {
       const chatId = msg.chat.id;
       await this.bot!.sendMessage(chatId,
-        '📖 *rossybot Help*\n\n' +
+        '*rossybot Help*\n\n' +
         '*Signal Commands:*\n' +
         '/status - Bot status, uptime & connection health\n' +
         '/performance - Signal performance & win rate report\n' +
@@ -449,6 +470,12 @@ export class TelegramAlertBot {
         '/leaderboard - KOL performance rankings\n' +
         '/pumpfun - Tokens approaching migration\n' +
         '/test - Send a test signal\n\n' +
+        '*Alpha Wallet Commands:*\n' +
+        '/addwallet <addr> [label] - Add wallet to track\n' +
+        '/wallets - List all tracked alpha wallets\n' +
+        '/wallets <addr> - View wallet details\n' +
+        '/removewallet <addr> - Remove wallet from tracking\n' +
+        '_Tip: Paste a wallet address to auto-detect_\n\n' +
         '*Threshold Commands:*\n' +
         '/thresholds - View current signal thresholds\n' +
         '/adjust\\_thresholds - Manually adjust each threshold\n' +
@@ -461,11 +488,11 @@ export class TelegramAlertBot {
         '*Signal Format:*\n' +
         'Each buy signal includes:\n' +
         '• Token details and metrics\n' +
-        '• Confirmed KOL wallet activity\n' +
+        '• Confirmed KOL/Alpha wallet activity\n' +
         '• Entry/exit recommendations\n' +
         '• ML win probability prediction\n' +
         '• Risk assessment\n\n' +
-        '⚠️ DYOR. Not financial advice.',
+        'DYOR. Not financial advice.',
         { parse_mode: 'Markdown' }
       );
     });
@@ -580,6 +607,160 @@ export class TelegramAlertBot {
         logger.error({ error, chatId }, 'Failed to get pumpfun tokens');
         await this.bot!.sendMessage(chatId, `Failed to get Pump.fun tokens: ${errorMessage}`);
       }
+    });
+
+    // ============ ALPHA WALLET COMMANDS ============
+
+    // /addwallet <address> [label] - Add an alpha wallet for tracking
+    this.bot.onText(/\/addwallet\s+(\S+)(?:\s+(.+))?/, async (msg, match) => {
+      const chatId = msg.chat.id;
+      const userId = msg.from?.id?.toString() || 'unknown';
+      const address = match?.[1];
+      const label = match?.[2]?.trim();
+
+      if (!address) {
+        await this.bot!.sendMessage(chatId,
+          '*Usage:* `/addwallet <address> [label]`\n\n' +
+          'Example: `/addwallet 5Ks8fE... Smart Trader`',
+          { parse_mode: 'Markdown' }
+        );
+        return;
+      }
+
+      try {
+        await this.bot!.sendMessage(chatId, 'Adding wallet...', { parse_mode: 'Markdown' });
+
+        const result = await alphaWalletManager.addWallet(address, userId, label);
+
+        if (result.success) {
+          await this.bot!.sendMessage(chatId,
+            `✅ *Wallet Added*\n\n` +
+            `Address: \`${address.slice(0, 8)}...${address.slice(-6)}\`\n` +
+            `${label ? `Label: ${label}\n` : ''}` +
+            `Status: PROBATION\n\n` +
+            `_${result.message}_`,
+            { parse_mode: 'Markdown' }
+          );
+        } else {
+          await this.bot!.sendMessage(chatId,
+            `❌ *Failed to add wallet*\n\n${result.message}`,
+            { parse_mode: 'Markdown' }
+          );
+        }
+      } catch (error) {
+        const errorMessage = error instanceof Error ? error.message : 'Unknown error';
+        logger.error({ error, chatId, address }, 'Failed to add alpha wallet');
+        await this.bot!.sendMessage(chatId, `Failed to add wallet: ${errorMessage}`);
+      }
+    });
+
+    // /wallets - List all tracked alpha wallets
+    this.bot.onText(/\/wallets(?:\s+(\S+))?/, async (msg, match) => {
+      const chatId = msg.chat.id;
+      const addressArg = match?.[1];
+
+      try {
+        // If an address is provided, show details for that wallet
+        if (addressArg) {
+          const wallet = await alphaWalletManager.getWalletByAddress(addressArg);
+          if (wallet) {
+            const message = alphaWalletManager.formatWalletDetails(wallet);
+            await this.bot!.sendMessage(chatId, message, { parse_mode: 'Markdown' });
+          } else {
+            await this.bot!.sendMessage(chatId, 'Wallet not found in tracked list.');
+          }
+          return;
+        }
+
+        // Otherwise list all wallets
+        const wallets = await alphaWalletManager.getWallets(false);
+        const message = alphaWalletManager.formatWalletsList(wallets);
+
+        await this.bot!.sendMessage(chatId, message, { parse_mode: 'Markdown' });
+      } catch (error) {
+        const errorMessage = error instanceof Error ? error.message : 'Unknown error';
+        logger.error({ error, chatId }, 'Failed to get wallets');
+        await this.bot!.sendMessage(chatId, `Failed to get wallets: ${errorMessage}`);
+      }
+    });
+
+    // /removewallet <address> - Remove an alpha wallet from tracking
+    this.bot.onText(/\/removewallet\s+(\S+)/, async (msg, match) => {
+      const chatId = msg.chat.id;
+      const userId = msg.from?.id?.toString() || 'unknown';
+      const address = match?.[1];
+
+      if (!address) {
+        await this.bot!.sendMessage(chatId,
+          '*Usage:* `/removewallet <address>`\n\n' +
+          'Example: `/removewallet 5Ks8fE...`',
+          { parse_mode: 'Markdown' }
+        );
+        return;
+      }
+
+      try {
+        const result = await alphaWalletManager.removeWallet(address, userId);
+
+        if (result.success) {
+          await this.bot!.sendMessage(chatId,
+            `✅ *Wallet Removed*\n\n` +
+            `Address: \`${address.slice(0, 8)}...${address.slice(-6)}\`\n\n` +
+            `_${result.message}_`,
+            { parse_mode: 'Markdown' }
+          );
+        } else {
+          await this.bot!.sendMessage(chatId,
+            `❌ *Failed to remove wallet*\n\n${result.message}`,
+            { parse_mode: 'Markdown' }
+          );
+        }
+      } catch (error) {
+        const errorMessage = error instanceof Error ? error.message : 'Unknown error';
+        logger.error({ error, chatId, address }, 'Failed to remove alpha wallet');
+        await this.bot!.sendMessage(chatId, `Failed to remove wallet: ${errorMessage}`);
+      }
+    });
+
+    // Handle raw wallet addresses pasted into chat (auto-add feature)
+    this.bot.onText(/^([1-9A-HJ-NP-Za-km-z]{32,44})$/, async (msg, match) => {
+      const chatId = msg.chat.id;
+      const userId = msg.from?.id?.toString() || 'unknown';
+      const address = match?.[1];
+
+      // Only respond if it's a valid Solana address pattern
+      if (!address) return;
+
+      // Check if this is already a KOL wallet or alpha wallet
+      const isTracked = await alphaWalletManager.isTracked(address);
+      const kolWallet = await Database.getWalletByAddress(address);
+
+      if (kolWallet) {
+        await this.bot!.sendMessage(chatId,
+          `ℹ️ This wallet is already tracked as a *verified KOL wallet* (${kolWallet.kol.handle})`,
+          { parse_mode: 'Markdown' }
+        );
+        return;
+      }
+
+      if (isTracked) {
+        const wallet = await alphaWalletManager.getWalletByAddress(address);
+        if (wallet) {
+          const message = alphaWalletManager.formatWalletDetails(wallet);
+          await this.bot!.sendMessage(chatId, message, { parse_mode: 'Markdown' });
+        }
+        return;
+      }
+
+      // Prompt to add the wallet
+      await this.bot!.sendMessage(chatId,
+        `🔍 *Detected Solana wallet address*\n\n` +
+        `\`${address.slice(0, 8)}...${address.slice(-6)}\`\n\n` +
+        `Would you like to add this to alpha wallet tracking?\n\n` +
+        `Use: \`/addwallet ${address}\`\n` +
+        `Or with label: \`/addwallet ${address} My Alpha Trader\``,
+        { parse_mode: 'Markdown' }
+      );
     });
 
     // /performance command - Show compact signal performance report for analysis

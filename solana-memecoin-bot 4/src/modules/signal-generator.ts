@@ -150,6 +150,19 @@ export class SignalGenerator {
       logger.warn({ error }, 'Failed to sync optimizer thresholds');
     }
 
+    // Log learning mode status prominently
+    const learningMode = appConfig.trading.learningMode;
+    logger.info({
+      learningMode,
+      filters: {
+        onChainScoreCheck: learningMode ? 'RELAXED (only blocks STRONG_AVOID)' : 'STRICT (blocks AVOID + STRONG_AVOID)',
+        mlProbabilityThreshold: learningMode ? '15%' : '25%',
+      },
+      message: learningMode
+        ? '🎓 LEARNING MODE ENABLED - Signal filtering relaxed for ML data collection'
+        : '🔒 PRODUCTION MODE - Strict signal filtering active',
+    }, 'Signal generator mode configured');
+
     logger.info('Signal generator initialized with all feature modules');
   }
   
@@ -498,16 +511,40 @@ export class SignalGenerator {
     }
 
     // Check if on-chain score recommends action
-    if (onChainScore.total < MIN_ONCHAIN_SCORE ||
-        onChainScore.recommendation === 'STRONG_AVOID' ||
-        onChainScore.recommendation === 'AVOID') {
-      logger.debug({
+    // LEARNING MODE FIX: When learningMode is enabled (default: true), only block STRONG_AVOID
+    // This allows more signals through for ML training data collection
+    // The recommendation thresholds were conflicting with numerical thresholds:
+    // - minOnChainScore: 30 (tokens with score >= 30 should pass)
+    // - But AVOID recommendation was given for scores 25-39
+    // - This caused ALL tokens with scores 30-39 to be blocked despite passing numerical check
+    const isLearningMode = appConfig.trading.learningMode;
+
+    // In learning mode: only block STRONG_AVOID (score < 25) to maximize data collection
+    // In production mode: block both AVOID and STRONG_AVOID for quality filtering
+    const shouldBlockByRecommendation = isLearningMode
+      ? onChainScore.recommendation === 'STRONG_AVOID'
+      : (onChainScore.recommendation === 'STRONG_AVOID' || onChainScore.recommendation === 'AVOID');
+
+    if (onChainScore.total < MIN_ONCHAIN_SCORE || shouldBlockByRecommendation) {
+      logger.info({
         tokenAddress,
+        ticker: metrics.ticker,
         onChainScore: onChainScore.total,
+        minRequired: MIN_ONCHAIN_SCORE,
         recommendation: onChainScore.recommendation,
-      }, 'Token did not meet on-chain score requirements');
+        learningMode: isLearningMode,
+        blockedBy: onChainScore.total < MIN_ONCHAIN_SCORE ? 'SCORE_TOO_LOW' : 'RECOMMENDATION',
+      }, 'Token filtered by on-chain score requirements');
       return SignalGenerator.EVAL_RESULTS.DISCOVERY_FAILED;
     }
+
+    logger.info({
+      tokenAddress,
+      ticker: metrics.ticker,
+      onChainScore: onChainScore.total,
+      recommendation: onChainScore.recommendation,
+      learningMode: isLearningMode,
+    }, 'Token PASSED on-chain score check - proceeding to evaluation');
 
     // Step 4: Get additional data for position sizing and display
     const bundleAnalysis = await bundleDetector.analyze(tokenAddress);
@@ -565,14 +602,30 @@ export class SignalGenerator {
     }, 'Win prediction calculated');
 
     // Filter signals with very low win probability
-    if (prediction.recommendedAction === 'SKIP' && prediction.winProbability < 25) {
-      logger.debug({
+    // LEARNING MODE FIX: Lower the threshold during learning to allow more data collection
+    // In learning mode: only filter if probability < 15% (very low confidence)
+    // In production mode: filter if probability < 25%
+    const mlProbabilityThreshold = isLearningMode ? 15 : 25;
+
+    if (prediction.recommendedAction === 'SKIP' && prediction.winProbability < mlProbabilityThreshold) {
+      logger.info({
         tokenAddress,
+        ticker: metrics.ticker,
         winProbability: prediction.winProbability,
+        threshold: mlProbabilityThreshold,
+        learningMode: isLearningMode,
         reason: 'ML prediction SKIP with low probability',
       }, 'Signal filtered by ML predictor');
       return SignalGenerator.EVAL_RESULTS.DISCOVERY_FAILED;
     }
+
+    logger.info({
+      tokenAddress,
+      ticker: metrics.ticker,
+      winProbability: prediction.winProbability,
+      mlAction: prediction.recommendedAction,
+      learningMode: isLearningMode,
+    }, 'Token PASSED ML prediction filter - generating signal');
 
     // AUDIT FIX: Cap position size multipliers to prevent extremes
     // Previously: positionSize * mlMultiplier could result in 0.25x (0.5*0.5) or 2.25x (1.5*1.5)
@@ -1117,38 +1170,59 @@ export class SignalGenerator {
   
   /**
    * Check if token meets minimum screening criteria
+   * Enhanced with detailed logging to diagnose filtering issues
    */
   private meetsScreeningCriteria(metrics: TokenMetrics): boolean {
     const cfg = appConfig.screening;
-    
-    if (metrics.marketCap < cfg.minMarketCap || metrics.marketCap > cfg.maxMarketCap) {
-      return false;
+    const failedCriteria: string[] = [];
+
+    if (metrics.marketCap < cfg.minMarketCap) {
+      failedCriteria.push(`marketCap (${metrics.marketCap}) < min (${cfg.minMarketCap})`);
     }
-    
+    if (metrics.marketCap > cfg.maxMarketCap) {
+      failedCriteria.push(`marketCap (${metrics.marketCap}) > max (${cfg.maxMarketCap})`);
+    }
+
     if (metrics.volume24h < cfg.min24hVolume) {
-      return false;
+      failedCriteria.push(`volume24h (${metrics.volume24h}) < min (${cfg.min24hVolume})`);
     }
-    
+
     if (metrics.volumeMarketCapRatio < cfg.minVolumeMarketCapRatio) {
-      return false;
+      failedCriteria.push(`volumeRatio (${metrics.volumeMarketCapRatio.toFixed(3)}) < min (${cfg.minVolumeMarketCapRatio})`);
     }
-    
+
     if (metrics.holderCount < cfg.minHolderCount) {
-      return false;
+      failedCriteria.push(`holders (${metrics.holderCount}) < min (${cfg.minHolderCount})`);
     }
-    
+
     if (metrics.top10Concentration > cfg.maxTop10Concentration) {
-      return false;
+      failedCriteria.push(`top10Concentration (${metrics.top10Concentration}%) > max (${cfg.maxTop10Concentration}%)`);
     }
-    
+
     if (metrics.liquidityPool < cfg.minLiquidityPool) {
-      return false;
+      failedCriteria.push(`liquidity (${metrics.liquidityPool}) < min (${cfg.minLiquidityPool})`);
     }
-    
+
     if (metrics.tokenAge < cfg.minTokenAgeMinutes) {
+      failedCriteria.push(`tokenAge (${metrics.tokenAge}min) < min (${cfg.minTokenAgeMinutes}min)`);
+    }
+
+    if (failedCriteria.length > 0) {
+      logger.debug({
+        ticker: metrics.ticker,
+        address: metrics.address?.slice(0, 8),
+        failedCriteria,
+        metrics: {
+          marketCap: metrics.marketCap,
+          volume24h: metrics.volume24h,
+          holders: metrics.holderCount,
+          liquidity: metrics.liquidityPool,
+          tokenAge: metrics.tokenAge,
+        },
+      }, 'Token failed screening criteria');
       return false;
     }
-    
+
     return true;
   }
   

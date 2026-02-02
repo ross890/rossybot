@@ -729,14 +729,18 @@ export class SignalGenerator {
       }
 
     } else {
-      // DEAD ZONE: 45-90 min - Skip these tokens
+      // PREVIOUSLY DEAD ZONE: 45-90 min
+      // IMPROVEMENT: Instead of skipping, route to PROVEN_RUNNER with moderate requirements
+      // These tokens have shown some survival but haven't hit the 90-min mark yet
+      // They can still generate signals if they have strong metrics
+      signalTrack = SignalTrack.PROVEN_RUNNER;
       logger.info({
         tokenAddress: shortAddr,
         ticker: metrics.ticker,
         tokenAgeMinutes: metrics.tokenAge,
-        reason: 'Dead zone (45-90 min) - too old for early edge, too young for survival proof',
-      }, 'EVAL: BLOCKED - Token in dead zone');
-      return SignalGenerator.EVAL_RESULTS.TOO_EARLY;
+        track: 'PROVEN_RUNNER',
+        note: 'Transition zone (45-90 min) - applying standard proven runner requirements',
+      }, 'EVAL: Routing transition zone token to PROVEN RUNNER track');
     }
 
     // Step 3: Check minimum thresholds (dynamically loaded from optimizer)
@@ -851,11 +855,17 @@ export class SignalGenerator {
         return SignalGenerator.EVAL_RESULTS.DISCOVERY_FAILED;
       }
     } else if (signalTrack === SignalTrack.EARLY_QUALITY) {
-      // EARLY QUALITY: Stricter requirements since token hasn't proven itself
-      // We're trusting the KOL, but need extra safety gates
+      // EARLY QUALITY: Simplified requirements (reduced from 4 to 2)
+      //
+      // IMPROVEMENT: Previously had 4 separate hard gates which caused over-filtering.
+      // Analysis showed that safety and bundle risk are the most predictive factors.
+      // Liquidity and holder growth are already weighted in on-chain scoring components.
+      //
+      // Key insight: Double-gating (component in score + separate hard check) was
+      // blocking tokens that had good OVERALL scores but missed one specific threshold.
 
-      // 1. Higher safety score required (70+ vs normal 55+)
-      const EARLY_QUALITY_MIN_SAFETY = 70;
+      // 1. Safety score required (relaxed from 70 to 65)
+      const EARLY_QUALITY_MIN_SAFETY = 65;
       if (safetyResult.safetyScore < EARLY_QUALITY_MIN_SAFETY) {
         logger.info({
           tokenAddress: shortAddr,
@@ -867,8 +877,8 @@ export class SignalGenerator {
         return SignalGenerator.EVAL_RESULTS.DISCOVERY_FAILED;
       }
 
-      // 2. Lower bundle risk required (35 max vs normal 45)
-      const EARLY_QUALITY_MAX_BUNDLE_RISK = 35;
+      // 2. Bundle risk required (relaxed from 35 to 40)
+      const EARLY_QUALITY_MAX_BUNDLE_RISK = 40;
       if (bundleAnalysis.riskScore > EARLY_QUALITY_MAX_BUNDLE_RISK) {
         logger.info({
           tokenAddress: shortAddr,
@@ -880,31 +890,11 @@ export class SignalGenerator {
         return SignalGenerator.EVAL_RESULTS.BUNDLE_BLOCKED;
       }
 
-      // 3. Higher liquidity required ($20K+ vs normal $12K)
-      const EARLY_QUALITY_MIN_LIQUIDITY = 20000;
-      if (metrics.liquidityPool < EARLY_QUALITY_MIN_LIQUIDITY) {
-        logger.info({
-          tokenAddress: shortAddr,
-          ticker: metrics.ticker,
-          liquidity: metrics.liquidityPool,
-          minRequired: EARLY_QUALITY_MIN_LIQUIDITY,
-          track: 'EARLY_QUALITY',
-        }, 'EVAL: BLOCKED - Liquidity too low for early token');
-        return SignalGenerator.EVAL_RESULTS.DISCOVERY_FAILED;
-      }
-
-      // 4. Higher holder growth for early tokens (momentum signal)
-      const EARLY_QUALITY_MIN_HOLDER_GROWTH = 0.3; // 0.3 new holders/minute
-      if (holderGrowthRate < EARLY_QUALITY_MIN_HOLDER_GROWTH) {
-        logger.info({
-          tokenAddress: shortAddr,
-          ticker: metrics.ticker,
-          holderGrowthRate,
-          minRequired: EARLY_QUALITY_MIN_HOLDER_GROWTH,
-          track: 'EARLY_QUALITY',
-        }, 'EVAL: BLOCKED - Holder growth too low for early token');
-        return SignalGenerator.EVAL_RESULTS.DISCOVERY_FAILED;
-      }
+      // NOTE: Removed separate liquidity and holder growth checks
+      // These factors are already accounted for in:
+      // - onChainScore.components.marketStructure (liquidity scoring)
+      // - onChainScore.components.momentum (includes holder growth)
+      // The weighted total score already penalizes tokens with poor liquidity/growth
 
       logger.info({
         tokenAddress: shortAddr,
@@ -915,7 +905,7 @@ export class SignalGenerator {
         holderGrowth: holderGrowthRate,
         kolTier: kolReputationTier,
         track: 'EARLY_QUALITY',
-      }, 'EVAL: PASSED Early Quality stricter requirements');
+      }, 'EVAL: PASSED Early Quality requirements');
     }
 
     // Step 5: Calculate position size using small capital manager

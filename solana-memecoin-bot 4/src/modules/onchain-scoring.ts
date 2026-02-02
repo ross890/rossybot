@@ -666,15 +666,20 @@ export class OnChainScoringEngine {
 
   /**
    * Check if score meets minimum threshold for trading
-   * Thresholds lowered to allow more early token signals
+   * IMPROVEMENT: Now uses dynamic thresholds from the optimizer instead of hardcoded values
+   * This allows the system to learn and adapt optimal thresholds from performance data
    */
   meetsMinimumThreshold(score: OnChainScore): boolean {
+    // Use dynamic thresholds from optimizer (or defaults if not set)
+    const minSafety = Math.max(25, this.dynamicThresholds.minSafetyScore - 15); // Floor at 25
+    const minBundleSafety = 100 - this.dynamicThresholds.maxBundleRiskScore; // Convert risk to safety
+
     return (
-      score.total >= 35 &&                          // Lowered from 55
+      score.total >= 35 &&                          // Base threshold
       score.recommendation !== 'STRONG_AVOID' &&    // Only block STRONG_AVOID
       score.riskLevel !== 'CRITICAL' &&
-      score.components.safety >= 30 &&              // Lowered from 50
-      score.components.bundleSafety >= 30           // Lowered from 40
+      score.components.safety >= minSafety &&       // Dynamic from optimizer
+      score.components.bundleSafety >= minBundleSafety  // Dynamic from optimizer
     );
   }
 }

@@ -630,6 +630,147 @@ CREATE INDEX IF NOT EXISTS idx_mature_exit_time ON mature_token_exit_signals(gen
 
 CREATE INDEX IF NOT EXISTS idx_mature_rate_token_time ON mature_signal_rate_limit(token_address, sent_at DESC);
 CREATE INDEX IF NOT EXISTS idx_mature_rate_time ON mature_signal_rate_limit(sent_at DESC);
+
+-- ============ DEPLOYMENT LOGS & PERFORMANCE DATA ============
+
+-- Deployment log severity enum
+DO $$ BEGIN
+  CREATE TYPE deployment_log_severity AS ENUM ('DEBUG', 'INFO', 'WARN', 'ERROR', 'CRITICAL');
+EXCEPTION
+  WHEN duplicate_object THEN null;
+END $$;
+
+-- Deployment log category enum
+DO $$ BEGIN
+  CREATE TYPE deployment_log_category AS ENUM (
+    'SIGNAL',
+    'TRADE',
+    'KOL',
+    'SAFETY',
+    'DISCOVERY',
+    'PERFORMANCE',
+    'SYSTEM',
+    'API',
+    'DATABASE'
+  );
+EXCEPTION
+  WHEN duplicate_object THEN null;
+END $$;
+
+-- Deployment logs table - stores operational logs for analysis
+CREATE TABLE IF NOT EXISTS deployment_logs (
+  id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+  severity deployment_log_severity NOT NULL DEFAULT 'INFO',
+  category deployment_log_category NOT NULL DEFAULT 'SYSTEM',
+  message TEXT NOT NULL,
+  context JSONB,
+  token_address VARCHAR(64),
+  kol_handle VARCHAR(100),
+  signal_id VARCHAR(100),
+  error_stack TEXT,
+  created_at TIMESTAMP DEFAULT NOW()
+);
+
+-- Performance metrics snapshots - periodic system health data
+CREATE TABLE IF NOT EXISTS performance_metrics (
+  id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+  metric_name VARCHAR(100) NOT NULL,
+  metric_value DECIMAL(20, 6) NOT NULL,
+  metric_unit VARCHAR(50),
+  tags JSONB,
+  recorded_at TIMESTAMP DEFAULT NOW()
+);
+
+-- System health snapshots - aggregated system performance over time
+CREATE TABLE IF NOT EXISTS system_health_snapshots (
+  id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+
+  -- Signal metrics
+  signals_generated_1h INTEGER DEFAULT 0,
+  signals_sent_1h INTEGER DEFAULT 0,
+  signals_filtered_1h INTEGER DEFAULT 0,
+  avg_signal_score DECIMAL(5, 2),
+
+  -- Trade metrics
+  trades_executed_1h INTEGER DEFAULT 0,
+  trade_success_rate DECIMAL(5, 4),
+  avg_trade_roi DECIMAL(10, 4),
+
+  -- KOL metrics
+  active_kol_wallets INTEGER DEFAULT 0,
+  kol_trades_detected_1h INTEGER DEFAULT 0,
+
+  -- API health
+  birdeye_latency_ms INTEGER,
+  helius_latency_ms INTEGER,
+  dexscreener_latency_ms INTEGER,
+  api_error_count_1h INTEGER DEFAULT 0,
+
+  -- Database health
+  db_pool_size INTEGER,
+  db_active_connections INTEGER,
+  db_query_avg_ms INTEGER,
+
+  -- Memory & CPU
+  memory_usage_mb DECIMAL(10, 2),
+  cpu_usage_percent DECIMAL(5, 2),
+
+  snapshot_time TIMESTAMP DEFAULT NOW()
+);
+
+-- Win/loss analysis for strategy insights
+CREATE TABLE IF NOT EXISTS trade_outcome_analysis (
+  id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+  token_address VARCHAR(64) NOT NULL,
+  token_ticker VARCHAR(20),
+  signal_id VARCHAR(100),
+
+  -- Entry conditions
+  entry_price DECIMAL(30, 18),
+  entry_mcap DECIMAL(20, 2),
+  entry_liquidity DECIMAL(20, 2),
+  entry_holder_count INTEGER,
+  entry_token_age_mins INTEGER,
+
+  -- Scores at entry
+  composite_score INTEGER,
+  safety_score INTEGER,
+  momentum_score INTEGER,
+
+  -- KOL info
+  kol_handle VARCHAR(100),
+  kol_tier VARCHAR(20),
+
+  -- Outcome
+  outcome VARCHAR(20), -- WIN, LOSS, PENDING
+  peak_roi DECIMAL(10, 4),
+  final_roi DECIMAL(10, 4),
+  hold_time_hours DECIMAL(10, 2),
+  exit_reason TEXT,
+
+  -- Analysis flags
+  contributing_factors JSONB,
+  warnings JSONB,
+
+  analyzed_at TIMESTAMP DEFAULT NOW()
+);
+
+-- Indexes for deployment logs and performance
+CREATE INDEX IF NOT EXISTS idx_deployment_logs_time ON deployment_logs(created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_deployment_logs_severity ON deployment_logs(severity);
+CREATE INDEX IF NOT EXISTS idx_deployment_logs_category ON deployment_logs(category);
+CREATE INDEX IF NOT EXISTS idx_deployment_logs_token ON deployment_logs(token_address);
+CREATE INDEX IF NOT EXISTS idx_deployment_logs_signal ON deployment_logs(signal_id);
+
+CREATE INDEX IF NOT EXISTS idx_perf_metrics_name ON performance_metrics(metric_name);
+CREATE INDEX IF NOT EXISTS idx_perf_metrics_time ON performance_metrics(recorded_at DESC);
+
+CREATE INDEX IF NOT EXISTS idx_system_health_time ON system_health_snapshots(snapshot_time DESC);
+
+CREATE INDEX IF NOT EXISTS idx_trade_outcome_token ON trade_outcome_analysis(token_address);
+CREATE INDEX IF NOT EXISTS idx_trade_outcome_time ON trade_outcome_analysis(analyzed_at DESC);
+CREATE INDEX IF NOT EXISTS idx_trade_outcome_outcome ON trade_outcome_analysis(outcome);
+CREATE INDEX IF NOT EXISTS idx_trade_outcome_kol ON trade_outcome_analysis(kol_handle);
 `;
 
 // ============ DATABASE OPERATIONS ============

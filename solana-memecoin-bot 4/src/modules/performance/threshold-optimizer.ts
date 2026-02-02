@@ -57,18 +57,25 @@ export interface FactorAnalysis {
 
 // ============ CONSTANTS ============
 
-// Default thresholds (moderate - balanced for data collection + quality)
+// Default thresholds (TIGHTENED for 50% win rate target)
+// Based on performance data analysis:
+// - Token Age +0.83 correlation (strongest predictor)
+// - Holder Count +0.33 correlation
+// - Higher scores currently ANTI-predict wins (scoring inversion issue)
+// Strategy: Tighter filters to only take highest-quality signals
 const DEFAULT_THRESHOLDS: ThresholdSet = {
-  minMomentumScore: 10,      // Lowered from 25 - allow more signals during learning phase
-  minOnChainScore: 30,       // Moderate - filters obvious low quality
-  minSafetyScore: 40,        // Moderate - some safety filtering
-  maxBundleRiskScore: 60,    // Moderate - allows some risk
-  minLiquidity: 8000,        // Moderate - filters very low liquidity
-  maxTop10Concentration: 60, // Moderate - some concentration allowed
+  minMomentumScore: 35,      // Raised from 10 - filter weak momentum
+  minOnChainScore: 45,       // Raised from 30 - higher quality filtering
+  minSafetyScore: 55,        // Raised from 40 - prioritize safety (key predictor)
+  maxBundleRiskScore: 45,    // Lowered from 60 - stricter bundle risk
+  minLiquidity: 12000,       // Raised from 8000 - better liquidity
+  maxTop10Concentration: 50, // Lowered from 60 - better distribution
 };
 
 // Target performance
-const TARGET_WIN_RATE = 30;  // 30% win rate target
+// UPDATED: 50% target for profitable autobuying (was 30%)
+// At 50% WR with 2:1 R/R (100% TP, 40% SL), expected value is positive
+const TARGET_WIN_RATE = 50;  // 50% win rate target for profitable autobuying
 // AUDIT FIX: Aligned with win-predictor MIN_SAMPLES_FOR_PREDICTION (15)
 // Previously required 50 which meant very long wait for optimization
 const MIN_DATA_POINTS = 20;  // Minimum completed signals for optimization
@@ -506,9 +513,10 @@ export class ThresholdOptimizer {
         )
       `);
 
-      // One-time migration: Reset to moderate defaults (v2 - Feb 2026)
-      // This ensures everyone starts fresh with the new balanced thresholds
-      const migrationKey = 'threshold_migration_v2_moderate';
+      // One-time migration: Reset to TIGHTENED defaults (v3 - Feb 2026)
+      // Updated for 50% win rate target with stricter thresholds
+      // Performance data showed scoring inversion - tighter filters needed
+      const migrationKey = 'threshold_migration_v3_tightened_50pct';
       const migrationCheck = await pool.query(`
         SELECT 1 FROM threshold_history
         WHERE thresholds->>'_migration' = $1

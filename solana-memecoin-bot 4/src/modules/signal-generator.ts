@@ -647,12 +647,16 @@ export class SignalGenerator {
 
       // Check for exceptional on-chain metrics FIRST (faster than KOL lookup)
       // Use the on-chain score components that are already calculated
+      //
+      // SIGNAL VOLUME FIX: Lowered thresholds from 70/75/70/50/50 to 55/60/55/30/40
+      // Previous thresholds were too strict - almost no early tokens could pass
+      // without KOL validation, defeating the purpose of on-chain first detection.
       const hasSuperiorOnChain =
-        onChainScore.components.momentum >= 70 &&      // Strong buy pressure (includes holder growth)
-        onChainScore.components.safety >= 75 &&        // Very safe contract
-        onChainScore.components.bundleSafety >= 70 &&  // Clean launch
-        metrics.holderCount >= 50 &&                   // Already gained traction
-        onChainScore.components.marketStructure >= 50; // Good market dynamics (holder distribution)
+        onChainScore.components.momentum >= 55 &&      // Good buy pressure
+        onChainScore.components.safety >= 60 &&        // Safe contract
+        onChainScore.components.bundleSafety >= 55 &&  // Reasonably clean launch
+        metrics.holderCount >= 30 &&                   // Some traction
+        onChainScore.components.marketStructure >= 40; // Decent market dynamics
 
       if (hasSuperiorOnChain) {
         // ON-CHAIN FIRST: Accept without KOL if metrics are exceptional
@@ -841,8 +845,10 @@ export class SignalGenerator {
     const holderGrowthRate = momentumData?.holderGrowthRate || 0;
 
     if (signalTrack === SignalTrack.PROVEN_RUNNER) {
-      // PROVEN RUNNER: Standard holder growth requirement
-      const MIN_HOLDER_GROWTH_RATE = 0.1; // At least 0.1 new holders/minute
+      // PROVEN RUNNER: Holder growth requirement
+      // SIGNAL VOLUME FIX: Lowered from 0.1 to 0.03 (3 new holders per 100 minutes)
+      // Many legitimate tokens have slow but steady growth, especially older ones
+      const MIN_HOLDER_GROWTH_RATE = 0.03;
 
       if (holderGrowthRate < MIN_HOLDER_GROWTH_RATE) {
         logger.info({
@@ -960,30 +966,26 @@ export class SignalGenerator {
 
     // Filter signals by ML win probability - TRACK-SPECIFIC THRESHOLDS
     //
-    // HIT RATE IMPROVEMENT: Raised thresholds to improve signal quality
+    // SIGNAL VOLUME FIX: Significantly lowered thresholds
+    // Previous thresholds (55%/75% and 45%/60%) were too strict and blocking
+    // almost all signals, preventing both trading AND ML data collection.
     //
-    // PROVEN RUNNER: Higher ML threshold (time proves quality, ML confirms)
-    //   Learning: 55% (was 50%), Production: 75% (was 70%)
-    //
-    // EARLY QUALITY: Moderate ML threshold (KOL/on-chain provides trust, ML supports)
-    //   Learning: 45% (was 35%), Production: 60% (was 50%)
-    //   Rationale: We still trust KOL/on-chain validation, but ML should
-    //   have at least 45% confidence to filter out obvious bad signals
+    // New approach: In learning mode, accept most signals to collect data.
+    // The on-chain scoring already filters out truly bad signals.
     //
     let mlProbabilityThreshold: number;
     let confidenceOk: boolean;
 
     if (signalTrack === SignalTrack.PROVEN_RUNNER) {
-      mlProbabilityThreshold = isLearningMode ? 55 : 75;
+      // PROVEN RUNNER: Token has survived 45+ minutes, lower bar for ML
+      mlProbabilityThreshold = isLearningMode ? 30 : 50;
       confidenceOk = isLearningMode
-        ? (prediction.confidence === 'HIGH' || prediction.confidence === 'MEDIUM')
-        : prediction.confidence === 'HIGH';
+        ? true  // Accept any confidence in learning mode
+        : (prediction.confidence === 'HIGH' || prediction.confidence === 'MEDIUM');
     } else {
-      // EARLY_QUALITY: Moderate thresholds - trust external validation but filter noise
-      mlProbabilityThreshold = isLearningMode ? 45 : 60;
-      confidenceOk = prediction.confidence === 'HIGH' ||
-                     prediction.confidence === 'MEDIUM';
-      // Removed LOW confidence acceptance even in learning mode
+      // EARLY_QUALITY: Already validated by KOL or superior on-chain metrics
+      mlProbabilityThreshold = isLearningMode ? 25 : 40;
+      confidenceOk = true;  // Trust the external validation, don't double-gate
     }
 
     if (prediction.winProbability < mlProbabilityThreshold) {

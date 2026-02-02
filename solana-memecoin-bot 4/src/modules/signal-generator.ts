@@ -545,20 +545,34 @@ export class SignalGenerator {
       return SignalGenerator.EVAL_RESULTS.BUNDLE_BLOCKED;
     }
 
-    // Step 2.5: Token age filter (PRODUCTION ONLY)
+    // Step 2.5: Token age filter - PROVEN RUNNER STRATEGY
     // Performance data shows +0.84 correlation between token age and wins
-    // Older tokens are more established and less likely to rug
-    // In learning mode: skip this filter to collect data on all token ages
+    // OLD STRATEGY: Catch tokens early (5-30 min) before they moon
+    // PROBLEM: Early tokens have high rug/dump risk, actual wins come from older tokens
+    //
+    // NEW STRATEGY: "Proven Runner" - catch tokens that have:
+    // 1. Survived the initial phase (1.5+ hours = 90 minutes)
+    // 2. Proven they're not an instant rug
+    // 3. Still have upside potential (timing score peaks at 2-4 hours)
+    //
+    // IMPORTANT: This gate applies in BOTH learning and production modes.
+    // We want quality signals NOW, not just when learning mode is disabled.
+    // Learning mode relaxes other filters (momentum, recommendations) but NOT token age.
+    //
+    // Target: 30-50 high-quality signals/day at 70%+ win confidence
     const isLearningMode = appConfig.trading.learningMode;
-    const MIN_TOKEN_AGE_MINUTES = 30;
+    const MIN_TOKEN_AGE_MINUTES = 90; // Proven runner: 1.5 hours minimum
 
-    if (!isLearningMode && metrics.tokenAge < MIN_TOKEN_AGE_MINUTES) {
+    // PROVEN RUNNER: Token age gate applies in BOTH modes
+    if (metrics.tokenAge < MIN_TOKEN_AGE_MINUTES) {
       logger.info({
         tokenAddress: shortAddr,
         ticker: metrics.ticker,
         tokenAgeMinutes: metrics.tokenAge,
         minRequired: MIN_TOKEN_AGE_MINUTES,
-      }, 'EVAL: BLOCKED - Token too young (production mode)');
+        strategy: 'PROVEN_RUNNER',
+        learningMode: isLearningMode,
+      }, 'EVAL: BLOCKED - Token not yet proven (wait for 90min survival)');
       return SignalGenerator.EVAL_RESULTS.TOO_EARLY;
     }
 
@@ -655,6 +669,26 @@ export class SignalGenerator {
     const momentumData = await momentumAnalyzer.analyze(tokenAddress);
     const momentumScore = momentumData ? momentumAnalyzer.calculateScore(momentumData) : null;
 
+    // Step 4.5: PROVEN RUNNER - Holder growth requirement
+    // A proven runner should show POSITIVE holder growth (people are still buying)
+    // Negative holder growth = people are exiting = likely to dump further
+    // IMPORTANT: Applies in BOTH learning and production modes for quality
+    const holderGrowthRate = momentumData?.holderGrowthRate || 0;
+    const MIN_HOLDER_GROWTH_RATE = 0.1; // At least 0.1 new holders/minute
+
+    // PROVEN RUNNER: Holder growth gate applies in BOTH modes
+    if (holderGrowthRate < MIN_HOLDER_GROWTH_RATE) {
+      logger.info({
+        tokenAddress: shortAddr,
+        ticker: metrics.ticker,
+        holderGrowthRate,
+        minRequired: MIN_HOLDER_GROWTH_RATE,
+        strategy: 'PROVEN_RUNNER',
+        learningMode: isLearningMode,
+      }, 'EVAL: BLOCKED - Holder growth too low (need active buying)');
+      return SignalGenerator.EVAL_RESULTS.DISCOVERY_FAILED;
+    }
+
     // Step 5: Calculate position size using small capital manager
     // Create a compatible MomentumScore object for the manager
     const mockMomentumScore = {
@@ -705,21 +739,54 @@ export class SignalGenerator {
       patterns: prediction.matchedWinPatterns,
     }, 'Win prediction calculated');
 
-    // Filter signals with very low win probability
-    // LEARNING MODE FIX: Lower the threshold during learning to allow more data collection
-    // In learning mode: only filter if probability < 15% (very low confidence)
-    // In production mode: filter if probability < 25%
-    const mlProbabilityThreshold = isLearningMode ? 15 : 25;
+    // Filter signals by ML win probability - PROVEN RUNNER STRATEGY
+    // Target: 30-50 high-quality signals/day at 70%+ win confidence
+    //
+    // OLD THRESHOLDS:
+    //   Learning: 15%, Production: 25%
+    //   Result: 800+ signals/day at 30% win rate
+    //
+    // NEW THRESHOLDS (Proven Runner):
+    //   Learning: 50% (still collect data, but filter obvious noise)
+    //   Production: 70% (only signal when highly confident)
+    //
+    // IMPORTANT: Both modes now require meaningful ML confidence.
+    // We want quality signals NOW while still collecting learning data.
+    const mlProbabilityThreshold = isLearningMode ? 50 : 70;
 
-    if (prediction.recommendedAction === 'SKIP' && prediction.winProbability < mlProbabilityThreshold) {
+    // HIGH confidence required in BOTH modes for proven runner strategy
+    // Learning mode: allow MEDIUM or HIGH
+    // Production mode: require HIGH only
+    const confidenceOk = isLearningMode
+      ? (prediction.confidence === 'HIGH' || prediction.confidence === 'MEDIUM')
+      : prediction.confidence === 'HIGH';
+
+    if (prediction.winProbability < mlProbabilityThreshold) {
       logger.info({
         tokenAddress,
         ticker: metrics.ticker,
         winProbability: prediction.winProbability,
         threshold: mlProbabilityThreshold,
+        confidence: prediction.confidence,
         learningMode: isLearningMode,
-        reason: 'ML prediction SKIP with low probability',
-      }, 'Signal filtered by ML predictor');
+        reason: 'Win probability below threshold',
+        strategy: 'PROVEN_RUNNER',
+      }, 'Signal filtered by ML predictor - probability too low');
+      return SignalGenerator.EVAL_RESULTS.DISCOVERY_FAILED;
+    }
+
+    if (!confidenceOk) {
+      logger.info({
+        tokenAddress,
+        ticker: metrics.ticker,
+        winProbability: prediction.winProbability,
+        confidence: prediction.confidence,
+        learningMode: isLearningMode,
+        reason: isLearningMode
+          ? 'Confidence too low (learning mode requires MEDIUM or HIGH)'
+          : 'Confidence not HIGH (production mode requires HIGH)',
+        strategy: 'PROVEN_RUNNER',
+      }, 'Signal filtered by ML predictor - confidence too low');
       return SignalGenerator.EVAL_RESULTS.DISCOVERY_FAILED;
     }
 

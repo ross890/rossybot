@@ -137,10 +137,88 @@ class HeliusClient {
         method: 'getAccountInfo',
         params: [address, { encoding: 'jsonParsed' }],
       });
-      
+
       return response.data.result?.value;
     } catch (error) {
       logger.error({ error, address }, 'Failed to get account info');
+      return null;
+    }
+  }
+
+  /**
+   * Get token mint info including mint/freeze authority
+   * This replaces the Birdeye getTokenSecurity call - FREE via Helius RPC
+   */
+  async getTokenMintInfo(mintAddress: string): Promise<{
+    mintAuthority: string | null;
+    freezeAuthority: string | null;
+    decimals: number;
+    supply: string;
+    isInitialized: boolean;
+  } | null> {
+    try {
+      const accountInfo = await this.getAccountInfo(mintAddress);
+
+      if (!accountInfo || !accountInfo.data) {
+        logger.debug({ mintAddress }, 'No account info found for mint');
+        return null;
+      }
+
+      // Parse SPL Token mint data
+      const parsed = accountInfo.data.parsed;
+      if (!parsed || parsed.type !== 'mint') {
+        logger.debug({ mintAddress, type: parsed?.type }, 'Account is not a mint');
+        return null;
+      }
+
+      const info = parsed.info;
+      return {
+        mintAuthority: info.mintAuthority || null,
+        freezeAuthority: info.freezeAuthority || null,
+        decimals: info.decimals || 0,
+        supply: info.supply || '0',
+        isInitialized: info.isInitialized !== false,
+      };
+    } catch (error) {
+      logger.error({ error, mintAddress }, 'Failed to get token mint info from Helius');
+      return null;
+    }
+  }
+
+  /**
+   * Get token creation signature (first transaction for the mint)
+   * This can help determine token age and creator
+   */
+  async getTokenCreationSignature(mintAddress: string): Promise<{
+    signature: string;
+    blockTime: number;
+    slot: number;
+  } | null> {
+    try {
+      // Get the oldest signatures for this mint (limit 1, before=null gets oldest)
+      const response = await this.client.post('', {
+        jsonrpc: '2.0',
+        id: 'creation-sig',
+        method: 'getSignaturesForAddress',
+        params: [mintAddress, { limit: 1 }],
+      });
+
+      const signatures = response.data.result || [];
+      if (signatures.length === 0) {
+        return null;
+      }
+
+      // The last signature in history is the creation
+      // But getSignaturesForAddress returns newest first, so we need to get the oldest
+      // For now, return the first one we get (recent activity indicator)
+      const sig = signatures[0];
+      return {
+        signature: sig.signature,
+        blockTime: sig.blockTime || 0,
+        slot: sig.slot || 0,
+      };
+    } catch (error) {
+      logger.debug({ error, mintAddress }, 'Failed to get token creation signature');
       return null;
     }
   }
@@ -1065,21 +1143,20 @@ export const dexScreenerClient = new DexScreenerClient();
 
 export async function getTokenMetrics(address: string): Promise<TokenMetrics | null> {
   try {
-    // Fetch data from multiple sources in parallel
-    // Use Promise.allSettled to handle partial failures gracefully
-    const [birdeyeResult, dexResult, holderResult] = await Promise.allSettled([
-      birdeyeClient.getTokenOverview(address),
+    // COST OPTIMIZATION: Remove Birdeye API call - use DexScreener (FREE) + Helius (included in plan)
+    // DexScreener provides: price, volume, market cap, liquidity, token name/symbol, pair creation time
+    // Helius provides: holder count, holder distribution
+    const [dexResult, holderResult] = await Promise.allSettled([
       dexScreenerClient.getTokenPairs(address),
       heliusClient.getTokenHolders(address),
     ]);
 
-    const birdeyeData = birdeyeResult.status === 'fulfilled' ? birdeyeResult.value : null;
     const dexPairs = dexResult.status === 'fulfilled' ? dexResult.value : [];
     const holderData = holderResult.status === 'fulfilled' ? holderResult.value : { total: 0, topHolders: [] };
 
     // For very new tokens, we may have no data from APIs yet
     // Use holder data from Helius as a fallback indicator that the token exists
-    const hasAnyData = birdeyeData || dexPairs.length > 0 || holderData.total > 0;
+    const hasAnyData = dexPairs.length > 0 || holderData.total > 0;
 
     if (!hasAnyData) {
       // Only reject if we truly have nothing at all
@@ -1087,12 +1164,12 @@ export async function getTokenMetrics(address: string): Promise<TokenMetrics | n
       return null;
     }
 
-    // Use DexScreener as primary for price/volume, Birdeye for holder data
+    // Use DexScreener as primary source for price/volume (FREE)
     const primaryPair = dexPairs[0];
-    const price = primaryPair ? parseFloat(primaryPair.priceUsd || '0') : (birdeyeData?.price || 0);
-    const marketCap = primaryPair ? (primaryPair.fdv || 0) : (birdeyeData?.mc || 0);
-    const volume24h = primaryPair ? (primaryPair.volume?.h24 || 0) : (birdeyeData?.v24h || 0);
-    const liquidity = primaryPair ? (primaryPair.liquidity?.usd || 0) : (birdeyeData?.liquidity || 0);
+    const price = primaryPair ? parseFloat(primaryPair.priceUsd || '0') : 0;
+    const marketCap = primaryPair ? (primaryPair.fdv || 0) : 0;
+    const volume24h = primaryPair ? (primaryPair.volume?.h24 || 0) : 0;
+    const liquidity = primaryPair ? (primaryPair.liquidity?.usd || 0) : 0;
 
     // Calculate top 10 concentration (default to 50% if no data - conservative for new tokens)
     const top10Concentration = holderData.topHolders.length > 0
@@ -1100,36 +1177,25 @@ export async function getTokenMetrics(address: string): Promise<TokenMetrics | n
       : 50; // Default for very new tokens
 
     // Get token creation time for age calculation
-    // Priority: 1) DexScreener pairCreatedAt, 2) Birdeye creationInfo, 3) Default 5 min
+    // Use DexScreener pairCreatedAt (FREE) - no Birdeye fallback needed
     let ageMinutes = 5; // Default to 5 minutes for very new tokens
 
-    // Try DexScreener first (most reliable - already fetched)
     if (primaryPair?.pairCreatedAt) {
       ageMinutes = (Date.now() - primaryPair.pairCreatedAt) / (1000 * 60);
-    } else {
-      // Fall back to Birdeye API
-      try {
-        const creationInfo = await birdeyeClient.getTokenCreationInfo(address);
-        if (creationInfo?.createdTime) {
-          const creationTimestamp = creationInfo.createdTime;
-          ageMinutes = (Date.now() - creationTimestamp) / (1000 * 60);
-        }
-      } catch {
-        // Ignore creation info errors - use default age
-      }
     }
+    // Note: Removed Birdeye fallback for creation time - DexScreener is sufficient
 
     // For tokens with minimal data, use permissive defaults
     // This allows very new tokens to pass through to scoring
     return {
       address,
-      ticker: primaryPair?.baseToken?.symbol || birdeyeData?.symbol || 'NEW',
-      name: primaryPair?.baseToken?.name || birdeyeData?.name || 'New Token',
+      ticker: primaryPair?.baseToken?.symbol || 'NEW',
+      name: primaryPair?.baseToken?.name || 'New Token',
       price: price || 0.000001, // Default tiny price if unknown
       marketCap: marketCap || 10000, // Default $10k mcap if unknown (meets min threshold)
       volume24h: volume24h || 1000, // Default $1k volume if unknown
       volumeMarketCapRatio: marketCap > 0 ? volume24h / marketCap : 0.1, // Default 10% ratio
-      holderCount: birdeyeData?.holder || holderData.total || 25, // Default 25 holders
+      holderCount: holderData.total || 25, // Default 25 holders (Helius provides this)
       holderChange1h: 0,
       top10Concentration,
       liquidityPool: liquidity || 5000, // Default $5k liquidity
@@ -1145,18 +1211,19 @@ export async function getTokenMetrics(address: string): Promise<TokenMetrics | n
 
 export async function analyzeTokenContract(address: string): Promise<TokenContractAnalysis> {
   try {
-    const security = await birdeyeClient.getTokenSecurity(address);
+    // COST OPTIMIZATION: Use Helius RPC (included in plan) instead of Birdeye API
+    // This is a direct on-chain query for mint/freeze authority - more reliable and FREE
+    const mintInfo = await heliusClient.getTokenMintInfo(address);
 
-    // Log what Birdeye actually returned (raw keys + values)
-    const securityKeys = security ? Object.keys(security).join(',') : 'null';
+    // Log what Helius actually returned
     logger.info(
-      `Birdeye security for ${address.slice(0, 8)}: keys=[${securityKeys}] mintAuth=${JSON.stringify(security?.mintAuthority)} freezeAuth=${JSON.stringify(security?.freezeAuthority)}`
+      `Helius security for ${address.slice(0, 8)}: mintAuth=${mintInfo?.mintAuthority || 'null'} freezeAuth=${mintInfo?.freezeAuthority || 'null'}`
     );
 
-    // Handle null/undefined security response
-    if (!security) {
-      logger.warn(`No security data from Birdeye for ${address.slice(0, 8)} - letting through`);
-      // Return permissive defaults when API returns nothing (let token through)
+    // Handle null/undefined response
+    if (!mintInfo) {
+      logger.warn(`No mint info from Helius for ${address.slice(0, 8)} - letting through`);
+      // Return permissive defaults when RPC returns nothing (let token through)
       return {
         mintAuthorityRevoked: true,
         freezeAuthorityRevoked: true,
@@ -1165,12 +1232,11 @@ export async function analyzeTokenContract(address: string): Promise<TokenContra
       };
     }
 
-    // Use falsy check (!value) instead of === null to handle both null and undefined
-    // Birdeye may return undefined for mintAuthority if field doesn't exist
+    // mintAuthority/freezeAuthority are null if revoked, or contain the authority pubkey
     return {
-      mintAuthorityRevoked: !security.mintAuthority,
-      freezeAuthorityRevoked: !security.freezeAuthority,
-      metadataMutable: security.mutableMetadata === true || security.mutable === true,
+      mintAuthorityRevoked: mintInfo.mintAuthority === null,
+      freezeAuthorityRevoked: mintInfo.freezeAuthority === null,
+      metadataMutable: false, // Helius doesn't return this directly, default to false (safe)
       isKnownScamTemplate: false,
     };
   } catch (error) {

@@ -46,6 +46,26 @@ export enum SignalType {
   KOL_VALIDATION = 'KOL_VALIDATION' // Follow-up when KOL buys a discovered token
 }
 
+// Signal track for dual-strategy system
+// PROVEN_RUNNER: Tokens 90+ min old, proven survivors, time = trust
+// EARLY_QUALITY: Tokens < 45 min old, KOL validated, external signals = trust
+export enum SignalTrack {
+  PROVEN_RUNNER = 'PROVEN_RUNNER',
+  EARLY_QUALITY = 'EARLY_QUALITY',
+}
+
+// KOL reputation tier based on historical performance
+// S-tier: 50%+ win rate, highly trusted
+// A-tier: 40%+ win rate, trusted
+// B-tier: 30%+ win rate, moderate trust
+// UNPROVEN: < 30 tracked picks, not enough data
+export enum KolReputationTier {
+  S_TIER = 'S_TIER',
+  A_TIER = 'A_TIER',
+  B_TIER = 'B_TIER',
+  UNPROVEN = 'UNPROVEN',
+}
+
 export enum RiskLevel {
   VERY_LOW = 1,
   LOW = 2,
@@ -87,6 +107,23 @@ export interface KolPerformance {
   avgRoi: number;
   medianRoi: number;
   lastCalculated: Date;
+}
+
+// KOL reputation for Early Quality track validation
+// Tracks historical performance and assigns trust tier
+export interface KolReputation {
+  kolId: string;
+  handle: string;                    // Twitter/X handle
+  tier: KolReputationTier;           // S/A/B/UNPROVEN
+  totalPicks: number;                // Total token mentions tracked
+  wins: number;                      // Picks that hit +100%
+  losses: number;                    // Picks that hit -40% or timeout
+  winRate: number;                   // wins / (wins + losses)
+  avgReturn: number;                 // Average return across all picks
+  profitSol: number;                 // Total profit in SOL (from KOLscan)
+  lastPickAt: Date | null;           // Most recent pick
+  lastUpdated: Date;                 // When reputation was recalculated
+  source: 'KOLSCAN' | 'TRACKED';     // Data source
 }
 
 export interface KolTrade {
@@ -263,6 +300,10 @@ export interface BuySignal {
   // Metadata
   generatedAt: Date;
   signalType: SignalType;
+
+  // Dual-track strategy
+  signalTrack: SignalTrack;
+  kolReputation?: KolReputationTier;  // For EARLY_QUALITY track
 }
 
 // ============ POSITION TYPES ============
@@ -632,6 +673,10 @@ export interface DiscoverySignal {
   // Metadata
   generatedAt: Date;
   signalType: SignalType.DISCOVERY;
+
+  // Dual-track strategy
+  signalTrack: SignalTrack;
+  kolReputation?: KolReputationTier;  // For EARLY_QUALITY track
 
   // For tracking KOL follow-up
   discoveredAt: Date;

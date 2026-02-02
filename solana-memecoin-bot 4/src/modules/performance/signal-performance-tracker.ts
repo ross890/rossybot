@@ -129,6 +129,12 @@ export interface PerformanceStats {
     WEAK: { count: number; winRate: number; avgReturn: number };
   };
 
+  // DUAL-TRACK: By signal track
+  byTrack: {
+    PROVEN_RUNNER: { count: number; winRate: number; avgReturn: number };
+    EARLY_QUALITY: { count: number; winRate: number; avgReturn: number };
+  };
+
   // Time period
   periodStart: Date;
   periodEnd: Date;
@@ -183,6 +189,8 @@ export class SignalPerformanceTracker {
       top10Concentration?: number;
       buySellRatio?: number;
       uniqueBuyers?: number;
+      signalTrack?: string;      // DUAL-TRACK: 'PROVEN_RUNNER' | 'EARLY_QUALITY'
+      kolReputation?: string;    // DUAL-TRACK: KOL tier for EARLY_QUALITY
     }
   ): Promise<void> {
     try {
@@ -195,8 +203,9 @@ export class SignalPerformanceTracker {
           safety_score, bundle_risk_score, signal_strength,
           entry_liquidity, entry_token_age, entry_holder_count,
           entry_top10_concentration, entry_buy_sell_ratio, entry_unique_buyers,
+          signal_track, kol_reputation,
           signal_time, tracked, final_outcome
-        ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, NOW(), true, 'PENDING')
+        ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, NOW(), true, 'PENDING')
         ON CONFLICT (signal_id) DO NOTHING
       `, [
         signalId, tokenAddress, tokenTicker, signalType,
@@ -207,7 +216,9 @@ export class SignalPerformanceTracker {
         metrics.holderCount || 0,
         metrics.top10Concentration || 0,
         metrics.buySellRatio || 0,
-        metrics.uniqueBuyers || 0
+        metrics.uniqueBuyers || 0,
+        metrics.signalTrack || 'PROVEN_RUNNER',  // Default to PROVEN_RUNNER for backwards compat
+        metrics.kolReputation || null
       ]);
 
       logger.info({
@@ -498,6 +509,12 @@ export class SignalPerformanceTracker {
         WEAK: this.calculateGroupStats(completed.filter((s: any) => s.signal_strength === 'WEAK')),
       };
 
+      // DUAL-TRACK: By signal track
+      const byTrack = {
+        PROVEN_RUNNER: this.calculateGroupStats(completed.filter((s: any) => s.signal_track === 'PROVEN_RUNNER' || !s.signal_track)),
+        EARLY_QUALITY: this.calculateGroupStats(completed.filter((s: any) => s.signal_track === 'EARLY_QUALITY')),
+      };
+
       return {
         totalSignals: signals.length,
         completedSignals: completed.length,
@@ -516,6 +533,7 @@ export class SignalPerformanceTracker {
         bySignalType,
         byScoreRange,
         byStrength,
+        byTrack,  // DUAL-TRACK: Stats split by signal track
 
         periodStart: new Date(Date.now() - hours * 60 * 60 * 1000),
         periodEnd: new Date(),
@@ -675,6 +693,10 @@ export class SignalPerformanceTracker {
           entry_buy_sell_ratio DECIMAL(10, 2) DEFAULT 0,
           entry_unique_buyers INTEGER DEFAULT 0,
 
+          -- DUAL-TRACK: Signal routing track
+          signal_track VARCHAR(50) DEFAULT 'PROVEN_RUNNER',
+          kol_reputation VARCHAR(50),
+
           signal_time TIMESTAMP NOT NULL,
           tracked BOOLEAN DEFAULT true,
 
@@ -717,6 +739,13 @@ export class SignalPerformanceTracker {
           IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name = 'signal_performance' AND column_name = 'entry_unique_buyers') THEN
             ALTER TABLE signal_performance ADD COLUMN entry_unique_buyers INTEGER DEFAULT 0;
           END IF;
+          -- DUAL-TRACK: Add signal track columns
+          IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name = 'signal_performance' AND column_name = 'signal_track') THEN
+            ALTER TABLE signal_performance ADD COLUMN signal_track VARCHAR(50) DEFAULT 'PROVEN_RUNNER';
+          END IF;
+          IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name = 'signal_performance' AND column_name = 'kol_reputation') THEN
+            ALTER TABLE signal_performance ADD COLUMN kol_reputation VARCHAR(50);
+          END IF;
         END $$;
       `);
 
@@ -746,6 +775,7 @@ export class SignalPerformanceTracker {
         CREATE INDEX IF NOT EXISTS idx_signal_perf_tracked ON signal_performance(tracked);
         CREATE INDEX IF NOT EXISTS idx_signal_perf_outcome ON signal_performance(final_outcome);
         CREATE INDEX IF NOT EXISTS idx_perf_snapshots_signal ON performance_snapshots(signal_id);
+        CREATE INDEX IF NOT EXISTS idx_signal_perf_track ON signal_performance(signal_track);
       `);
 
       logger.info('Performance tracking tables ready');

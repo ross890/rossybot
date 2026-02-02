@@ -48,13 +48,18 @@ import {
   SocialMetrics,
   BuySignal,
   SignalType,
+  SignalTrack,
   KolWalletActivity,
   TokenSafetyResult,
   DiscoverySignal,
   MoonshotAssessment,
   DexScreenerTokenInfo,
   CTOAnalysis,
+  KolReputationTier,
 } from '../types/index.js';
+
+// KOL reputation for Early Quality track
+import { kolReputationManager } from './kol-reputation.js';
 
 // ============ CONFIGURATION ============
 
@@ -545,34 +550,106 @@ export class SignalGenerator {
       return SignalGenerator.EVAL_RESULTS.BUNDLE_BLOCKED;
     }
 
-    // Step 2.5: Token age filter - PROVEN RUNNER STRATEGY
-    // Performance data shows +0.84 correlation between token age and wins
-    // OLD STRATEGY: Catch tokens early (5-30 min) before they moon
-    // PROBLEM: Early tokens have high rug/dump risk, actual wins come from older tokens
+    // Step 2.5: DUAL-TRACK SIGNAL ROUTING
+    // =========================================
+    // Two parallel strategies with different trust models:
     //
-    // NEW STRATEGY: "Proven Runner" - catch tokens that have:
-    // 1. Survived the initial phase (1.5+ hours = 90 minutes)
-    // 2. Proven they're not an instant rug
-    // 3. Still have upside potential (timing score peaks at 2-4 hours)
+    // TRACK 1: PROVEN RUNNER (time = trust)
+    //   - Token age >= 90 min (proven survivors)
+    //   - Has survived initial rug/dump phase
+    //   - Target: 20-40 signals/day
     //
-    // IMPORTANT: This gate applies in BOTH learning and production modes.
-    // We want quality signals NOW, not just when learning mode is disabled.
-    // Learning mode relaxes other filters (momentum, recommendations) but NOT token age.
+    // TRACK 2: EARLY QUALITY (KOL = trust)
+    //   - Token age < 45 min (fresh tokens)
+    //   - REQUIRES S-tier or A-tier KOL validation
+    //   - Stricter safety requirements
+    //   - Target: 10-20 signals/day
     //
-    // Target: 30-50 high-quality signals/day at 70%+ win confidence
+    // DEAD ZONE: 45-90 min
+    //   - Too old for early-entry edge
+    //   - Too young for survival proof
+    //   - SKIP these tokens
+    //
     const isLearningMode = appConfig.trading.learningMode;
-    const MIN_TOKEN_AGE_MINUTES = 90; // Proven runner: 1.5 hours minimum
+    const PROVEN_RUNNER_MIN_AGE = 90;  // 1.5 hours
+    const EARLY_QUALITY_MAX_AGE = 45;  // 45 minutes
 
-    // PROVEN RUNNER: Token age gate applies in BOTH modes
-    if (metrics.tokenAge < MIN_TOKEN_AGE_MINUTES) {
+    let signalTrack: SignalTrack | null = null;
+    let kolReputationTier: KolReputationTier | undefined;
+
+    if (metrics.tokenAge >= PROVEN_RUNNER_MIN_AGE) {
+      // TRACK 1: PROVEN RUNNER - Token has survived, time is trust
+      signalTrack = SignalTrack.PROVEN_RUNNER;
       logger.info({
         tokenAddress: shortAddr,
         ticker: metrics.ticker,
         tokenAgeMinutes: metrics.tokenAge,
-        minRequired: MIN_TOKEN_AGE_MINUTES,
-        strategy: 'PROVEN_RUNNER',
-        learningMode: isLearningMode,
-      }, 'EVAL: BLOCKED - Token not yet proven (wait for 90min survival)');
+        track: 'PROVEN_RUNNER',
+      }, 'EVAL: Routing to PROVEN RUNNER track');
+
+    } else if (metrics.tokenAge < EARLY_QUALITY_MAX_AGE) {
+      // TRACK 2: EARLY QUALITY - Need KOL validation since time hasn't proven it
+      // Check if we have S-tier or A-tier KOL activity for this token
+      const kolActivity = await kolWalletMonitor.getKolActivityForToken(tokenAddress);
+
+      if (kolActivity.length > 0) {
+        // Find highest-tier KOL that mentioned/bought this token
+        let bestKolTier: KolReputationTier = KolReputationTier.UNPROVEN;
+
+        for (const activity of kolActivity) {
+          const kolCheck = await kolReputationManager.isHighTierKol(activity.kol.handle);
+          if (kolCheck.isTrusted) {
+            // Found a trusted KOL
+            if (kolCheck.tier === KolReputationTier.S_TIER) {
+              bestKolTier = KolReputationTier.S_TIER;
+              break; // S-tier is best, no need to check more
+            } else if (kolCheck.tier === KolReputationTier.A_TIER) {
+              bestKolTier = KolReputationTier.A_TIER;
+            }
+          }
+        }
+
+        if (bestKolTier === KolReputationTier.S_TIER || bestKolTier === KolReputationTier.A_TIER) {
+          signalTrack = SignalTrack.EARLY_QUALITY;
+          kolReputationTier = bestKolTier;
+          logger.info({
+            tokenAddress: shortAddr,
+            ticker: metrics.ticker,
+            tokenAgeMinutes: metrics.tokenAge,
+            track: 'EARLY_QUALITY',
+            kolTier: bestKolTier,
+            kolCount: kolActivity.length,
+          }, 'EVAL: Routing to EARLY QUALITY track (KOL validated)');
+        } else {
+          // KOL activity exists but no S/A tier validation
+          logger.info({
+            tokenAddress: shortAddr,
+            ticker: metrics.ticker,
+            tokenAgeMinutes: metrics.tokenAge,
+            kolCount: kolActivity.length,
+            reason: 'KOL activity found but no S/A tier validation',
+          }, 'EVAL: BLOCKED - Early token without trusted KOL');
+          return SignalGenerator.EVAL_RESULTS.TOO_EARLY;
+        }
+      } else {
+        // No KOL activity for early token
+        logger.info({
+          tokenAddress: shortAddr,
+          ticker: metrics.ticker,
+          tokenAgeMinutes: metrics.tokenAge,
+          reason: 'Early token with no KOL validation',
+        }, 'EVAL: BLOCKED - Early token without KOL activity');
+        return SignalGenerator.EVAL_RESULTS.TOO_EARLY;
+      }
+
+    } else {
+      // DEAD ZONE: 45-90 min - Skip these tokens
+      logger.info({
+        tokenAddress: shortAddr,
+        ticker: metrics.ticker,
+        tokenAgeMinutes: metrics.tokenAge,
+        reason: 'Dead zone (45-90 min) - too old for early edge, too young for survival proof',
+      }, 'EVAL: BLOCKED - Token in dead zone');
       return SignalGenerator.EVAL_RESULTS.TOO_EARLY;
     }
 
@@ -669,24 +746,90 @@ export class SignalGenerator {
     const momentumData = await momentumAnalyzer.analyze(tokenAddress);
     const momentumScore = momentumData ? momentumAnalyzer.calculateScore(momentumData) : null;
 
-    // Step 4.5: PROVEN RUNNER - Holder growth requirement
-    // A proven runner should show POSITIVE holder growth (people are still buying)
-    // Negative holder growth = people are exiting = likely to dump further
-    // IMPORTANT: Applies in BOTH learning and production modes for quality
+    // Step 4.5: TRACK-SPECIFIC REQUIREMENTS
+    // Different requirements for PROVEN_RUNNER vs EARLY_QUALITY
     const holderGrowthRate = momentumData?.holderGrowthRate || 0;
-    const MIN_HOLDER_GROWTH_RATE = 0.1; // At least 0.1 new holders/minute
 
-    // PROVEN RUNNER: Holder growth gate applies in BOTH modes
-    if (holderGrowthRate < MIN_HOLDER_GROWTH_RATE) {
+    if (signalTrack === SignalTrack.PROVEN_RUNNER) {
+      // PROVEN RUNNER: Standard holder growth requirement
+      const MIN_HOLDER_GROWTH_RATE = 0.1; // At least 0.1 new holders/minute
+
+      if (holderGrowthRate < MIN_HOLDER_GROWTH_RATE) {
+        logger.info({
+          tokenAddress: shortAddr,
+          ticker: metrics.ticker,
+          holderGrowthRate,
+          minRequired: MIN_HOLDER_GROWTH_RATE,
+          track: 'PROVEN_RUNNER',
+        }, 'EVAL: BLOCKED - Holder growth too low');
+        return SignalGenerator.EVAL_RESULTS.DISCOVERY_FAILED;
+      }
+    } else if (signalTrack === SignalTrack.EARLY_QUALITY) {
+      // EARLY QUALITY: Stricter requirements since token hasn't proven itself
+      // We're trusting the KOL, but need extra safety gates
+
+      // 1. Higher safety score required (70+ vs normal 55+)
+      const EARLY_QUALITY_MIN_SAFETY = 70;
+      if (safetyResult.safetyScore < EARLY_QUALITY_MIN_SAFETY) {
+        logger.info({
+          tokenAddress: shortAddr,
+          ticker: metrics.ticker,
+          safetyScore: safetyResult.safetyScore,
+          minRequired: EARLY_QUALITY_MIN_SAFETY,
+          track: 'EARLY_QUALITY',
+        }, 'EVAL: BLOCKED - Safety too low for early token');
+        return SignalGenerator.EVAL_RESULTS.DISCOVERY_FAILED;
+      }
+
+      // 2. Lower bundle risk required (35 max vs normal 45)
+      const EARLY_QUALITY_MAX_BUNDLE_RISK = 35;
+      if (bundleAnalysis.riskScore > EARLY_QUALITY_MAX_BUNDLE_RISK) {
+        logger.info({
+          tokenAddress: shortAddr,
+          ticker: metrics.ticker,
+          bundleRiskScore: bundleAnalysis.riskScore,
+          maxAllowed: EARLY_QUALITY_MAX_BUNDLE_RISK,
+          track: 'EARLY_QUALITY',
+        }, 'EVAL: BLOCKED - Bundle risk too high for early token');
+        return SignalGenerator.EVAL_RESULTS.BUNDLE_BLOCKED;
+      }
+
+      // 3. Higher liquidity required ($20K+ vs normal $12K)
+      const EARLY_QUALITY_MIN_LIQUIDITY = 20000;
+      if (metrics.liquidityPool < EARLY_QUALITY_MIN_LIQUIDITY) {
+        logger.info({
+          tokenAddress: shortAddr,
+          ticker: metrics.ticker,
+          liquidity: metrics.liquidityPool,
+          minRequired: EARLY_QUALITY_MIN_LIQUIDITY,
+          track: 'EARLY_QUALITY',
+        }, 'EVAL: BLOCKED - Liquidity too low for early token');
+        return SignalGenerator.EVAL_RESULTS.DISCOVERY_FAILED;
+      }
+
+      // 4. Higher holder growth for early tokens (momentum signal)
+      const EARLY_QUALITY_MIN_HOLDER_GROWTH = 0.3; // 0.3 new holders/minute
+      if (holderGrowthRate < EARLY_QUALITY_MIN_HOLDER_GROWTH) {
+        logger.info({
+          tokenAddress: shortAddr,
+          ticker: metrics.ticker,
+          holderGrowthRate,
+          minRequired: EARLY_QUALITY_MIN_HOLDER_GROWTH,
+          track: 'EARLY_QUALITY',
+        }, 'EVAL: BLOCKED - Holder growth too low for early token');
+        return SignalGenerator.EVAL_RESULTS.DISCOVERY_FAILED;
+      }
+
       logger.info({
         tokenAddress: shortAddr,
         ticker: metrics.ticker,
-        holderGrowthRate,
-        minRequired: MIN_HOLDER_GROWTH_RATE,
-        strategy: 'PROVEN_RUNNER',
-        learningMode: isLearningMode,
-      }, 'EVAL: BLOCKED - Holder growth too low (need active buying)');
-      return SignalGenerator.EVAL_RESULTS.DISCOVERY_FAILED;
+        safetyScore: safetyResult.safetyScore,
+        bundleRisk: bundleAnalysis.riskScore,
+        liquidity: metrics.liquidityPool,
+        holderGrowth: holderGrowthRate,
+        kolTier: kolReputationTier,
+        track: 'EARLY_QUALITY',
+      }, 'EVAL: PASSED Early Quality stricter requirements');
     }
 
     // Step 5: Calculate position size using small capital manager
@@ -739,27 +882,31 @@ export class SignalGenerator {
       patterns: prediction.matchedWinPatterns,
     }, 'Win prediction calculated');
 
-    // Filter signals by ML win probability - PROVEN RUNNER STRATEGY
-    // Target: 30-50 high-quality signals/day at 70%+ win confidence
+    // Filter signals by ML win probability - TRACK-SPECIFIC THRESHOLDS
     //
-    // OLD THRESHOLDS:
-    //   Learning: 15%, Production: 25%
-    //   Result: 800+ signals/day at 30% win rate
+    // PROVEN RUNNER: Higher ML threshold (time proves quality, ML confirms)
+    //   Learning: 50%, Production: 70%
     //
-    // NEW THRESHOLDS (Proven Runner):
-    //   Learning: 50% (still collect data, but filter obvious noise)
-    //   Production: 70% (only signal when highly confident)
+    // EARLY QUALITY: Lower ML threshold (KOL provides trust, ML supports)
+    //   Learning: 35%, Production: 50%
+    //   Rationale: S/A-tier KOL validation provides external trust signal,
+    //   so we can accept lower ML confidence
     //
-    // IMPORTANT: Both modes now require meaningful ML confidence.
-    // We want quality signals NOW while still collecting learning data.
-    const mlProbabilityThreshold = isLearningMode ? 50 : 70;
+    let mlProbabilityThreshold: number;
+    let confidenceOk: boolean;
 
-    // HIGH confidence required in BOTH modes for proven runner strategy
-    // Learning mode: allow MEDIUM or HIGH
-    // Production mode: require HIGH only
-    const confidenceOk = isLearningMode
-      ? (prediction.confidence === 'HIGH' || prediction.confidence === 'MEDIUM')
-      : prediction.confidence === 'HIGH';
+    if (signalTrack === SignalTrack.PROVEN_RUNNER) {
+      mlProbabilityThreshold = isLearningMode ? 50 : 70;
+      confidenceOk = isLearningMode
+        ? (prediction.confidence === 'HIGH' || prediction.confidence === 'MEDIUM')
+        : prediction.confidence === 'HIGH';
+    } else {
+      // EARLY_QUALITY: Lower thresholds since KOL provides trust
+      mlProbabilityThreshold = isLearningMode ? 35 : 50;
+      confidenceOk = prediction.confidence === 'HIGH' ||
+                     prediction.confidence === 'MEDIUM' ||
+                     (isLearningMode && prediction.confidence === 'LOW');
+    }
 
     if (prediction.winProbability < mlProbabilityThreshold) {
       logger.info({
@@ -769,8 +916,8 @@ export class SignalGenerator {
         threshold: mlProbabilityThreshold,
         confidence: prediction.confidence,
         learningMode: isLearningMode,
+        track: signalTrack,
         reason: 'Win probability below threshold',
-        strategy: 'PROVEN_RUNNER',
       }, 'Signal filtered by ML predictor - probability too low');
       return SignalGenerator.EVAL_RESULTS.DISCOVERY_FAILED;
     }
@@ -782,10 +929,8 @@ export class SignalGenerator {
         winProbability: prediction.winProbability,
         confidence: prediction.confidence,
         learningMode: isLearningMode,
-        reason: isLearningMode
-          ? 'Confidence too low (learning mode requires MEDIUM or HIGH)'
-          : 'Confidence not HIGH (production mode requires HIGH)',
-        strategy: 'PROVEN_RUNNER',
+        track: signalTrack,
+        reason: 'Confidence too low for track requirements',
       }, 'Signal filtered by ML predictor - confidence too low');
       return SignalGenerator.EVAL_RESULTS.DISCOVERY_FAILED;
     }
@@ -829,7 +974,9 @@ export class SignalGenerator {
       socialMetrics,
       dexScreenerInfo,
       ctoAnalysis,
-      prediction
+      prediction,
+      signalTrack!,      // Track type (PROVEN_RUNNER or EARLY_QUALITY)
+      kolReputationTier  // KOL tier (for EARLY_QUALITY track)
     );
 
     // Track for KOL follow-up (optional validation)
@@ -860,6 +1007,8 @@ export class SignalGenerator {
           top10Concentration: metrics.top10Concentration,
           buySellRatio: momentumData?.buySellRatio || 0,
           uniqueBuyers: momentumData?.uniqueBuyers5m || 0,
+          signalTrack: signalTrack,  // DUAL-TRACK: For split performance tracking
+          kolReputation: kolReputationTier,  // DUAL-TRACK: KOL tier for EARLY_QUALITY
         }
       );
     } catch (error) {
@@ -899,7 +1048,9 @@ export class SignalGenerator {
     socialMetrics: SocialMetrics,
     dexScreenerInfo?: DexScreenerTokenInfo,
     ctoAnalysis?: CTOAnalysis,
-    prediction?: WinPrediction
+    prediction?: WinPrediction,
+    signalTrack: SignalTrack = SignalTrack.PROVEN_RUNNER,
+    kolReputation?: KolReputationTier
   ): DiscoverySignal {
     // Build risk warnings
     const riskWarnings: string[] = [];
@@ -990,6 +1141,10 @@ export class SignalGenerator {
 
       generatedAt: new Date(),
       signalType: SignalType.DISCOVERY,
+
+      // Dual-track strategy fields
+      signalTrack,
+      kolReputation,
 
       discoveredAt: new Date(),
       kolValidatedAt: null,

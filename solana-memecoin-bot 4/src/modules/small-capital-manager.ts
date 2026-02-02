@@ -195,9 +195,17 @@ export class SmallCapitalManager {
 
   /**
    * Determine signal quality classification
-   * Thresholds lowered based on performance data analysis:
-   * - Previous thresholds resulted in 100% WEAK signals
-   * - Need balanced distribution for proper position sizing
+   *
+   * UPDATED: Uses weighted scoring instead of strict AND gates
+   * Previous logic required ALL thresholds to pass, causing 100% WEAK signals.
+   *
+   * New approach: Weighted average based on performance correlations:
+   * - Safety: 35% weight (critical for avoiding rugs)
+   * - Bundle Safety: 35% weight (insider detection)
+   * - Momentum: 30% weight (less predictive than expected per data)
+   *
+   * This allows a token with excellent safety but low momentum to still
+   * be MODERATE/STRONG instead of always being marked WEAK.
    */
   classifySignal(
     momentumScore: MomentumScore,
@@ -209,25 +217,35 @@ export class SmallCapitalManager {
     // Calculate bundle safety (inverted - higher = safer)
     const bundleSafety = 100 - bundleAnalysis.riskScore;
 
-    // Calculate average score for more balanced classification
-    const avgScore = (momentumScore.total + safetyScore + bundleSafety) / 3;
+    // WEIGHTED APPROACH: Use weights aligned with actual performance correlations
+    // Safety is most important for avoiding rugs, momentum less predictive
+    const weightedScore =
+      momentumScore.total * 0.30 +   // 30% weight (reduced from equal weighting)
+      safetyScore * 0.35 +            // 35% weight (safety matters most)
+      bundleSafety * 0.35;            // 35% weight (insider detection crucial)
 
-    // Determine signal strength with lowered thresholds
-    // Using average score with individual minimums for safety
+    // Determine signal strength using weighted score
+    // Removed strict AND gates that were causing 100% WEAK classification
     let signalStrength: 'STRONG' | 'MODERATE' | 'WEAK';
 
-    if (avgScore >= 60 && momentumScore.total >= 50 && safetyScore >= 45 && bundleSafety >= 45) {
-      // STRONG: Good average with acceptable minimums across all factors
+    if (weightedScore >= 55) {
+      // STRONG: High weighted score indicates overall quality
       signalStrength = 'STRONG';
-    } else if (avgScore >= 45 && momentumScore.total >= 35 && safetyScore >= 35 && bundleSafety >= 30) {
-      // MODERATE: Decent average with basic minimums
+    } else if (weightedScore >= 40) {
+      // MODERATE: Decent weighted score
       signalStrength = 'MODERATE';
     } else {
       signalStrength = 'WEAK';
     }
 
+    // Critical safety floor: If safety is critically low, cap at MODERATE max
+    // This prevents high-momentum scam tokens from being marked STRONG
+    if (safetyScore < 30 && signalStrength === 'STRONG') {
+      signalStrength = 'MODERATE';
+    }
+
     // KOL validation can upgrade signal strength
-    if (kolValidated && signalStrength === 'WEAK' && avgScore >= 35) {
+    if (kolValidated && signalStrength === 'WEAK' && weightedScore >= 30) {
       signalStrength = 'MODERATE';
     }
     if (multiKol && signalStrength === 'MODERATE') {

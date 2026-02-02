@@ -6,11 +6,25 @@
 import { logger } from '../../utils/logger.js';
 import { pool, Database } from '../../utils/database.js';
 import type { KolPerformanceStats, Kol } from '../../types/index.js';
+import { KolReputationTier } from '../../types/index.js';
 
 // ============ CONSTANTS ============
 
 const WIN_THRESHOLD_ROI = 100; // 2x = win (100% ROI)
 const RECALCULATION_INTERVAL_MS = 60 * 60 * 1000; // 1 hour
+
+// Tier thresholds - SINGLE SOURCE OF TRUTH for KOL reputation
+// Research shows 76% of KOL-promoted tokens fail, and most "top KOLs"
+// have 5-15 second hold times (front-running). We require:
+// 1. Proven win rate over minimum trades
+// 2. Minimum average hold time to filter front-runners
+const TIER_THRESHOLDS = {
+  S_TIER_WIN_RATE: 0.50,    // 50%+ win rate (note: winRate is 0-1 in stats)
+  A_TIER_WIN_RATE: 0.40,    // 40%+ win rate
+  B_TIER_WIN_RATE: 0.30,    // 30%+ win rate
+  MIN_TRADES: 10,           // Minimum trades to be considered (was 30, lowered for faster learning)
+  MIN_HOLD_TIME_HOURS: 1,   // Minimum 1 hour avg hold time (filters front-runners)
+};
 
 // ============ KOL ANALYTICS CLASS ============
 
@@ -331,6 +345,157 @@ export class KolAnalytics {
 
     logger.info({ kolCount: kols.length }, 'KOL stats recalculation complete');
   }
+
+  // ============ TIER DETERMINATION (Consolidated from kol-reputation.ts) ============
+
+  /**
+   * Determine tier for a KOL based on stats
+   * Requires BOTH win rate AND hold time thresholds to filter front-runners
+   */
+  getTier(stats: KolPerformanceStats): KolReputationTier {
+    // Not enough data
+    if (stats.totalTrades < TIER_THRESHOLDS.MIN_TRADES) {
+      return KolReputationTier.UNPROVEN;
+    }
+
+    // Front-runner check: high win rate but very short hold times
+    if (stats.avgHoldTimeHours < TIER_THRESHOLDS.MIN_HOLD_TIME_HOURS) {
+      logger.debug({
+        kolHandle: stats.kolHandle,
+        avgHoldTimeHours: stats.avgHoldTimeHours,
+        minRequired: TIER_THRESHOLDS.MIN_HOLD_TIME_HOURS,
+        winRate: stats.winRate,
+      }, 'KOL has insufficient hold time - possible front-runner');
+      return KolReputationTier.UNPROVEN;
+    }
+
+    // Tier assignment based on win rate
+    if (stats.winRate >= TIER_THRESHOLDS.S_TIER_WIN_RATE) {
+      return KolReputationTier.S_TIER;
+    } else if (stats.winRate >= TIER_THRESHOLDS.A_TIER_WIN_RATE) {
+      return KolReputationTier.A_TIER;
+    } else if (stats.winRate >= TIER_THRESHOLDS.B_TIER_WIN_RATE) {
+      return KolReputationTier.B_TIER;
+    }
+
+    return KolReputationTier.UNPROVEN;
+  }
+
+  /**
+   * Check if a KOL is S-tier or A-tier (trusted for Early Quality track)
+   * This is the SINGLE method to call for KOL trust verification
+   */
+  async isHighTierKol(kolId: string): Promise<{
+    isTrusted: boolean;
+    tier: KolReputationTier;
+    stats: KolPerformanceStats | null;
+  }> {
+    const stats = await this.getKolStats(kolId);
+
+    if (!stats) {
+      return {
+        isTrusted: false,
+        tier: KolReputationTier.UNPROVEN,
+        stats: null,
+      };
+    }
+
+    const tier = this.getTier(stats);
+    const isTrusted = tier === KolReputationTier.S_TIER || tier === KolReputationTier.A_TIER;
+
+    return { isTrusted, tier, stats };
+  }
+
+  /**
+   * Check if a KOL is trusted by handle (convenience method)
+   * Looks up KOL by handle, then checks tier
+   */
+  async isHighTierKolByHandle(handle: string): Promise<{
+    isTrusted: boolean;
+    tier: KolReputationTier;
+    stats: KolPerformanceStats | null;
+  }> {
+    try {
+      // Look up KOL by handle
+      const kolResult = await pool.query(
+        `SELECT id FROM kols WHERE LOWER(handle) = $1`,
+        [handle.toLowerCase().replace(/^@/, '')]
+      );
+
+      if (kolResult.rows.length === 0) {
+        return {
+          isTrusted: false,
+          tier: KolReputationTier.UNPROVEN,
+          stats: null,
+        };
+      }
+
+      return await this.isHighTierKol(kolResult.rows[0].id);
+    } catch (error) {
+      logger.warn({ error, handle }, 'Failed to check KOL tier by handle');
+      return {
+        isTrusted: false,
+        tier: KolReputationTier.UNPROVEN,
+        stats: null,
+      };
+    }
+  }
+
+  /**
+   * Get all KOLs of a specific tier
+   */
+  async getKolsByTier(tier: KolReputationTier): Promise<KolPerformanceStats[]> {
+    const kols = await Database.getAllKols();
+    const results: KolPerformanceStats[] = [];
+
+    for (const kol of kols) {
+      const stats = await this.getKolStats(kol.id);
+      if (stats && this.getTier(stats) === tier) {
+        results.push(stats);
+      }
+    }
+
+    return results;
+  }
+
+  /**
+   * Get system status for Early Quality track availability
+   */
+  async getEarlyQualityStatus(): Promise<{
+    available: boolean;
+    sTierCount: number;
+    aTierCount: number;
+    totalTracked: number;
+  }> {
+    const kols = await Database.getAllKols();
+    let sTierCount = 0;
+    let aTierCount = 0;
+
+    for (const kol of kols) {
+      const stats = await this.getKolStats(kol.id);
+      if (stats) {
+        const tier = this.getTier(stats);
+        if (tier === KolReputationTier.S_TIER) sTierCount++;
+        else if (tier === KolReputationTier.A_TIER) aTierCount++;
+      }
+    }
+
+    const available = (sTierCount + aTierCount) > 0;
+
+    if (!available) {
+      logger.warn({
+        reason: `No KOLs meet requirements (${TIER_THRESHOLDS.MIN_TRADES}+ trades, ${TIER_THRESHOLDS.A_TIER_WIN_RATE * 100}%+ win rate, ${TIER_THRESHOLDS.MIN_HOLD_TIME_HOURS}h+ avg hold)`,
+        impact: 'EARLY_QUALITY track disabled - only PROVEN_RUNNER track will generate signals',
+      }, 'EARLY_QUALITY track unavailable - cold start mode');
+    }
+
+    return {
+      available,
+      sTierCount,
+      aTierCount,
+      totalTracked: kols.length,
+    };
+  }
 }
 
 // ============ EXPORTS ============
@@ -341,4 +506,5 @@ export default {
   KolAnalytics,
   kolAnalytics,
   WIN_THRESHOLD_ROI,
+  TIER_THRESHOLDS,
 };

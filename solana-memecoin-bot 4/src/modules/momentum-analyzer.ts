@@ -197,20 +197,30 @@ export class MomentumAnalyzer {
   /**
    * Quick check if token has minimum momentum for consideration
    * Used for fast filtering before full analysis
-   * Thresholds lowered to catch very early tokens
+   *
+   * HIT RATE IMPROVEMENT: Raised thresholds to filter out 50%+ of low-quality signals
+   * The old thresholds (1 buy, $100 volume, 0.5 ratio) let through too much noise
+   * New thresholds balance early detection with signal quality
    */
   async hasMinimumMomentum(tokenAddress: string): Promise<boolean> {
     const metrics = await this.analyze(tokenAddress);
     if (!metrics) return false;
 
-    // Must have basic buying activity - lowered from 3 to 1
-    if (metrics.buyCount5m < 1) return false;
+    // Must have real buying activity, not just 1 bot trade
+    // 3 buys in 5m = 36 buys/hour = genuine interest
+    if (metrics.buyCount5m < 3) return false;
 
-    // Must have some volume - lowered from 500 to 100
-    if (metrics.volume5m < 100) return false;
+    // Must have meaningful volume, not just dust trades
+    // $300 in 5m = $3600/hour = active trading
+    if (metrics.volume5m < 300) return false;
 
-    // Must have positive or neutral buy/sell ratio - lowered from 0.8 to 0.5
-    if (metrics.buySellRatio < 0.5) return false;
+    // Must have net buying pressure (more buys than sells)
+    // 1.0 = equal buys/sells, 1.2 = 20% more buys
+    if (metrics.buySellRatio < 1.0) return false;
+
+    // NEW: Must have multiple unique buyers (not wash trading)
+    // At least 3 unique buyers shows organic interest
+    if (metrics.uniqueBuyers5m < 3) return false;
 
     return true;
   }

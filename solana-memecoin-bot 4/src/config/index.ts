@@ -24,6 +24,8 @@ const envSchema = z.object({
   TWITTER_BEARER_TOKEN: z.string().optional(),
   TWITTER_CONSUMER_KEY: z.string().optional(),
   TWITTER_CONSUMER_SECRET: z.string().optional(),
+  // Set to false to disable Twitter API entirely (saves credits, uses DexScreener social data only)
+  TWITTER_ENABLED: z.coerce.boolean().default(false),
 
   // Telegram
   TELEGRAM_BOT_TOKEN: z.string().min(1),
@@ -80,6 +82,7 @@ function loadConfig(): AppConfig {
     twitterBearerToken: env.TWITTER_BEARER_TOKEN || '',
     twitterConsumerKey: env.TWITTER_CONSUMER_KEY || '',
     twitterConsumerSecret: env.TWITTER_CONSUMER_SECRET || '',
+    twitterEnabled: env.TWITTER_ENABLED,
     telegramBotToken: env.TELEGRAM_BOT_TOKEN,
     telegramChatId: env.TELEGRAM_CHAT_ID,
     nodeEnv: env.NODE_ENV,

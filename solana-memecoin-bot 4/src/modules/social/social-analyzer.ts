@@ -7,6 +7,7 @@
 import { logger } from '../../utils/logger.js';
 import { twitterClient, Tweet, TwitterUser, SearchResult } from './twitter-client.js';
 import { SocialMetrics, KolMention } from '../../types/index.js';
+import { appConfig } from '../../config/index.js';
 
 // ============ TYPES ============
 
@@ -187,6 +188,12 @@ export class SocialAnalyzer {
     tokenName?: string
   ): Promise<DetailedSocialMetrics | null> {
     // Check cache
+    // Check if Twitter API is disabled (saves API credits)
+    if (!appConfig.twitterEnabled) {
+      logger.debug({ ticker }, 'Twitter API disabled - returning empty social metrics');
+      return this.buildEmptyMetrics(ticker);
+    }
+
     const cacheKey = `${tokenAddress}:${ticker}`;
     const cached = this.metricsCache.get(cacheKey);
     if (cached && Date.now() - cached.timestamp < this.CACHE_TTL_MS) {
@@ -194,31 +201,33 @@ export class SocialAnalyzer {
     }
 
     try {
-      // Fetch tweets for different time windows in parallel
-      const [tweets1h, tweets24h] = await Promise.all([
-        twitterClient.searchTokenMentions(ticker, tokenName, tokenAddress, {
-          maxResults: 100,
-          hoursBack: 1,
-        }),
-        twitterClient.searchTokenMentions(ticker, tokenName, tokenAddress, {
-          maxResults: 100,
-          hoursBack: 24,
-        }),
-      ]);
+      // OPTIMIZATION: Use SINGLE 24h search instead of separate 1h + 24h searches
+      // This cuts Twitter API usage in HALF (was 2 calls per token, now 1)
+      // We filter the 24h results to get 1h data locally
+      const tweets24hResult = await twitterClient.searchTokenMentions(ticker, tokenName, tokenAddress, {
+        maxResults: 100,
+        hoursBack: 24,
+      });
 
-      if (!tweets24h || tweets24h.tweets.length === 0) {
+      if (!tweets24hResult || tweets24hResult.tweets.length === 0) {
         // No social presence - return empty metrics
         return this.buildEmptyMetrics(ticker);
       }
 
+      const tweets24h = tweets24hResult.tweets;
+
+      // Filter for tweets from last 1 hour (locally, no API call)
+      const oneHourAgo = Date.now() - 60 * 60 * 1000;
+      const tweets1h = tweets24h.filter(t => t.createdAt.getTime() >= oneHourAgo);
+
       // Get unique author IDs for user analysis
-      const authorIds = [...new Set(tweets24h.tweets.map(t => t.authorId))];
+      const authorIds = [...new Set(tweets24h.map(t => t.authorId))];
       const users = await twitterClient.getUsersByIds(authorIds.slice(0, 100));
 
       // Calculate all metrics
       const metrics = await this.calculateMetrics(
-        tweets1h?.tweets || [],
-        tweets24h.tweets,
+        tweets1h,
+        tweets24h,
         users,
         ticker
       );

@@ -53,6 +53,28 @@ interface ThresholdAdjustmentState {
   awaitingValue: boolean;
 }
 
+// Signal snapshot for tracking metrics between signals
+interface SignalSnapshot {
+  timestamp: number;
+  ticker: string;
+  price: number;
+  marketCap: number;
+  volume24h: number;
+  holderCount: number;
+  compositeScore: number;
+  socialMomentum: number;
+  mentionVelocity: number;
+  kolHandle: string;
+  kolCount: number;
+}
+
+// Follow-up signal context
+interface FollowUpContext {
+  isFollowUp: boolean;
+  timeSinceFirst: number; // minutes
+  changes: string[];
+}
+
 export class TelegramAlertBot {
   private bot: TelegramBot | null = null;
   private app: Express | null = null;
@@ -62,6 +84,12 @@ export class TelegramAlertBot {
   private lastKolSignalTime: Map<string, number> = new Map();
   private startTime: Date | null = null;
   private isWebhookMode: boolean = false;
+
+  // Signal tracking for follow-up context - stores metrics snapshot for comparison
+  // When a token signals again, we can show what changed (momentum building, holder surge, etc.)
+  private signalHistory: Map<string, SignalSnapshot> = new Map();
+  private readonly SIGNAL_HISTORY_TTL_MS = 4 * 60 * 60 * 1000; // 4 hours - track follow-ups within this window
+  private readonly MIN_FOLLOWUP_INTERVAL_MS = 10 * 60 * 1000; // 10 min minimum between follow-ups
 
   // State tracking for conversational threshold adjustment
   private thresholdAdjustmentState: Map<number, ThresholdAdjustmentState> = new Map();
@@ -1135,25 +1163,28 @@ export class TelegramAlertBot {
       logger.warn('Bot not initialized - cannot send signal');
       return false;
     }
-    
+
     // Check rate limits
     const rateLimitResult = await this.checkRateLimits(signal);
     if (!rateLimitResult.allowed) {
-      logger.info({ reason: rateLimitResult.reason, tokenAddress: signal.tokenAddress }, 
+      logger.info({ reason: rateLimitResult.reason, tokenAddress: signal.tokenAddress },
         'Signal blocked by rate limit');
       this.signalQueue.push(signal);
       return false;
     }
-    
+
+    // Analyze follow-up context BEFORE recording (so we compare to previous state)
+    const followUpContext = this.analyzeFollowUpContext(signal);
+
     try {
-      const message = this.formatBuySignal(signal);
+      const message = this.formatBuySignal(signal, followUpContext);
 
       await this.bot.sendMessage(this.chatId, message, {
         parse_mode: 'Markdown',
         disable_web_page_preview: true,
         reply_markup: createTelegramInlineKeyboard(signal.tokenAddress),
       });
-      
+
       // Log the signal
       await Database.logSignal(
         signal.tokenAddress,
@@ -1161,28 +1192,33 @@ export class TelegramAlertBot {
         signal.score.compositeScore,
         signal.kolActivity.kol.handle
       );
-      
+
       // Update KOL cooldown
       this.lastKolSignalTime.set(signal.kolActivity.kol.handle, Date.now());
-      
+
+      // Record signal in history for follow-up tracking
+      this.recordSignalHistory(signal);
+
       logger.info({
         tokenAddress: signal.tokenAddress,
         ticker: signal.tokenTicker,
         score: signal.score.compositeScore,
         kol: signal.kolActivity.kol.handle,
-      }, 'Buy signal sent');
-      
+        isFollowUp: followUpContext.isFollowUp,
+        changes: followUpContext.changes,
+      }, followUpContext.isFollowUp ? 'Follow-up signal sent' : 'Buy signal sent');
+
       return true;
     } catch (error) {
       logger.error({ error, signal: signal.tokenAddress }, 'Failed to send Telegram alert');
       return false;
     }
   }
-  
+
   /**
    * Format buy signal message
    */
-  private formatBuySignal(signal: BuySignal): string {
+  private formatBuySignal(signal: BuySignal, followUpContext?: FollowUpContext): string {
     const { kolActivity, score, tokenMetrics, socialMetrics, scamFilter, dexScreenerInfo, ctoAnalysis } = signal;
     const wallet = kolActivity.wallet;
     const tx = kolActivity.transaction;
@@ -1191,9 +1227,24 @@ export class TelegramAlertBot {
     // Build the message with clear visual hierarchy
     let msg = `\n`;
     msg += `═══════════════════════════════\n`;
-    msg += `🎯  *KOL CONFIRMED BUY SIGNAL*\n`;
-    msg += `    Score: *${score.compositeScore}/100* · ${score.confidence}\n`;
-    msg += `═══════════════════════════════\n\n`;
+
+    // Different header for follow-up signals
+    if (followUpContext?.isFollowUp) {
+      msg += `🔄  *FOLLOW-UP SIGNAL*\n`;
+      msg += `    Score: *${score.compositeScore}/100* · ${score.confidence}\n`;
+      msg += `═══════════════════════════════\n\n`;
+
+      // Show what changed since first signal
+      msg += `⚡ *WHAT CHANGED* (${followUpContext.timeSinceFirst}min)\n`;
+      for (const change of followUpContext.changes) {
+        msg += `├─ ${change}\n`;
+      }
+      msg += `\n`;
+    } else {
+      msg += `🎯  *KOL CONFIRMED BUY SIGNAL*\n`;
+      msg += `    Score: *${score.compositeScore}/100* · ${score.confidence}\n`;
+      msg += `═══════════════════════════════\n\n`;
+    }
 
     // Token info
     msg += `*Token:* \`$${signal.tokenTicker}\` (${this.truncateAddress(signal.tokenAddress)})\n`;
@@ -1518,15 +1569,39 @@ export class TelegramAlertBot {
 
   /**
    * Check rate limits before sending
-   * LEARNING MODE: Bypasses all rate limits to maximize data collection
+   * LEARNING MODE: Allows follow-up signals with 10 min minimum interval
+   * Follow-ups are now valuable - they show momentum building
    */
   private async checkRateLimits(signal: BuySignal): Promise<{ allowed: boolean; reason?: string }> {
-    // LEARNING MODE: Bypass all rate limits to collect more training data
+    // Clean up old entries from signal history
+    this.cleanupSignalHistory();
+
+    // Check minimum interval between signals for the same token (prevents spam)
+    const previousSnapshot = this.signalHistory.get(signal.tokenAddress);
+    if (previousSnapshot) {
+      const timeSince = Date.now() - previousSnapshot.timestamp;
+
+      // Always enforce minimum 10 min between follow-ups to prevent spam
+      if (timeSince < this.MIN_FOLLOWUP_INTERVAL_MS) {
+        logger.debug({
+          tokenAddress: signal.tokenAddress,
+          timeSinceMs: timeSince,
+          minIntervalMs: this.MIN_FOLLOWUP_INTERVAL_MS,
+        }, 'Follow-up too soon - minimum 10 min between signals');
+        return { allowed: false, reason: 'Follow-up too soon (10 min minimum)' };
+      }
+    }
+
+    // LEARNING MODE: Allow more signals, follow-ups provide valuable data
     if (appConfig.trading.learningMode) {
-      logger.debug({ tokenAddress: signal.tokenAddress }, 'Learning mode: bypassing rate limits');
+      logger.debug({
+        tokenAddress: signal.tokenAddress,
+        isFollowUp: !!previousSnapshot,
+      }, 'Learning mode: signal allowed');
       return { allowed: true };
     }
 
+    // PRODUCTION MODE: Full rate limiting
     // Check hourly limit
     const hourlyCount = await Database.getRecentSignalCount(1);
     if (hourlyCount >= RATE_LIMITS.MAX_SIGNALS_PER_HOUR) {
@@ -1539,12 +1614,14 @@ export class TelegramAlertBot {
       return { allowed: false, reason: 'Daily signal limit reached' };
     }
 
-    // Check token cooldown
-    const lastTokenSignal = await Database.getLastSignalTime(signal.tokenAddress);
-    if (lastTokenSignal) {
-      const timeSince = Date.now() - lastTokenSignal.getTime();
-      if (timeSince < RATE_LIMITS.TOKEN_COOLDOWN_MS) {
-        return { allowed: false, reason: 'Token cooldown active' };
+    // Check token cooldown from database (for follow-ups after bot restart)
+    if (!previousSnapshot) {
+      const lastTokenSignal = await Database.getLastSignalTime(signal.tokenAddress);
+      if (lastTokenSignal) {
+        const timeSince = Date.now() - lastTokenSignal.getTime();
+        if (timeSince < RATE_LIMITS.TOKEN_COOLDOWN_MS) {
+          return { allowed: false, reason: 'Token cooldown active' };
+        }
       }
     }
 
@@ -1559,7 +1636,196 @@ export class TelegramAlertBot {
 
     return { allowed: true };
   }
-  
+
+  /**
+   * Clean up old entries from signal history cache
+   */
+  private cleanupSignalHistory(): void {
+    const now = Date.now();
+    for (const [address, snapshot] of this.signalHistory) {
+      if (now - snapshot.timestamp > this.SIGNAL_HISTORY_TTL_MS) {
+        this.signalHistory.delete(address);
+      }
+    }
+  }
+
+  /**
+   * Create a snapshot of signal metrics for comparison
+   */
+  private createSignalSnapshot(signal: BuySignal): SignalSnapshot {
+    return {
+      timestamp: Date.now(),
+      ticker: signal.tokenTicker,
+      price: signal.tokenMetrics.price,
+      marketCap: signal.tokenMetrics.marketCap,
+      volume24h: signal.tokenMetrics.volume24h,
+      holderCount: signal.tokenMetrics.holderCount,
+      compositeScore: signal.score.compositeScore,
+      socialMomentum: signal.score.factors.socialMomentum,
+      mentionVelocity: signal.socialMetrics.mentionVelocity1h,
+      kolHandle: signal.kolActivity.kol.handle,
+      kolCount: 1,
+    };
+  }
+
+  /**
+   * Analyze if this is a follow-up signal and what changed
+   */
+  private analyzeFollowUpContext(signal: BuySignal): FollowUpContext {
+    const previous = this.signalHistory.get(signal.tokenAddress);
+
+    if (!previous) {
+      return { isFollowUp: false, timeSinceFirst: 0, changes: [] };
+    }
+
+    const timeSinceFirst = Math.round((Date.now() - previous.timestamp) / 60000); // minutes
+    const changes: string[] = [];
+    const current = this.createSignalSnapshot(signal);
+
+    // Score change
+    const scoreDelta = current.compositeScore - previous.compositeScore;
+    if (scoreDelta >= 5) {
+      changes.push(`📈 Momentum building (+${scoreDelta.toFixed(0)} score)`);
+    } else if (scoreDelta <= -5) {
+      changes.push(`📉 Score dropped (${scoreDelta.toFixed(0)})`);
+    }
+
+    // Holder surge
+    const holderDelta = current.holderCount - previous.holderCount;
+    const holderPctChange = previous.holderCount > 0 ? (holderDelta / previous.holderCount) * 100 : 0;
+    if (holderDelta >= 20 || holderPctChange >= 15) {
+      changes.push(`👥 Holder surge (+${holderDelta} holders)`);
+    }
+
+    // Volume spike
+    const volumeDelta = current.volume24h - previous.volume24h;
+    const volumePctChange = previous.volume24h > 0 ? (volumeDelta / previous.volume24h) * 100 : 0;
+    if (volumePctChange >= 30) {
+      const volumeK = (volumeDelta / 1000).toFixed(1);
+      changes.push(`💰 Volume spike (+$${volumeK}k)`);
+    }
+
+    // Social velocity
+    const velocityRatio = previous.mentionVelocity > 0
+      ? current.mentionVelocity / previous.mentionVelocity
+      : current.mentionVelocity > 0 ? 999 : 1;
+    if (velocityRatio >= 1.5) {
+      changes.push(`🔊 Social velocity up ${velocityRatio.toFixed(1)}x`);
+    }
+
+    // Market cap change
+    const mcDelta = current.marketCap - previous.marketCap;
+    const mcPctChange = previous.marketCap > 0 ? (mcDelta / previous.marketCap) * 100 : 0;
+    if (mcPctChange >= 20) {
+      changes.push(`🚀 MC up +${mcPctChange.toFixed(0)}%`);
+    } else if (mcPctChange <= -20) {
+      changes.push(`⚠️ MC down ${mcPctChange.toFixed(0)}%`);
+    }
+
+    // New KOL bought in
+    if (current.kolHandle !== previous.kolHandle) {
+      changes.push(`🐋 New KOL: @${current.kolHandle}`);
+    }
+
+    // If no significant changes detected, note the re-signal
+    if (changes.length === 0) {
+      changes.push(`🔄 Re-triggered after ${timeSinceFirst}min`);
+    }
+
+    return {
+      isFollowUp: true,
+      timeSinceFirst,
+      changes,
+    };
+  }
+
+  /**
+   * Record signal in history for follow-up tracking
+   */
+  private recordSignalHistory(signal: BuySignal): void {
+    const existing = this.signalHistory.get(signal.tokenAddress);
+    const snapshot = this.createSignalSnapshot(signal);
+
+    if (existing) {
+      // Keep original timestamp, update metrics, increment KOL count
+      snapshot.timestamp = existing.timestamp;
+      snapshot.kolCount = existing.kolCount + (signal.kolActivity.kol.handle !== existing.kolHandle ? 1 : 0);
+    }
+
+    this.signalHistory.set(signal.tokenAddress, snapshot);
+  }
+
+  /**
+   * Analyze follow-up context for on-chain signals
+   */
+  private analyzeOnChainFollowUp(signal: any, previous: SignalSnapshot | undefined): FollowUpContext {
+    if (!previous) {
+      return { isFollowUp: false, timeSinceFirst: 0, changes: [] };
+    }
+
+    const timeSinceFirst = Math.round((Date.now() - previous.timestamp) / 60000);
+    const changes: string[] = [];
+
+    // Score change
+    const currentScore = signal.onChainScore?.total || 0;
+    const scoreDelta = currentScore - previous.compositeScore;
+    if (scoreDelta >= 5) {
+      changes.push(`📈 Momentum building (+${scoreDelta.toFixed(0)} score)`);
+    }
+
+    // Holder surge
+    const currentHolders = signal.metrics?.holderCount || 0;
+    const holderDelta = currentHolders - previous.holderCount;
+    if (holderDelta >= 20 || (previous.holderCount > 0 && holderDelta / previous.holderCount >= 0.15)) {
+      changes.push(`👥 Holder surge (+${holderDelta} holders)`);
+    }
+
+    // Volume spike
+    const currentVolume = signal.metrics?.volume24h || 0;
+    const volumeDelta = currentVolume - previous.volume24h;
+    const volumePctChange = previous.volume24h > 0 ? (volumeDelta / previous.volume24h) * 100 : 0;
+    if (volumePctChange >= 30) {
+      changes.push(`💰 Volume spike (+${(volumeDelta / 1000).toFixed(1)}k)`);
+    }
+
+    // Market cap change
+    const currentMC = signal.metrics?.marketCap || 0;
+    const mcDelta = currentMC - previous.marketCap;
+    const mcPctChange = previous.marketCap > 0 ? (mcDelta / previous.marketCap) * 100 : 0;
+    if (mcPctChange >= 20) {
+      changes.push(`🚀 MC up +${mcPctChange.toFixed(0)}%`);
+    }
+
+    if (changes.length === 0) {
+      changes.push(`🔄 Re-triggered after ${timeSinceFirst}min`);
+    }
+
+    return { isFollowUp: true, timeSinceFirst, changes };
+  }
+
+  /**
+   * Record on-chain signal in history
+   */
+  private recordOnChainSignalHistory(signal: any): void {
+    const existing = this.signalHistory.get(signal.tokenAddress);
+
+    const snapshot: SignalSnapshot = {
+      timestamp: existing?.timestamp || Date.now(),
+      ticker: signal.tokenTicker || '',
+      price: signal.metrics?.price || 0,
+      marketCap: signal.metrics?.marketCap || 0,
+      volume24h: signal.metrics?.volume24h || 0,
+      holderCount: signal.metrics?.holderCount || 0,
+      compositeScore: signal.onChainScore?.total || 0,
+      socialMomentum: 0,
+      mentionVelocity: 0,
+      kolHandle: 'ONCHAIN',
+      kolCount: 0,
+    };
+
+    this.signalHistory.set(signal.tokenAddress, snapshot);
+  }
+
   /**
    * Send status update
    */
@@ -2068,8 +2334,27 @@ export class TelegramAlertBot {
       return false;
     }
 
+    // Clean up signal history
+    this.cleanupSignalHistory();
+
+    // Check minimum interval between signals for the same token
+    const previousSnapshot = this.signalHistory.get(signal.tokenAddress);
+    if (previousSnapshot) {
+      const timeSince = Date.now() - previousSnapshot.timestamp;
+      if (timeSince < this.MIN_FOLLOWUP_INTERVAL_MS) {
+        logger.debug({
+          tokenAddress: signal.tokenAddress,
+          timeSinceMs: timeSince,
+        }, 'On-chain follow-up too soon (10 min minimum)');
+        return false;
+      }
+    }
+
+    // Analyze follow-up context for on-chain signals
+    const followUpContext = this.analyzeOnChainFollowUp(signal, previousSnapshot);
+
     try {
-      const message = this.formatOnChainSignal(signal);
+      const message = this.formatOnChainSignal(signal, followUpContext);
 
       await this.bot.sendMessage(this.chatId, message, {
         parse_mode: 'Markdown',
@@ -2085,12 +2370,16 @@ export class TelegramAlertBot {
         'ONCHAIN_MOMENTUM'
       );
 
+      // Record in signal history for follow-up tracking
+      this.recordOnChainSignalHistory(signal);
+
       logger.info({
         tokenAddress: signal.tokenAddress,
         ticker: signal.tokenTicker,
         momentumScore: signal.momentumScore?.total,
         onChainScore: signal.onChainScore?.total,
-      }, 'On-chain momentum signal sent');
+        isFollowUp: followUpContext.isFollowUp,
+      }, followUpContext.isFollowUp ? 'On-chain follow-up signal sent' : 'On-chain momentum signal sent');
 
       return true;
     } catch (error) {
@@ -2168,7 +2457,7 @@ export class TelegramAlertBot {
   /**
    * Format on-chain momentum signal message
    */
-  private formatOnChainSignal(signal: any): string {
+  private formatOnChainSignal(signal: any, followUpContext?: FollowUpContext): string {
     // Safely extract properties with defaults
     const tokenMetrics = signal.tokenMetrics || {};
     const momentumScore = signal.momentumScore || { total: 0, metrics: {}, components: {} };
@@ -2206,9 +2495,24 @@ export class TelegramAlertBot {
     // Build the message with clear visual hierarchy
     let msg = `\n`;
     msg += `═══════════════════════════════\n`;
-    msg += `${scoreEmoji}  *ON-CHAIN MOMENTUM SIGNAL*\n`;
-    msg += `    ${recEmoji} ${recommendation} · Score: *${totalScore}/100*\n`;
-    msg += `═══════════════════════════════\n\n`;
+
+    // Different header for follow-up signals
+    if (followUpContext?.isFollowUp) {
+      msg += `🔄  *FOLLOW-UP: ON-CHAIN SIGNAL*\n`;
+      msg += `    ${recEmoji} ${recommendation} · Score: *${totalScore}/100*\n`;
+      msg += `═══════════════════════════════\n\n`;
+
+      // Show what changed
+      msg += `⚡ *WHAT CHANGED* (${followUpContext.timeSinceFirst}min)\n`;
+      for (const change of followUpContext.changes) {
+        msg += `├─ ${change}\n`;
+      }
+      msg += `\n`;
+    } else {
+      msg += `${scoreEmoji}  *ON-CHAIN MOMENTUM SIGNAL*\n`;
+      msg += `    ${recEmoji} ${recommendation} · Score: *${totalScore}/100*\n`;
+      msg += `═══════════════════════════════\n\n`;
+    }
 
     // Token header with key info
     msg += `*$${ticker}* — ${tokenName}\n`;

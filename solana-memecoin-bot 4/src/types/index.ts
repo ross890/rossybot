@@ -323,6 +323,7 @@ export interface AppConfig {
   twitterBearerToken: string;
   twitterConsumerKey: string;
   twitterConsumerSecret: string;
+  twitterEnabled: boolean;  // Set to false to disable Twitter API entirely
   telegramBotToken: string;
   telegramChatId: string;
   nodeEnv: string;

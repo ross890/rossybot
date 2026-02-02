@@ -39,8 +39,8 @@ const envSchema = z.object({
   // Trading (with defaults)
   MAX_MEMECOIN_PORTFOLIO_PERCENT: z.coerce.number().default(20),
   DEFAULT_POSITION_SIZE_PERCENT: z.coerce.number().default(2),
-  MAX_SIGNALS_PER_HOUR: z.coerce.number().default(5),
-  MAX_SIGNALS_PER_DAY: z.coerce.number().default(20),
+  MAX_SIGNALS_PER_HOUR: z.coerce.number().default(50),   // Increased from 5 for better data collection
+  MAX_SIGNALS_PER_DAY: z.coerce.number().default(200),   // Increased from 20 for learning phase
   MIN_SCORE_BUY_SIGNAL: z.coerce.number().default(70),
   MIN_SCORE_WATCH_SIGNAL: z.coerce.number().default(55),
 

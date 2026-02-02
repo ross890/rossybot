@@ -988,53 +988,54 @@ export class TelegramAlertBot {
         const modelSummary = winPredictor.getModelSummary();
         const thresholds = thresholdOptimizer.getCurrentThresholds();
 
-        let message = '🎓 *LEARNING MODE STATUS*\n\n';
+        let message = '🎓 LEARNING MODE STATUS\n\n';
 
         // Current status
         if (isLearningMode) {
-          message += '✅ *Learning Mode:* ENABLED\n\n';
-          message += '*What this means:*\n';
+          message += '✅ Learning Mode: ENABLED\n\n';
+          message += 'What this means:\n';
           message += '• Signal filtering is RELAXED to collect more data\n';
-          message += '• Only STRONG\\_AVOID recommendations are blocked\n';
+          message += '• Only STRONG AVOID recommendations are blocked\n';
           message += '• ML probability threshold lowered to 15%\n';
-          message += '• More signals will come through for training\n\n';
+          message += '• More signals will come through for training\n';
+          message += '• Rate limits bypassed for data collection\n\n';
         } else {
-          message += '🔒 *Learning Mode:* DISABLED\n\n';
-          message += '*What this means:*\n';
+          message += '🔒 Learning Mode: DISABLED\n\n';
+          message += 'What this means:\n';
           message += '• Signal filtering is STRICT for quality\n';
-          message += '• Both AVOID and STRONG\\_AVOID blocked\n';
+          message += '• Both AVOID and STRONG AVOID blocked\n';
           message += '• ML probability threshold at 25%\n';
           message += '• Fewer but higher quality signals\n\n';
         }
 
         // Signal thresholds in effect
-        message += '*Current Signal Thresholds:*\n';
+        message += 'Current Signal Thresholds:\n';
         message += `• Min Momentum Score: ${thresholds.minMomentumScore}\n`;
         message += `• Min OnChain Score: ${thresholds.minOnChainScore}\n`;
         message += `• ML Probability Threshold: ${isLearningMode ? '15%' : '25%'}\n\n`;
 
         // Training data status
-        message += '*Training Data:*\n';
+        message += 'Training Data:\n';
         message += `• Model trained: ${modelSummary.lastTrained ? 'Yes' : 'Not yet'}\n`;
         message += `• Patterns discovered: ${modelSummary.winningPatterns.length + modelSummary.losingPatterns.length}\n\n`;
 
         // Recommendation
         if (isLearningMode) {
-          message += '💡 *Recommendation:*\n';
+          message += '💡 Recommendation:\n';
           message += 'Keep learning mode ON until you have:\n';
           message += '• At least 30 completed signals\n';
           message += '• At least 5 winning patterns discovered\n';
           message += '• Stable win rate in performance reports\n\n';
-          message += '_Set LEARNING\\_MODE=false in .env to disable_';
+          message += 'Set LEARNING_MODE=false in .env to disable';
         } else {
-          message += '💡 *Recommendation:*\n';
+          message += '💡 Recommendation:\n';
           message += 'If you are not receiving signals, consider:\n';
-          message += '• Setting LEARNING\\_MODE=true in .env\n';
+          message += '• Setting LEARNING_MODE=true in .env\n';
           message += '• Lowering minOnChainScore threshold\n';
           message += '• Checking /thresholds for current values';
         }
 
-        await this.bot!.sendMessage(chatId, message, { parse_mode: 'Markdown' });
+        await this.bot!.sendMessage(chatId, message);
       } catch (error) {
         const errorMessage = error instanceof Error ? error.message : 'Unknown error';
         logger.error({ error, chatId }, 'Failed to get learning mode info');
@@ -1517,20 +1518,27 @@ export class TelegramAlertBot {
 
   /**
    * Check rate limits before sending
+   * LEARNING MODE: Bypasses all rate limits to maximize data collection
    */
   private async checkRateLimits(signal: BuySignal): Promise<{ allowed: boolean; reason?: string }> {
+    // LEARNING MODE: Bypass all rate limits to collect more training data
+    if (appConfig.trading.learningMode) {
+      logger.debug({ tokenAddress: signal.tokenAddress }, 'Learning mode: bypassing rate limits');
+      return { allowed: true };
+    }
+
     // Check hourly limit
     const hourlyCount = await Database.getRecentSignalCount(1);
     if (hourlyCount >= RATE_LIMITS.MAX_SIGNALS_PER_HOUR) {
       return { allowed: false, reason: 'Hourly signal limit reached' };
     }
-    
+
     // Check daily limit
     const dailyCount = await Database.getRecentSignalCount(24);
     if (dailyCount >= RATE_LIMITS.MAX_SIGNALS_PER_DAY) {
       return { allowed: false, reason: 'Daily signal limit reached' };
     }
-    
+
     // Check token cooldown
     const lastTokenSignal = await Database.getLastSignalTime(signal.tokenAddress);
     if (lastTokenSignal) {
@@ -1539,7 +1547,7 @@ export class TelegramAlertBot {
         return { allowed: false, reason: 'Token cooldown active' };
       }
     }
-    
+
     // Check KOL cooldown
     const lastKolTime = this.lastKolSignalTime.get(signal.kolActivity.kol.handle);
     if (lastKolTime) {
@@ -1548,7 +1556,7 @@ export class TelegramAlertBot {
         return { allowed: false, reason: 'KOL cooldown active' };
       }
     }
-    
+
     return { allowed: true };
   }
   

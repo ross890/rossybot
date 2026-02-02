@@ -219,9 +219,11 @@ export class SignalGenerator {
       }
 
       // Diagnostic logging - show pipeline stats every cycle
-      logger.info(
-        `Scan cycle: pre-filter complete | candidates=${candidates.length} passed=${preFiltered.length} failed=${quickFilterFails}`
-      );
+      logger.info({
+        candidates: candidates.length,
+        passed: preFiltered.length,
+        failed: quickFilterFails,
+      }, '=== SCAN CYCLE: Pre-filter complete, starting token evaluation ===');
 
       // Step 3: Evaluate each token (KOL signals + on-chain signals)
       let safetyBlocked = 0;
@@ -264,9 +266,21 @@ export class SignalGenerator {
       this.cleanupExpiredDiscoveries();
 
       // Show where tokens are dropping off
-      logger.info(
-        `Scan cycle: evaluation complete | evaluated=${preFiltered.length} safetyBlocked=${safetyBlocked} noMetrics=${noMetrics} screeningFailed=${screeningFailed} scamRejected=${scamRejected} scoringFailed=${scoringFailed} buySignals=${signalsGenerated} onchainSignals=${onchainSignals} discoveries=${discoverySignals} kolValidations=${kolValidationSignals} momentumFailed=${momentumFailed} bundleBlocked=${bundleBlocked} discoveryFailed=${discoveryFailed}`
-      );
+      logger.info({
+        evaluated: preFiltered.length,
+        safetyBlocked,
+        noMetrics,
+        screeningFailed,
+        scamRejected,
+        scoringFailed,
+        momentumFailed,
+        bundleBlocked,
+        discoveryFailed,
+        buySignals: signalsGenerated,
+        onchainSignals,
+        discoveries: discoverySignals,
+        kolValidations: kolValidationSignals,
+      }, '=== SCAN CYCLE COMPLETE: Token evaluation results ===');
     } catch (error) {
       logger.error({ error }, 'Error in scan cycle');
     }
@@ -347,8 +361,11 @@ export class SignalGenerator {
    * Now supports both KOL-triggered and discovery-triggered signals
    */
   private async evaluateTokenWithDiagnostics(tokenAddress: string): Promise<string> {
+    const shortAddr = tokenAddress.slice(0, 8);
+
     // Check if we already have an open position
     if (await Database.hasOpenPosition(tokenAddress)) {
+      logger.debug({ tokenAddress: shortAddr }, 'EVAL: Skipped - already have position');
       return SignalGenerator.EVAL_RESULTS.SKIPPED;
     }
 
@@ -357,26 +374,42 @@ export class SignalGenerator {
     const safetyBlock = tokenSafetyChecker.shouldBlockSignal(safetyResult);
 
     if (safetyBlock.blocked) {
+      logger.info({ tokenAddress: shortAddr, reason: safetyBlock.reason }, 'EVAL: Safety blocked');
       return SignalGenerator.EVAL_RESULTS.SAFETY_BLOCKED;
     }
 
     // Get comprehensive token data first (needed for both paths)
     const metrics = await getTokenMetrics(tokenAddress);
     if (!metrics) {
+      logger.info({ tokenAddress: shortAddr }, 'EVAL: No metrics available');
       return SignalGenerator.EVAL_RESULTS.NO_METRICS;
     }
+
+    logger.info({
+      tokenAddress: shortAddr,
+      ticker: metrics.ticker,
+      mcap: metrics.marketCap,
+      vol24h: metrics.volume24h,
+      holders: metrics.holderCount,
+      liq: metrics.liquidityPool,
+      age: metrics.tokenAge,
+    }, 'EVAL: Got metrics, checking screening criteria');
 
     // Check if token meets minimum screening criteria
     if (!this.meetsScreeningCriteria(metrics)) {
       return SignalGenerator.EVAL_RESULTS.SCREENING_FAILED;
     }
 
+    logger.info({ tokenAddress: shortAddr, ticker: metrics.ticker }, 'EVAL: Passed screening, running scam filter');
+
     // Run full scam filter
     const scamResult = await scamFilter.filterToken(tokenAddress);
     if (scamResult.result === 'REJECT') {
-      logger.info({ tokenAddress, flags: scamResult.flags }, 'Token rejected by scam filter');
+      logger.info({ tokenAddress: shortAddr, ticker: metrics.ticker, flags: scamResult.flags }, 'EVAL: Scam filter rejected');
       return SignalGenerator.EVAL_RESULTS.SCAM_REJECTED;
     }
+
+    logger.info({ tokenAddress: shortAddr, ticker: metrics.ticker }, 'EVAL: Passed scam filter, getting additional data');
 
     // Get social metrics
     const socialMetrics = await this.getSocialMetrics(tokenAddress, metrics);

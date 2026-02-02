@@ -13,6 +13,13 @@ import {
   SignalCategory,
 } from './trade-executor.js';
 import { BuySignal, DiscoverySignal, SignalType, ConvictionLevel } from '../../types/index.js';
+import { signalPerformanceTracker } from '../performance/signal-performance-tracker.js';
+
+// ============ CONSTANTS ============
+
+// Minimum win rate required for auto-buying
+// At 50% WR with 100% TP and 40% SL, expected value is positive
+const MIN_WINRATE_FOR_AUTOBUY = 50;
 
 // ============ TYPES ============
 
@@ -65,6 +72,20 @@ export class AutoTrader {
       return { action: 'SKIPPED', reason: 'Auto-buy disabled' };
     }
 
+    // Check historical win rate gate for auto-buying
+    // Auto-buying should only be enabled when we have proven 50%+ win rate
+    const winRateCheck = await this.checkWinRateRequirement();
+    if (!winRateCheck.passes) {
+      logger.info({
+        tokenAddress,
+        currentWinRate: winRateCheck.currentWinRate,
+        requiredWinRate: MIN_WINRATE_FOR_AUTOBUY,
+        completedSignals: winRateCheck.completedSignals,
+      }, 'Win rate below threshold for auto-buying, sending to confirmation');
+      // Don't skip - just require confirmation instead
+      // This allows manual trading while learning
+    }
+
     // Check if trading is enabled
     if (!tradeExecutor.isTradingEnabled()) {
       logger.info({ tokenAddress }, 'Trading paused, skipping');
@@ -87,11 +108,17 @@ export class AutoTrader {
     const category = tradeExecutor.determineSignalCategory(signalType, score, conviction);
 
     // Check if should auto-execute or require confirmation
-    if (tradeExecutor.shouldAutoExecute(category)) {
-      // Auto-execute the trade
+    // IMPORTANT: Win rate must meet threshold for auto-execution
+    const winRateOk = winRateCheck.passes;
+    if (winRateOk && tradeExecutor.shouldAutoExecute(category)) {
+      // Auto-execute the trade (win rate is sufficient for autobuying)
       return await this.executeAutoTrade(signal, category, conviction);
     } else {
-      // Request confirmation
+      // Request confirmation (either win rate too low or category requires it)
+      const confirmReason = !winRateOk
+        ? `Win rate ${winRateCheck.currentWinRate?.toFixed(1)}% < ${MIN_WINRATE_FOR_AUTOBUY}% required`
+        : 'Category requires confirmation';
+      logger.info({ tokenAddress, confirmReason }, 'Requiring confirmation');
       return await this.requestConfirmation(signal, category, conviction);
     }
   }
@@ -200,6 +227,57 @@ export class AutoTrader {
       return result.rows.length > 0 && result.rows[0].value === 'true';
     } catch (error) {
       return true; // Default to enabled
+    }
+  }
+
+  /**
+   * Check if historical win rate meets requirement for auto-buying
+   * Returns passes: true only if win rate >= 50% over last 7 days
+   * with at least 30 completed signals for statistical significance
+   */
+  private async checkWinRateRequirement(): Promise<{
+    passes: boolean;
+    currentWinRate: number | null;
+    completedSignals: number;
+    reason: string;
+  }> {
+    const MIN_SIGNALS_FOR_AUTOBUY = 30; // Need enough data for confidence
+
+    try {
+      const stats = await signalPerformanceTracker.getPerformanceStats(168); // 7 days
+
+      if (stats.completedSignals < MIN_SIGNALS_FOR_AUTOBUY) {
+        return {
+          passes: false,
+          currentWinRate: stats.winRate,
+          completedSignals: stats.completedSignals,
+          reason: `Insufficient data: ${stats.completedSignals}/${MIN_SIGNALS_FOR_AUTOBUY} signals needed`,
+        };
+      }
+
+      if (stats.winRate < MIN_WINRATE_FOR_AUTOBUY) {
+        return {
+          passes: false,
+          currentWinRate: stats.winRate,
+          completedSignals: stats.completedSignals,
+          reason: `Win rate ${stats.winRate.toFixed(1)}% below ${MIN_WINRATE_FOR_AUTOBUY}% threshold`,
+        };
+      }
+
+      return {
+        passes: true,
+        currentWinRate: stats.winRate,
+        completedSignals: stats.completedSignals,
+        reason: `Win rate ${stats.winRate.toFixed(1)}% meets ${MIN_WINRATE_FOR_AUTOBUY}% threshold`,
+      };
+    } catch (error) {
+      logger.error({ error }, 'Failed to check win rate requirement');
+      return {
+        passes: false,
+        currentWinRate: null,
+        completedSignals: 0,
+        reason: 'Error checking win rate',
+      };
     }
   }
 

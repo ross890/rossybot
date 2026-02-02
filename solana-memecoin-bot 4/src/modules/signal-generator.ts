@@ -354,6 +354,7 @@ export class SignalGenerator {
     ONCHAIN_SIGNAL_SENT: 'ONCHAIN_SIGNAL_SENT', // New: Pure on-chain momentum signal
     MOMENTUM_FAILED: 'MOMENTUM_FAILED',      // New: Didn't pass momentum checks
     BUNDLE_BLOCKED: 'BUNDLE_BLOCKED',        // New: High bundle/insider risk
+    TOO_EARLY: 'TOO_EARLY',                  // New: Token too young (< 30 min)
   } as const;
 
   /**
@@ -511,15 +512,26 @@ export class SignalGenerator {
     // Step 1: Calculate comprehensive on-chain score (handles momentum + bundle internally)
     const onChainScore = await onChainScoringEngine.calculateScore(tokenAddress, metrics);
 
+    // Step 1.5: Calculate social verification score from DexScreener
+    // Social links (Twitter, Telegram, etc.) indicate project legitimacy
+    const socialScore = this.calculateSocialScore(dexScreenerInfo);
+
+    // Add social score as a bonus to the total (max +25 points)
+    const socialBonus = Math.min(25, socialScore.score);
+    const adjustedTotal = Math.min(100, onChainScore.total + socialBonus);
+
     logger.info({
       tokenAddress: shortAddr,
       ticker: metrics.ticker,
       onChainTotal: onChainScore.total,
+      socialBonus,
+      adjustedTotal,
       recommendation: onChainScore.recommendation,
       riskLevel: onChainScore.riskLevel,
       momentum: onChainScore.components.momentum,
       safety: onChainScore.components.safety,
-    }, 'EVAL: On-chain scoring complete');
+      socialBreakdown: socialScore.breakdown.length > 0 ? socialScore.breakdown.join(', ') : 'None',
+    }, 'EVAL: On-chain + social scoring complete');
 
     // Step 2: Check if bundle/safety risk is too high
     // Only block CRITICAL risk - HIGH risk tokens can still generate signals with warnings
@@ -533,11 +545,27 @@ export class SignalGenerator {
       return SignalGenerator.EVAL_RESULTS.BUNDLE_BLOCKED;
     }
 
+    // Step 2.5: Token age filter (PRODUCTION ONLY)
+    // Performance data shows +0.84 correlation between token age and wins
+    // Older tokens are more established and less likely to rug
+    // In learning mode: skip this filter to collect data on all token ages
+    const isLearningMode = appConfig.trading.learningMode;
+    const MIN_TOKEN_AGE_MINUTES = 30;
+
+    if (!isLearningMode && metrics.tokenAge < MIN_TOKEN_AGE_MINUTES) {
+      logger.info({
+        tokenAddress: shortAddr,
+        ticker: metrics.ticker,
+        tokenAgeMinutes: metrics.tokenAge,
+        minRequired: MIN_TOKEN_AGE_MINUTES,
+      }, 'EVAL: BLOCKED - Token too young (production mode)');
+      return SignalGenerator.EVAL_RESULTS.TOO_EARLY;
+    }
+
     // Step 3: Check minimum thresholds (dynamically loaded from optimizer)
     const thresholds = thresholdOptimizer.getCurrentThresholds();
     const MIN_MOMENTUM_SCORE = thresholds.minMomentumScore;
     const MIN_ONCHAIN_SCORE = thresholds.minOnChainScore;
-    const isLearningMode = appConfig.trading.learningMode;
 
     // LEARNING MODE v2: Skip momentum hard gate entirely in learning mode
     //
@@ -595,15 +623,19 @@ export class SignalGenerator {
     // The weighted scoring already balances momentum/safety/structure - let ML learn correlations
     const effectiveMinScore = isLearningMode ? Math.min(MIN_ONCHAIN_SCORE, 20) : MIN_ONCHAIN_SCORE;
 
-    if (onChainScore.total < effectiveMinScore || shouldBlockByRecommendation) {
+    // Use adjustedTotal (which includes social verification bonus) for threshold comparison
+    // This rewards tokens with verified social presence (Twitter, Telegram, etc.)
+    if (adjustedTotal < effectiveMinScore || shouldBlockByRecommendation) {
       logger.info({
         tokenAddress,
         ticker: metrics.ticker,
         onChainScore: onChainScore.total,
+        socialBonus,
+        adjustedTotal,
         minRequired: effectiveMinScore,
         recommendation: onChainScore.recommendation,
         learningMode: isLearningMode,
-        blockedBy: onChainScore.total < effectiveMinScore ? 'SCORE_TOO_LOW' : 'RECOMMENDATION',
+        blockedBy: adjustedTotal < effectiveMinScore ? 'SCORE_TOO_LOW' : 'RECOMMENDATION',
       }, 'Token filtered by on-chain score requirements');
       return SignalGenerator.EVAL_RESULTS.DISCOVERY_FAILED;
     }
@@ -612,9 +644,11 @@ export class SignalGenerator {
       tokenAddress,
       ticker: metrics.ticker,
       onChainScore: onChainScore.total,
+      socialBonus,
+      adjustedTotal,
       recommendation: onChainScore.recommendation,
       learningMode: isLearningMode,
-    }, 'Token PASSED on-chain score check - proceeding to evaluation');
+    }, 'Token PASSED on-chain + social score check - proceeding to evaluation');
 
     // Step 4: Get additional data for position sizing and display
     const bundleAnalysis = await bundleDetector.analyze(tokenAddress);
@@ -1229,6 +1263,67 @@ export class SignalGenerator {
         logger.debug({ address }, 'Expired discovery signal removed');
       }
     }
+  }
+
+  /**
+   * Calculate social verification score from DexScreener info
+   *
+   * Social links (Twitter, Telegram, Website) indicate project legitimacy.
+   * Scam tokens rarely have established social presence.
+   *
+   * Returns a bonus score (0-15 points) to add to the on-chain score.
+   */
+  private calculateSocialScore(dexScreenerInfo: DexScreenerTokenInfo): {
+    score: number;
+    breakdown: string[];
+  } {
+    const breakdown: string[] = [];
+    let score = 0;
+
+    // Twitter verification is strongest signal (most effort to maintain)
+    if (dexScreenerInfo.socialLinks.twitter) {
+      score += 7;
+      breakdown.push('Twitter: +7');
+    }
+
+    // Telegram shows active community
+    if (dexScreenerInfo.socialLinks.telegram) {
+      score += 4;
+      breakdown.push('Telegram: +4');
+    }
+
+    // Website shows commitment to project
+    if (dexScreenerInfo.socialLinks.website) {
+      score += 3;
+      breakdown.push('Website: +3');
+    }
+
+    // Discord is a bonus (less common for memecoins)
+    if (dexScreenerInfo.socialLinks.discord) {
+      score += 1;
+      breakdown.push('Discord: +1');
+    }
+
+    // Paid DexScreener profile is a strong legitimacy signal
+    if (dexScreenerInfo.hasPaidDexscreener) {
+      score += 5;
+      breakdown.push('Paid DexScreener: +5');
+    }
+
+    // Active boosts show marketing investment (could be pump, but shows commitment)
+    if (dexScreenerInfo.boostCount > 0) {
+      const boostPoints = Math.min(3, dexScreenerInfo.boostCount);
+      score += boostPoints;
+      breakdown.push(`Boosts (${dexScreenerInfo.boostCount}): +${boostPoints}`);
+    }
+
+    // Has description shows effort put into project
+    if (dexScreenerInfo.description && dexScreenerInfo.description.length > 20) {
+      score += 2;
+      breakdown.push('Description: +2');
+    }
+
+    return { score, breakdown };
   }
 
   /**

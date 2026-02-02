@@ -59,7 +59,7 @@ export interface FactorAnalysis {
 
 // Default thresholds (moderate - balanced for data collection + quality)
 const DEFAULT_THRESHOLDS: ThresholdSet = {
-  minMomentumScore: 25,      // Moderate - still allows good signal volume
+  minMomentumScore: 10,      // Lowered from 25 - allow more signals during learning phase
   minOnChainScore: 30,       // Moderate - filters obvious low quality
   minSafetyScore: 40,        // Moderate - some safety filtering
   maxBundleRiskScore: 60,    // Moderate - allows some risk

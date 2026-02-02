@@ -314,7 +314,7 @@ export class DailyAutoOptimizer {
 
         // Sanity bounds
         const bounds: Record<string, [number, number]> = {
-          minMomentumScore: [20, 70],
+          minMomentumScore: [5, 70],   // Lowered from 20 to allow more signals during learning
           minOnChainScore: [30, 75],
           minSafetyScore: [40, 80],
           maxBundleRiskScore: [20, 60],

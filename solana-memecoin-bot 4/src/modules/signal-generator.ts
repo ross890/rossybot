@@ -538,14 +538,31 @@ export class SignalGenerator {
     const MIN_MOMENTUM_SCORE = thresholds.minMomentumScore;
     const MIN_ONCHAIN_SCORE = thresholds.minOnChainScore;
 
-    if (onChainScore.components.momentum < MIN_MOMENTUM_SCORE) {
+    // LEARNING MODE FIX: In learning mode, use a much lower momentum threshold (10)
+    // to allow more signals through for ML training data collection.
+    // The default minMomentumScore of 25 was blocking ALL tokens during learning phase.
+    const isLearningMode = appConfig.trading.learningMode;
+    const effectiveMomentumThreshold = isLearningMode ? Math.min(MIN_MOMENTUM_SCORE, 10) : MIN_MOMENTUM_SCORE;
+
+    if (onChainScore.components.momentum < effectiveMomentumThreshold) {
       logger.info({
         tokenAddress: shortAddr,
         ticker: metrics.ticker,
         momentumScore: onChainScore.components.momentum,
-        minRequired: MIN_MOMENTUM_SCORE,
+        minRequired: effectiveMomentumThreshold,
+        learningMode: isLearningMode,
       }, 'EVAL: BLOCKED - Momentum below threshold');
       return SignalGenerator.EVAL_RESULTS.MOMENTUM_FAILED;
+    }
+
+    // Log when momentum passes in learning mode
+    if (isLearningMode) {
+      logger.info({
+        tokenAddress: shortAddr,
+        ticker: metrics.ticker,
+        momentumScore: onChainScore.components.momentum,
+        threshold: effectiveMomentumThreshold,
+      }, 'EVAL: PASSED - Momentum check (learning mode)');
     }
 
     // Check if on-chain score recommends action
@@ -555,7 +572,7 @@ export class SignalGenerator {
     // - minOnChainScore: 30 (tokens with score >= 30 should pass)
     // - But AVOID recommendation was given for scores 25-39
     // - This caused ALL tokens with scores 30-39 to be blocked despite passing numerical check
-    const isLearningMode = appConfig.trading.learningMode;
+    // (isLearningMode already defined above in momentum check)
 
     // In learning mode: only block STRONG_AVOID (score < 25) to maximize data collection
     // In production mode: block both AVOID and STRONG_AVOID for quality filtering

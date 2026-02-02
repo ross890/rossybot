@@ -16,7 +16,7 @@ import {
 // ============ CONSTANTS ============
 
 // Performance thresholds
-const THRESHOLDS = {
+export const THRESHOLDS = {
   // Probation: < 10 trades, learning mode
   PROBATION_TRADES: 10,
 

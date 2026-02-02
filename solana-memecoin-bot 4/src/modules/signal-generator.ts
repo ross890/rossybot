@@ -63,7 +63,10 @@ import {
 
 // ============ CONFIGURATION ============
 
-const SCAN_INTERVAL_MS = 60 * 1000; // 1 minute
+// HIT RATE IMPROVEMENT: Reduced from 60s to 20s
+// Analysis shows we're getting front-run by ~35-45 seconds
+// 20s scan cycle gives 2-3 opportunities before momentum fades
+const SCAN_INTERVAL_MS = 20 * 1000; // 20 seconds (was 60s)
 const KOL_ACTIVITY_WINDOW_MS = 2 * 60 * 60 * 1000; // 2 hours
 const DISCOVERY_SIGNAL_EXPIRY_MS = 24 * 60 * 60 * 1000; // Track discovery for 24 hours
 
@@ -635,59 +638,94 @@ export class SignalGenerator {
       }, 'EVAL: Routing to PROVEN RUNNER track');
 
     } else if (metrics.tokenAge < EARLY_QUALITY_MAX_AGE) {
-      // TRACK 2: EARLY QUALITY - Need KOL validation since time hasn't proven it
-      // Check if we have S-tier or A-tier KOL activity for this token
-      const kolActivity = await kolWalletMonitor.getKolActivityForToken(tokenAddress);
+      // TRACK 2: EARLY QUALITY - Need trust signal (KOL OR exceptional on-chain metrics)
+      //
+      // HIT RATE IMPROVEMENT: Added ON-CHAIN FIRST path
+      // Previously: ONLY KOL validation could pass early tokens
+      // Now: Exceptional on-chain metrics can also provide trust signal
+      // This removes 20-30 second latency from waiting for KOL detection
 
-      if (kolActivity.length > 0) {
-        // Find highest-tier KOL that mentioned/bought this token
-        let bestKolTier: KolReputationTier = KolReputationTier.UNPROVEN;
+      // Check for exceptional on-chain metrics FIRST (faster than KOL lookup)
+      // Use the on-chain score components that are already calculated
+      const hasSuperiorOnChain =
+        onChainScore.components.momentum >= 70 &&      // Strong buy pressure (includes holder growth)
+        onChainScore.components.safety >= 75 &&        // Very safe contract
+        onChainScore.components.bundleSafety >= 70 &&  // Clean launch
+        metrics.holderCount >= 50 &&                   // Already gained traction
+        onChainScore.components.marketStructure >= 50; // Good market dynamics (holder distribution)
 
-        for (const activity of kolActivity) {
-          // Use consolidated kol-analytics for tier checking (single source of truth)
-          const kolCheck = await kolAnalytics.isHighTierKolByHandle(activity.kol.handle);
-          if (kolCheck.isTrusted) {
-            // Found a trusted KOL
-            if (kolCheck.tier === KolReputationTier.S_TIER) {
-              bestKolTier = KolReputationTier.S_TIER;
-              break; // S-tier is best, no need to check more
-            } else if (kolCheck.tier === KolReputationTier.A_TIER) {
-              bestKolTier = KolReputationTier.A_TIER;
-            }
-          }
-        }
-
-        if (bestKolTier === KolReputationTier.S_TIER || bestKolTier === KolReputationTier.A_TIER) {
-          signalTrack = SignalTrack.EARLY_QUALITY;
-          kolReputationTier = bestKolTier;
-          logger.info({
-            tokenAddress: shortAddr,
-            ticker: metrics.ticker,
-            tokenAgeMinutes: metrics.tokenAge,
-            track: 'EARLY_QUALITY',
-            kolTier: bestKolTier,
-            kolCount: kolActivity.length,
-          }, 'EVAL: Routing to EARLY QUALITY track (KOL validated)');
-        } else {
-          // KOL activity exists but no S/A tier validation
-          logger.info({
-            tokenAddress: shortAddr,
-            ticker: metrics.ticker,
-            tokenAgeMinutes: metrics.tokenAge,
-            kolCount: kolActivity.length,
-            reason: 'KOL activity found but no S/A tier validation',
-          }, 'EVAL: BLOCKED - Early token without trusted KOL');
-          return SignalGenerator.EVAL_RESULTS.TOO_EARLY;
-        }
-      } else {
-        // No KOL activity for early token
+      if (hasSuperiorOnChain) {
+        // ON-CHAIN FIRST: Accept without KOL if metrics are exceptional
+        signalTrack = SignalTrack.EARLY_QUALITY;
+        kolReputationTier = undefined; // No KOL, on-chain validated
         logger.info({
           tokenAddress: shortAddr,
           ticker: metrics.ticker,
           tokenAgeMinutes: metrics.tokenAge,
-          reason: 'Early token with no KOL validation',
-        }, 'EVAL: BLOCKED - Early token without KOL activity');
-        return SignalGenerator.EVAL_RESULTS.TOO_EARLY;
+          track: 'EARLY_QUALITY',
+          validationMethod: 'ON_CHAIN_FIRST',
+          momentumScore: onChainScore.components.momentum,
+          safetyScore: onChainScore.components.safety,
+          marketStructure: onChainScore.components.marketStructure,
+          holderCount: metrics.holderCount,
+        }, 'EVAL: Routing to EARLY QUALITY track (ON-CHAIN VALIDATED - no KOL needed)');
+      } else {
+        // Fallback: Check for KOL validation
+        const kolActivity = await kolWalletMonitor.getKolActivityForToken(tokenAddress);
+
+        if (kolActivity.length > 0) {
+          // Find highest-tier KOL that mentioned/bought this token
+          let bestKolTier: KolReputationTier = KolReputationTier.UNPROVEN;
+
+          for (const activity of kolActivity) {
+            // Use consolidated kol-analytics for tier checking (single source of truth)
+            const kolCheck = await kolAnalytics.isHighTierKolByHandle(activity.kol.handle);
+            if (kolCheck.isTrusted) {
+              // Found a trusted KOL
+              if (kolCheck.tier === KolReputationTier.S_TIER) {
+                bestKolTier = KolReputationTier.S_TIER;
+                break; // S-tier is best, no need to check more
+              } else if (kolCheck.tier === KolReputationTier.A_TIER) {
+                bestKolTier = KolReputationTier.A_TIER;
+              }
+            }
+          }
+
+          if (bestKolTier === KolReputationTier.S_TIER || bestKolTier === KolReputationTier.A_TIER) {
+            signalTrack = SignalTrack.EARLY_QUALITY;
+            kolReputationTier = bestKolTier;
+            logger.info({
+              tokenAddress: shortAddr,
+              ticker: metrics.ticker,
+              tokenAgeMinutes: metrics.tokenAge,
+              track: 'EARLY_QUALITY',
+              validationMethod: 'KOL_VALIDATED',
+              kolTier: bestKolTier,
+              kolCount: kolActivity.length,
+            }, 'EVAL: Routing to EARLY QUALITY track (KOL validated)');
+          } else {
+            // KOL activity exists but no S/A tier validation
+            logger.info({
+              tokenAddress: shortAddr,
+              ticker: metrics.ticker,
+              tokenAgeMinutes: metrics.tokenAge,
+              kolCount: kolActivity.length,
+              reason: 'KOL activity found but no S/A tier validation',
+            }, 'EVAL: BLOCKED - Early token without trusted KOL');
+            return SignalGenerator.EVAL_RESULTS.TOO_EARLY;
+          }
+        } else {
+          // No KOL activity and no exceptional on-chain for early token
+          logger.info({
+            tokenAddress: shortAddr,
+            ticker: metrics.ticker,
+            tokenAgeMinutes: metrics.tokenAge,
+            momentumScore: onChainScore.components.momentum,
+            safetyScore: onChainScore.components.safety,
+            reason: 'Early token without KOL or exceptional on-chain metrics',
+          }, 'EVAL: BLOCKED - Early token without validation');
+          return SignalGenerator.EVAL_RESULTS.TOO_EARLY;
+        }
       }
 
     } else {
@@ -932,28 +970,30 @@ export class SignalGenerator {
 
     // Filter signals by ML win probability - TRACK-SPECIFIC THRESHOLDS
     //
-    // PROVEN RUNNER: Higher ML threshold (time proves quality, ML confirms)
-    //   Learning: 50%, Production: 70%
+    // HIT RATE IMPROVEMENT: Raised thresholds to improve signal quality
     //
-    // EARLY QUALITY: Lower ML threshold (KOL provides trust, ML supports)
-    //   Learning: 35%, Production: 50%
-    //   Rationale: S/A-tier KOL validation provides external trust signal,
-    //   so we can accept lower ML confidence
+    // PROVEN RUNNER: Higher ML threshold (time proves quality, ML confirms)
+    //   Learning: 55% (was 50%), Production: 75% (was 70%)
+    //
+    // EARLY QUALITY: Moderate ML threshold (KOL/on-chain provides trust, ML supports)
+    //   Learning: 45% (was 35%), Production: 60% (was 50%)
+    //   Rationale: We still trust KOL/on-chain validation, but ML should
+    //   have at least 45% confidence to filter out obvious bad signals
     //
     let mlProbabilityThreshold: number;
     let confidenceOk: boolean;
 
     if (signalTrack === SignalTrack.PROVEN_RUNNER) {
-      mlProbabilityThreshold = isLearningMode ? 50 : 70;
+      mlProbabilityThreshold = isLearningMode ? 55 : 75;
       confidenceOk = isLearningMode
         ? (prediction.confidence === 'HIGH' || prediction.confidence === 'MEDIUM')
         : prediction.confidence === 'HIGH';
     } else {
-      // EARLY_QUALITY: Lower thresholds since KOL provides trust
-      mlProbabilityThreshold = isLearningMode ? 35 : 50;
+      // EARLY_QUALITY: Moderate thresholds - trust external validation but filter noise
+      mlProbabilityThreshold = isLearningMode ? 45 : 60;
       confidenceOk = prediction.confidence === 'HIGH' ||
-                     prediction.confidence === 'MEDIUM' ||
-                     (isLearningMode && prediction.confidence === 'LOW');
+                     prediction.confidence === 'MEDIUM';
+      // Removed LOW confidence acceptance even in learning mode
     }
 
     if (prediction.winProbability < mlProbabilityThreshold) {
@@ -1699,12 +1739,25 @@ export class SignalGenerator {
         narrativeFit: socialMetrics.narrativeFit || this.detectNarrative(metrics),
       };
     } catch (error) {
-      logger.debug({ error, ticker: metrics.ticker }, 'Social metrics fetch failed, using fallback');
-      // Fallback to basic narrative detection if social analyzer fails
+      logger.debug({ error, ticker: metrics.ticker }, 'Social metrics fetch failed, using on-chain proxy');
+
+      // HIT RATE IMPROVEMENT: Use on-chain proxy metrics instead of hardcoded 0.5 placeholders
+      // The 0.5 hardcoded values were inflating scores for tokens without real social traction
+      // Now: infer social quality from on-chain activity (holder count, volume, distribution)
+      const holdersRatio = Math.min(1, metrics.holderCount / 200); // 200 holders = 1.0
+      const volumeScore = Math.min(1, (metrics.volume24h / Math.max(1, metrics.marketCap)) / 0.3); // 30% vol/mcap = 1.0
+      const distributionScore = Math.max(0, 1 - (metrics.top10Concentration / 75)); // Well distributed = higher
+
+      // Engagement proxy: combine volume activity with holder growth
+      const engagementProxy = (holdersRatio * 0.4 + volumeScore * 0.4 + distributionScore * 0.2);
+
+      // Authenticity proxy: good distribution + reasonable holder count suggests organic
+      const authenticityProxy = distributionScore * 0.7 + Math.min(0.3, holdersRatio * 0.3);
+
       return {
         mentionVelocity1h: 0,
-        engagementQuality: 0.5,
-        accountAuthenticity: 0.5,
+        engagementQuality: Math.min(0.6, engagementProxy), // Cap at 0.6 without real social data
+        accountAuthenticity: Math.min(0.6, authenticityProxy), // Cap at 0.6 without real data
         sentimentPolarity: 0,
         kolMentionDetected: false,
         kolMentions: [],

@@ -68,17 +68,22 @@ export interface OnChainScore {
 
 // ============ SCORING WEIGHTS ============
 
-// Weights UPDATED based on 7-day performance analysis (4094 signals):
-// - Token Age correlation: +0.84 (STRONGEST predictor - increased timing weight)
-// - Holder Count: +0.36 (good, kept in marketStructure)
-// - Unique Buyers: -0.08 (slightly negative, reduced momentum weight)
-// - Liquidity: -0.07 (inverted correlation, adjusted in scoring logic)
+// HIT RATE IMPROVEMENT: Reweighted based on deeper correlation analysis
+//
+// Key insight: Token Age +0.84 correlation is MISLEADING - it's selection bias
+// (older tokens survived, not that age predicts success). The actionable signals are:
+// - Holder Count: +0.36 (genuine predictor - more holders = more organic)
+// - Momentum: Actionable signal (buy pressure, volume velocity)
+// - Safety: Avoids rugs (critical for loss prevention)
+// - Bundle Safety: Insider detection (critical for avoiding dumps)
+//
+// Previous weights over-emphasized timing (25%) which doesn't help prediction.
 const WEIGHTS = {
-  momentum: 0.25,           // 25% - Reduced from 30% (weaker correlation than expected)
-  safety: 0.25,             // 25% - Contract safety, honeypot checks (unchanged)
-  bundleSafety: 0.15,       // 15% - Reduced from 20% (less predictive)
-  marketStructure: 0.10,    // 10% - Reduced from 15% (holder count still valuable)
-  timing: 0.25,             // 25% - INCREASED from 10% (Token Age has +0.84 correlation!)
+  momentum: 0.30,           // 30% - INCREASED (most actionable signal)
+  safety: 0.25,             // 25% - Keep high (avoids rugs)
+  bundleSafety: 0.20,       // 20% - INCREASED (insider detection critical)
+  marketStructure: 0.15,    // 15% - INCREASED (holder count is +0.36 correlation)
+  timing: 0.10,             // 10% - DECREASED (age is selection bias, not predictive)
 } as const;
 
 // ============ THRESHOLDS ============

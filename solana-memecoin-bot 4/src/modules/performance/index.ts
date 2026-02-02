@@ -52,3 +52,18 @@ export {
   LogSeverity,
   LogCategory,
 } from './deployment-logs-reader.js';
+
+export {
+  PerformanceLogger,
+  performanceLogger,
+  SignalLogData,
+  TradeLogData,
+  ScanCycleData,
+} from './performance-logger.js';
+
+export {
+  AIQueryInterface,
+  aiQueryInterface,
+  BotPerformanceReport,
+  QuickStatus,
+} from './ai-query-interface.js';

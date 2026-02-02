@@ -37,3 +37,18 @@ export {
   SignalFeatures,
   WinPrediction,
 } from './win-predictor.js';
+
+export {
+  DeploymentLogsReader,
+  deploymentLogsReader,
+  DeploymentLog,
+  PerformanceMetric,
+  SystemHealthSnapshot,
+  TradeOutcomeAnalysis,
+  LogQuery,
+  LogSummary,
+  PerformanceSummary,
+  WinLossAnalysis,
+  LogSeverity,
+  LogCategory,
+} from './deployment-logs-reader.js';

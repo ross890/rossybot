@@ -421,6 +421,24 @@ export class WinPredictor {
           { feature: 'holderCount', operator: '<', value: 50 },
         ],
       },
+      // DUAL-TRACK: Early Quality with high safety (track-based pattern)
+      {
+        name: 'Early Quality Safe',
+        conditions: [
+          { feature: 'tokenAge', operator: '<', value: 45 },
+          { feature: 'safetyScore', operator: '>=', value: 70 },
+          { feature: 'bundleRiskScore', operator: '<=', value: 35 },
+        ],
+      },
+      // DUAL-TRACK: Proven Runner with momentum (track-based pattern)
+      {
+        name: 'Proven with Momentum',
+        conditions: [
+          { feature: 'tokenAge', operator: '>=', value: 90 },
+          { feature: 'momentumScore', operator: '>=', value: 45 },
+          { feature: 'holderCount', operator: '>=', value: 100 },
+        ],
+      },
     ];
 
     // Test each pattern against historical data

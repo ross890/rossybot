@@ -2,6 +2,11 @@
 // NARRATIVE-BASED TOKEN SCANNER
 // Uses DexScreener searchTokens() to find tokens matching trending narratives
 // Phase 1 Quick Win: Token Discovery Enhancement
+//
+// SMART FEATURES:
+// - Dynamic narrative discovery from trending tokens
+// - Performance tracking per narrative
+// - Auto-priority adjustment based on success rates
 // ===========================================
 
 import { logger } from '../../utils/logger.js';
@@ -28,6 +33,11 @@ interface NarrativeConfig {
 
   // Maximum tokens per narrative
   maxTokensPerNarrative: number;
+
+  // Dynamic narrative learning
+  enableDynamicLearning: boolean;
+  minTokensToLearnNarrative: number;  // Need X tokens with same keyword to add narrative
+  narrativeDecayDays: number;          // Remove stale narratives after X days of no results
 }
 
 const DEFAULT_NARRATIVES = [
@@ -83,6 +93,9 @@ const DEFAULT_CONFIG: NarrativeConfig = {
   maxTokenAgeHours: 2160,    // Up to 90 days
   scanIntervalMinutes: 15,   // Every 15 minutes
   maxTokensPerNarrative: 10, // Top 10 per narrative
+  enableDynamicLearning: true,
+  minTokensToLearnNarrative: 3,  // 3 tokens with same keyword = new narrative
+  narrativeDecayDays: 7,         // Remove after 7 days of no results
 };
 
 // ============ TYPES ============
@@ -100,6 +113,17 @@ export interface NarrativeToken {
   tokenAgeHours: number;
   priceChange24h: number;
   discoveredAt: Date;
+}
+
+// Track narrative performance
+interface NarrativePerformance {
+  narrative: string;
+  tokensFound: number;
+  avgPriceChange24h: number;
+  avgMatchScore: number;
+  lastFoundAt: number;
+  isLearned: boolean;    // true = dynamically learned, false = seed narrative
+  priority: number;      // Higher = searched more often
 }
 
 // ============ SCANNER CLASS ============
@@ -120,14 +144,43 @@ class NarrativeScanner {
   // Last scan results
   private lastResults: NarrativeToken[] = [];
 
+  // ===== SMART FEATURES =====
+
+  // Track narrative performance for dynamic priority
+  private narrativePerformance: Map<string, NarrativePerformance> = new Map();
+
+  // Candidate narratives being evaluated (need minTokensToLearnNarrative to promote)
+  private candidateNarratives: Map<string, { count: number; firstSeen: number; tokens: string[] }> = new Map();
+
+  // Words to ignore when learning narratives
+  private readonly IGNORE_WORDS = new Set([
+    'the', 'a', 'an', 'of', 'to', 'in', 'on', 'for', 'is', 'it',
+    'coin', 'token', 'sol', 'solana', 'crypto', 'inu', 'elon',
+    'moon', 'safe', 'baby', 'mini', 'super', 'mega', 'ultra',
+  ]);
+
   /**
    * Initialize the scanner
    */
   async initialize(): Promise<void> {
+    // Initialize performance tracking for seed narratives
+    for (const narrative of this.config.narratives) {
+      this.narrativePerformance.set(narrative.toLowerCase(), {
+        narrative,
+        tokensFound: 0,
+        avgPriceChange24h: 0,
+        avgMatchScore: 0,
+        lastFoundAt: Date.now(),
+        isLearned: false,
+        priority: 50,  // Default priority
+      });
+    }
+
     logger.info({
       narratives: this.config.narratives.length,
       examples: this.config.narratives.slice(0, 5),
-    }, 'Initializing narrative scanner');
+      dynamicLearning: this.config.enableDynamicLearning,
+    }, 'Initializing narrative scanner with smart features');
   }
 
   /**
@@ -172,7 +225,7 @@ class NarrativeScanner {
     try {
       const results: NarrativeToken[] = [];
 
-      // Get next batch of narratives to search
+      // Get next batch of narratives to search (weighted by priority)
       const narrativesToSearch = this.getNextNarratives();
 
       logger.info({
@@ -183,6 +236,14 @@ class NarrativeScanner {
         try {
           const tokens = await this.searchNarrative(narrative);
           results.push(...tokens);
+
+          // Update narrative performance
+          this.updateNarrativePerformance(narrative, tokens);
+
+          // Learn new narratives from found tokens
+          if (this.config.enableDynamicLearning) {
+            this.learnFromTokens(tokens);
+          }
 
           // Small delay between searches to avoid rate limits
           await new Promise(resolve => setTimeout(resolve, 500));
@@ -195,9 +256,15 @@ class NarrativeScanner {
       const uniqueResults = this.deduplicateResults(results);
       this.lastResults = uniqueResults;
 
+      // Periodic maintenance
+      this.cleanupDiscoveries();
+      this.promoteAndDecayNarratives();
+
       logger.info({
         searched: narrativesToSearch.length,
         found: uniqueResults.length,
+        totalNarratives: this.config.narratives.length,
+        learnedNarratives: this.getLearnedNarrativeCount(),
         topFinds: uniqueResults.slice(0, 5).map(t => ({
           ticker: t.ticker,
           narrative: t.matchedNarrative,
@@ -205,26 +272,198 @@ class NarrativeScanner {
         })),
       }, 'Narrative scan cycle complete');
 
-      // Clean up old discoveries
-      this.cleanupDiscoveries();
-
     } catch (error) {
       logger.error({ error }, 'Error in narrative scan cycle');
     }
   }
 
   /**
-   * Get next batch of narratives to search
+   * Get next batch of narratives to search (weighted by priority)
    */
   private getNextNarratives(): string[] {
-    const narratives: string[] = [];
+    // Build priority-weighted list
+    const weighted: { narrative: string; weight: number }[] = [];
 
-    for (let i = 0; i < this.narrativesPerCycle; i++) {
-      narratives.push(this.config.narratives[this.narrativeIndex]);
-      this.narrativeIndex = (this.narrativeIndex + 1) % this.config.narratives.length;
+    for (const narrative of this.config.narratives) {
+      const perf = this.narrativePerformance.get(narrative.toLowerCase());
+      const weight = perf?.priority || 50;
+      weighted.push({ narrative, weight });
     }
 
+    // Sort by weight (higher priority first), then rotate through
+    weighted.sort((a, b) => b.weight - a.weight);
+
+    const narratives: string[] = [];
+    for (let i = 0; i < this.narrativesPerCycle && i < weighted.length; i++) {
+      const idx = (this.narrativeIndex + i) % weighted.length;
+      narratives.push(weighted[idx].narrative);
+    }
+
+    this.narrativeIndex = (this.narrativeIndex + this.narrativesPerCycle) % Math.max(1, weighted.length);
+
     return narratives;
+  }
+
+  /**
+   * Update performance metrics for a narrative
+   */
+  private updateNarrativePerformance(narrative: string, tokens: NarrativeToken[]): void {
+    const key = narrative.toLowerCase();
+    const existing = this.narrativePerformance.get(key) || {
+      narrative,
+      tokensFound: 0,
+      avgPriceChange24h: 0,
+      avgMatchScore: 0,
+      lastFoundAt: Date.now(),
+      isLearned: true,
+      priority: 50,
+    };
+
+    if (tokens.length > 0) {
+      const avgPrice = tokens.reduce((sum, t) => sum + t.priceChange24h, 0) / tokens.length;
+      const avgScore = tokens.reduce((sum, t) => sum + t.matchScore, 0) / tokens.length;
+
+      // Exponential moving average for smoother updates
+      existing.avgPriceChange24h = existing.tokensFound > 0
+        ? existing.avgPriceChange24h * 0.7 + avgPrice * 0.3
+        : avgPrice;
+      existing.avgMatchScore = existing.tokensFound > 0
+        ? existing.avgMatchScore * 0.7 + avgScore * 0.3
+        : avgScore;
+      existing.tokensFound += tokens.length;
+      existing.lastFoundAt = Date.now();
+
+      // Adjust priority based on performance
+      // Higher priority for narratives finding tokens with positive price action
+      if (avgPrice > 20) {
+        existing.priority = Math.min(100, existing.priority + 5);
+      } else if (avgPrice < -20) {
+        existing.priority = Math.max(10, existing.priority - 3);
+      }
+    }
+
+    this.narrativePerformance.set(key, existing);
+  }
+
+  /**
+   * Learn new narratives from discovered tokens
+   */
+  private learnFromTokens(tokens: NarrativeToken[]): void {
+    for (const token of tokens) {
+      // Extract potential keywords from token name
+      const keywords = this.extractKeywords(token.name, token.ticker);
+
+      for (const keyword of keywords) {
+        // Skip if already a narrative
+        if (this.config.narratives.some(n => n.toLowerCase() === keyword.toLowerCase())) {
+          continue;
+        }
+
+        // Track candidate
+        const existing = this.candidateNarratives.get(keyword) || {
+          count: 0,
+          firstSeen: Date.now(),
+          tokens: [],
+        };
+
+        if (!existing.tokens.includes(token.address)) {
+          existing.count++;
+          existing.tokens.push(token.address);
+        }
+
+        this.candidateNarratives.set(keyword, existing);
+      }
+    }
+  }
+
+  /**
+   * Extract potential narrative keywords from token name/ticker
+   */
+  private extractKeywords(name: string, ticker: string): string[] {
+    const keywords: string[] = [];
+    const combined = `${name} ${ticker}`.toLowerCase();
+
+    // Split into words
+    const words = combined.split(/[\s\-_]+/).filter(w => w.length >= 3);
+
+    for (const word of words) {
+      // Skip ignored words
+      if (this.IGNORE_WORDS.has(word)) continue;
+
+      // Skip pure numbers
+      if (/^\d+$/.test(word)) continue;
+
+      // Skip very common crypto terms that aren't narratives
+      if (word.length < 3) continue;
+
+      keywords.push(word);
+    }
+
+    return keywords;
+  }
+
+  /**
+   * Promote successful candidates to narratives, decay stale ones
+   */
+  private promoteAndDecayNarratives(): void {
+    const now = Date.now();
+    const dayMs = 24 * 60 * 60 * 1000;
+
+    // Promote candidates that have enough tokens
+    for (const [keyword, data] of this.candidateNarratives) {
+      if (data.count >= this.config.minTokensToLearnNarrative) {
+        // Promote to full narrative
+        this.config.narratives.push(keyword);
+        this.narrativePerformance.set(keyword.toLowerCase(), {
+          narrative: keyword,
+          tokensFound: data.count,
+          avgPriceChange24h: 0,
+          avgMatchScore: 50,
+          lastFoundAt: now,
+          isLearned: true,
+          priority: 60,  // Start with slightly higher priority for learned narratives
+        });
+
+        logger.info({
+          keyword,
+          tokensFound: data.count,
+          sampleTokens: data.tokens.slice(0, 3),
+        }, 'LEARNED NEW NARRATIVE from trending tokens');
+
+        this.candidateNarratives.delete(keyword);
+      } else if (now - data.firstSeen > 3 * dayMs) {
+        // Remove stale candidates
+        this.candidateNarratives.delete(keyword);
+      }
+    }
+
+    // Decay stale learned narratives (but not seed narratives)
+    for (const [key, perf] of this.narrativePerformance) {
+      if (perf.isLearned && now - perf.lastFoundAt > this.config.narrativeDecayDays * dayMs) {
+        // Remove from active narratives
+        const idx = this.config.narratives.findIndex(n => n.toLowerCase() === key);
+        if (idx > -1) {
+          this.config.narratives.splice(idx, 1);
+          this.narrativePerformance.delete(key);
+
+          logger.info({
+            narrative: perf.narrative,
+            daysSinceLastHit: ((now - perf.lastFoundAt) / dayMs).toFixed(1),
+          }, 'Removed stale learned narrative');
+        }
+      }
+    }
+  }
+
+  /**
+   * Get count of dynamically learned narratives
+   */
+  private getLearnedNarrativeCount(): number {
+    let count = 0;
+    for (const perf of this.narrativePerformance.values()) {
+      if (perf.isLearned) count++;
+    }
+    return count;
   }
 
   /**
@@ -419,6 +658,24 @@ class NarrativeScanner {
   }
 
   /**
+   * Get narrative performance stats
+   */
+  getNarrativePerformance(): NarrativePerformance[] {
+    return Array.from(this.narrativePerformance.values())
+      .sort((a, b) => b.priority - a.priority);
+  }
+
+  /**
+   * Get top performing narratives
+   */
+  getTopNarratives(limit: number = 10): NarrativePerformance[] {
+    return this.getNarrativePerformance()
+      .filter(p => p.tokensFound > 0)
+      .sort((a, b) => b.avgPriceChange24h - a.avgPriceChange24h)
+      .slice(0, limit);
+  }
+
+  /**
    * Update configuration
    */
   setConfig(config: Partial<NarrativeConfig>): void {
@@ -432,16 +689,28 @@ class NarrativeScanner {
   getStats(): {
     isRunning: boolean;
     narrativeCount: number;
+    learnedNarrativeCount: number;
+    candidateNarrativeCount: number;
     currentNarrativeIndex: number;
     discoveredTokensCount: number;
     lastResultsCount: number;
+    topNarratives: { narrative: string; avgPriceChange: number; tokensFound: number }[];
   } {
+    const top = this.getTopNarratives(5);
+
     return {
       isRunning: this.isRunning,
       narrativeCount: this.config.narratives.length,
+      learnedNarrativeCount: this.getLearnedNarrativeCount(),
+      candidateNarrativeCount: this.candidateNarratives.size,
       currentNarrativeIndex: this.narrativeIndex,
       discoveredTokensCount: this.discoveredTokens.size,
       lastResultsCount: this.lastResults.length,
+      topNarratives: top.map(p => ({
+        narrative: p.narrative,
+        avgPriceChange: Math.round(p.avgPriceChange24h * 10) / 10,
+        tokensFound: p.tokensFound,
+      })),
     };
   }
 }
@@ -449,8 +718,3 @@ class NarrativeScanner {
 // ============ EXPORTS ============
 
 export const narrativeScanner = new NarrativeScanner();
-
-export default {
-  NarrativeScanner,
-  narrativeScanner,
-};

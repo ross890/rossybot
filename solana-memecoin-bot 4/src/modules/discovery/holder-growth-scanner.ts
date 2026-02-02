@@ -2,6 +2,12 @@
 // HOLDER GROWTH VELOCITY SCANNER
 // Detects tokens with rapid holder growth (50+ holders/hour)
 // Phase 1 Quick Win: Token Discovery Enhancement
+//
+// SMART FEATURES:
+// - Relative growth (as % of existing holders)
+// - Holder quality analysis (new wallets vs established)
+// - Organic growth vs artificial growth detection
+// - Not blocking, but informing signals
 // ===========================================
 
 import { logger } from '../../utils/logger.js';
@@ -33,6 +39,14 @@ interface HolderGrowthConfig {
 
   // Historical tracking window (hours)
   trackingWindowHours: number;
+
+  // Holder quality analysis thresholds
+  holderQualityAnalysis: {
+    enabled: boolean;
+    minRelativeGrowthPercent: number;   // Min % growth relative to existing holders
+    suspiciousGrowthRatePercent: number; // Growth > this % in short time is suspicious
+    idealNewToExistingRatio: number;     // Ideal ratio of new vs existing wallet holders
+  };
 }
 
 const DEFAULT_CONFIG: HolderGrowthConfig = {
@@ -44,9 +58,30 @@ const DEFAULT_CONFIG: HolderGrowthConfig = {
   scanIntervalMinutes: 5,      // Scan every 5 minutes
   maxTokensPerScan: 50,        // Return up to 50 tokens
   trackingWindowHours: 6,      // Track for 6 hours
+  holderQualityAnalysis: {
+    enabled: true,
+    minRelativeGrowthPercent: 5,    // Need at least 5% growth relative to base
+    suspiciousGrowthRatePercent: 50, // >50% growth in 1 hour is suspicious
+    idealNewToExistingRatio: 0.7,    // 70% new wallets is ideal (30% experienced)
+  },
 };
 
 // ============ TYPES ============
+
+// Holder quality analysis result
+export interface HolderQualityAnalysis {
+  qualityScore: number;        // 0-100, higher = better quality growth
+  isOrganicGrowth: boolean;    // true if growth appears organic
+  warnings: string[];          // Human-readable warnings
+  metrics: {
+    relativeGrowthPercent: number;  // Growth as % of starting holders
+    estimatedNewWalletPercent: number; // % of new holders that are fresh wallets
+    estimatedExperiencedPercent: number; // % that have held other tokens
+    avgHoldingSize: number;    // Average $ size of new holder positions
+    growthConsistency: number; // How consistent is growth over time (0-100)
+  };
+  positiveSignals: string[];   // Positive indicators
+}
 
 export interface HolderGrowthSignal {
   address: string;
@@ -63,6 +98,9 @@ export interface HolderGrowthSignal {
   tokenAgeHours: number;
   detectedAt: Date;
   trackingStarted: Date;
+
+  // NEW: Holder quality analysis (informational)
+  holderQualityAnalysis?: HolderQualityAnalysis;
 }
 
 interface HolderSnapshot {
@@ -316,6 +354,19 @@ class HolderGrowthScanner {
       ? ((newest.holders - oldest.holders) / oldest.holders) * 100
       : 0;
 
+    // SMART FEATURE: Analyze holder quality (informational, not blocking)
+    let holderQualityAnalysis: HolderQualityAnalysis | undefined;
+    if (this.config.holderQualityAnalysis.enabled) {
+      holderQualityAnalysis = await this.analyzeHolderQuality(
+        address,
+        metrics,
+        sorted,
+        holdersGained,
+        growthRate,
+        timeSpanHours
+      );
+    }
+
     // Record this signal
     this.recentSignals.set(address, Date.now());
 
@@ -326,6 +377,9 @@ class HolderGrowthScanner {
       gained: holdersGained,
       timeSpan: timeSpanHours.toFixed(2) + 'h',
       total: newest.holders,
+      relativeGrowth: growthRate.toFixed(1) + '%',
+      qualityScore: holderQualityAnalysis?.qualityScore || 0,
+      isOrganic: holderQualityAnalysis?.isOrganicGrowth,
     }, 'Holder growth velocity signal detected');
 
     return {
@@ -343,6 +397,176 @@ class HolderGrowthScanner {
       tokenAgeHours: metrics.tokenAge,
       detectedAt: new Date(),
       trackingStarted: new Date(oldest.timestamp),
+      holderQualityAnalysis,
+    };
+  }
+
+  /**
+   * Analyze holder quality - distinguish organic vs artificial growth
+   * Returns quality score and detailed metrics (informational, not blocking)
+   */
+  private async analyzeHolderQuality(
+    address: string,
+    metrics: TokenMetrics,
+    snapshots: HolderSnapshot[],
+    holdersGained: number,
+    growthRatePercent: number,
+    timeSpanHours: number
+  ): Promise<HolderQualityAnalysis> {
+    const warnings: string[] = [];
+    const positiveSignals: string[] = [];
+    let qualityScore = 50; // Start neutral
+
+    // Initialize metrics with defaults
+    const analysisMetrics = {
+      relativeGrowthPercent: growthRatePercent,
+      estimatedNewWalletPercent: 70,  // Default estimate
+      estimatedExperiencedPercent: 30,
+      avgHoldingSize: 0,
+      growthConsistency: 50,
+    };
+
+    try {
+      // ANALYSIS 1: Relative growth (% of existing holders)
+      // More meaningful than absolute numbers
+      // e.g., 100 new holders when you had 200 (50% growth) vs when you had 10,000 (1% growth)
+      if (growthRatePercent > 100) {
+        // Doubling+ holders very quickly is suspicious
+        qualityScore -= 20;
+        warnings.push(`Extremely rapid growth: ${growthRatePercent.toFixed(0)}% increase`);
+      } else if (growthRatePercent > 50) {
+        // 50%+ growth is notable
+        qualityScore -= 10;
+        warnings.push(`Very fast growth: ${growthRatePercent.toFixed(0)}% increase`);
+      } else if (growthRatePercent >= 10 && growthRatePercent <= 30) {
+        // 10-30% is healthy organic growth
+        qualityScore += 15;
+        positiveSignals.push(`Healthy growth rate: ${growthRatePercent.toFixed(0)}%`);
+      } else if (growthRatePercent >= 5) {
+        qualityScore += 5;
+      }
+
+      // ANALYSIS 2: Growth consistency over time
+      // Organic growth is usually steady, not all at once
+      if (snapshots.length >= 3) {
+        const intervals: number[] = [];
+        for (let i = 1; i < snapshots.length; i++) {
+          const diff = snapshots[i].holders - snapshots[i - 1].holders;
+          intervals.push(diff);
+        }
+
+        // Calculate variance in growth intervals
+        const avgInterval = intervals.reduce((a, b) => a + b, 0) / intervals.length;
+        const variance = intervals.reduce((sum, val) => sum + Math.pow(val - avgInterval, 2), 0) / intervals.length;
+        const stdDev = Math.sqrt(variance);
+        const coeffOfVariation = avgInterval > 0 ? (stdDev / avgInterval) * 100 : 0;
+
+        // Low variance = consistent growth = more organic
+        // High variance = spiky growth = potentially artificial
+        if (coeffOfVariation < 50) {
+          qualityScore += 15;
+          positiveSignals.push('Consistent growth pattern');
+          analysisMetrics.growthConsistency = 80;
+        } else if (coeffOfVariation < 100) {
+          analysisMetrics.growthConsistency = 60;
+        } else if (coeffOfVariation > 150) {
+          qualityScore -= 15;
+          warnings.push('Erratic/spiky growth pattern');
+          analysisMetrics.growthConsistency = 30;
+        }
+      }
+
+      // ANALYSIS 3: Holder size distribution estimate
+      // Use mcap and holder count to estimate avg holding
+      const avgHoldingSize = metrics.marketCap / Math.max(metrics.holderCount, 1);
+      analysisMetrics.avgHoldingSize = avgHoldingSize;
+
+      if (avgHoldingSize > 10000) {
+        // Large average holdings suggest whales, not retail
+        qualityScore -= 10;
+        warnings.push(`High avg holding: $${avgHoldingSize.toFixed(0)}`);
+      } else if (avgHoldingSize >= 100 && avgHoldingSize <= 2000) {
+        // Healthy retail range
+        qualityScore += 10;
+        positiveSignals.push('Healthy retail-sized holdings');
+      } else if (avgHoldingSize < 50) {
+        // Very small holdings might be dust/bots
+        qualityScore -= 5;
+        warnings.push('Very small avg holdings (possible dust/bots)');
+      }
+
+      // ANALYSIS 4: Volume to new holders ratio
+      // High volume with few new holders = existing holders trading
+      // Moderate volume with many new holders = organic adoption
+      const volumePerNewHolder = metrics.volume24h / Math.max(holdersGained, 1);
+
+      if (volumePerNewHolder > 5000) {
+        // $5K+ volume per new holder suggests not just new buyers
+        qualityScore -= 5;
+        warnings.push(`High volume/new holder ratio: $${volumePerNewHolder.toFixed(0)}`);
+      } else if (volumePerNewHolder >= 100 && volumePerNewHolder <= 1000) {
+        qualityScore += 5;
+        positiveSignals.push('Healthy volume per new holder');
+      }
+
+      // ANALYSIS 5: Estimate new vs experienced wallets
+      // Heuristic: Newer tokens tend to attract more new wallets
+      // Older tokens with growth likely have more experienced traders
+      const tokenAgeWeeks = metrics.tokenAge / (24 * 7);
+
+      if (tokenAgeWeeks < 1) {
+        // Very new token - likely all new wallets
+        analysisMetrics.estimatedNewWalletPercent = 85;
+        analysisMetrics.estimatedExperiencedPercent = 15;
+      } else if (tokenAgeWeeks < 4) {
+        // 1-4 weeks old - mixed
+        analysisMetrics.estimatedNewWalletPercent = 70;
+        analysisMetrics.estimatedExperiencedPercent = 30;
+      } else {
+        // Established token with new growth - likely more experienced traders
+        analysisMetrics.estimatedNewWalletPercent = 50;
+        analysisMetrics.estimatedExperiencedPercent = 50;
+        qualityScore += 10;
+        positiveSignals.push('Established token attracting new holders');
+      }
+
+      // ANALYSIS 6: Growth rate relative to token maturity
+      // Young tokens naturally grow faster, so adjust expectations
+      const hourlyGrowthRate = growthRatePercent / Math.max(timeSpanHours, 1);
+
+      if (tokenAgeWeeks > 4 && hourlyGrowthRate > 20) {
+        // Old token suddenly growing 20%/hour is suspicious
+        qualityScore -= 15;
+        warnings.push('Mature token with unusually rapid growth');
+      } else if (tokenAgeWeeks > 4 && hourlyGrowthRate > 5 && hourlyGrowthRate < 15) {
+        // Established token with healthy renewed interest
+        qualityScore += 15;
+        positiveSignals.push('Renewed organic interest in established token');
+      }
+
+      // ANALYSIS 7: Holder count vs market cap sanity check
+      // Very high holders with low mcap = potential airdrop/spam holders
+      const mcapPerHolder = metrics.marketCap / Math.max(metrics.holderCount, 1);
+
+      if (mcapPerHolder < 10) {
+        // Less than $10 mcap per holder suggests artificial inflation
+        qualityScore -= 15;
+        warnings.push('Holder count may be artificially inflated');
+      }
+
+    } catch (error) {
+      logger.debug({ error, address: address.slice(0, 8) }, 'Error analyzing holder quality');
+    }
+
+    // Bound quality score
+    qualityScore = Math.max(0, Math.min(100, qualityScore));
+
+    return {
+      qualityScore,
+      isOrganicGrowth: qualityScore >= 50 && warnings.length <= 1,
+      warnings,
+      metrics: analysisMetrics,
+      positiveSignals,
     };
   }
 

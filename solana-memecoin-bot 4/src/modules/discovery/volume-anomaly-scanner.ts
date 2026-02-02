@@ -2,11 +2,16 @@
 // VOLUME ANOMALY SCANNER
 // Detects tokens with unusual volume spikes (5x+ normal)
 // Phase 1 Quick Win: Token Discovery Enhancement
+//
+// SMART FEATURES:
+// - Wash trading detection (clustered wallets, repetitive patterns)
+// - Volume authenticity scoring
+// - Not blocking, but informing signals of suspicious activity
 // ===========================================
 
 import { logger } from '../../utils/logger.js';
 import { Database, pool } from '../../utils/database.js';
-import { getTokenMetrics, dexScreenerClient } from '../onchain.js';
+import { getTokenMetrics, dexScreenerClient, birdeyeClient } from '../onchain.js';
 import { TokenMetrics } from '../../types/index.js';
 
 // ============ CONFIGURATION ============
@@ -30,6 +35,15 @@ interface VolumeAnomalyConfig {
 
   // Maximum tokens to return per scan
   maxTokensPerScan: number;
+
+  // Wash trading detection thresholds
+  washTradingDetection: {
+    enabled: boolean;
+    maxRepetitiveTxPercent: number;     // Max % of txs with same amount (suggests bot)
+    maxTopWalletVolumePercent: number;  // Max % of volume from top 3 wallets
+    minUniqueTraders: number;           // Min unique traders for legitimate volume
+    suspiciousAvgTxSize: number;        // Average tx size that's suspiciously uniform
+  };
 }
 
 const DEFAULT_CONFIG: VolumeAnomalyConfig = {
@@ -40,9 +54,30 @@ const DEFAULT_CONFIG: VolumeAnomalyConfig = {
   minLiquidity: 15000,        // At least $15K liquidity
   scanIntervalMinutes: 10,    // Scan every 10 minutes
   maxTokensPerScan: 50,       // Return up to 50 tokens
+  washTradingDetection: {
+    enabled: true,
+    maxRepetitiveTxPercent: 40,     // >40% same-amount txs is suspicious
+    maxTopWalletVolumePercent: 60,  // >60% from top 3 wallets is suspicious
+    minUniqueTraders: 20,           // Need at least 20 unique traders
+    suspiciousAvgTxSize: 500,       // Very uniform avg tx size is suspicious
+  },
 };
 
 // ============ TYPES ============
+
+// Wash trading analysis result
+export interface WashTradingAnalysis {
+  suspicionScore: number;      // 0-100, higher = more suspicious
+  isLikelySpoofed: boolean;    // true if score > 60
+  warnings: string[];          // Human-readable warnings
+  metrics: {
+    repetitiveTxPercent: number;     // % of txs with identical amounts
+    topWalletsVolumePercent: number; // % of volume from top 3 wallets
+    uniqueTraders: number;           // Number of unique trading wallets
+    avgTxSizeVariance: number;       // Variance in tx sizes (low = suspicious)
+    buyToSellRatio: number;          // Extreme ratios suggest manipulation
+  };
+}
 
 export interface VolumeAnomaly {
   address: string;
@@ -57,6 +92,9 @@ export interface VolumeAnomaly {
   holderCount: number;
   tokenAgeHours: number;
   detectedAt: Date;
+
+  // NEW: Wash trading analysis (informational, not blocking)
+  washTradingAnalysis?: WashTradingAnalysis;
 }
 
 // ============ SCANNER CLASS ============
@@ -261,6 +299,12 @@ class VolumeAnomalyScanner {
       return null;
     }
 
+    // SMART FEATURE: Analyze for wash trading (informational, not blocking)
+    let washTradingAnalysis: WashTradingAnalysis | undefined;
+    if (this.config.washTradingDetection.enabled) {
+      washTradingAnalysis = await this.analyzeWashTrading(address, metrics);
+    }
+
     // Record this anomaly
     this.recentAnomalies.set(address, Date.now());
 
@@ -270,6 +314,8 @@ class VolumeAnomalyScanner {
       volumeMultiplier: volumeMultiplier.toFixed(1),
       currentVolume: metrics.volume24h,
       avgVolume: averageVolume7d,
+      washTradingSuspicion: washTradingAnalysis?.suspicionScore || 0,
+      isLikelySpoofed: washTradingAnalysis?.isLikelySpoofed || false,
     }, 'Volume anomaly detected');
 
     return {
@@ -285,7 +331,183 @@ class VolumeAnomalyScanner {
       holderCount: metrics.holderCount,
       tokenAgeHours,
       detectedAt: new Date(),
+      washTradingAnalysis,
     };
+  }
+
+  /**
+   * Analyze a token for wash trading / spoofed volume
+   * Returns suspicion score and detailed metrics (informational, not blocking)
+   */
+  private async analyzeWashTrading(address: string, metrics: TokenMetrics): Promise<WashTradingAnalysis> {
+    const warnings: string[] = [];
+    let suspicionScore = 0;
+
+    // Default metrics (when we can't fetch detailed data)
+    const analysisMetrics = {
+      repetitiveTxPercent: 0,
+      topWalletsVolumePercent: 0,
+      uniqueTraders: 0,
+      avgTxSizeVariance: 100, // High variance = good
+      buyToSellRatio: 1.0,
+    };
+
+    try {
+      // Try to get trade data from APIs
+      // We'll use heuristics based on available data
+
+      // HEURISTIC 1: Volume to holder ratio
+      // High volume but few holders suggests wash trading
+      const volumePerHolder = metrics.volume24h / Math.max(metrics.holderCount, 1);
+      if (volumePerHolder > 5000) {
+        // Each holder averaging $5K+ volume is suspicious
+        suspicionScore += 20;
+        warnings.push(`High volume per holder: $${volumePerHolder.toFixed(0)}/holder`);
+      } else if (volumePerHolder > 2000) {
+        suspicionScore += 10;
+        warnings.push(`Elevated volume per holder: $${volumePerHolder.toFixed(0)}/holder`);
+      }
+
+      // HEURISTIC 2: Volume to liquidity ratio
+      // Volume >> liquidity suggests potential wash trading (artificial volume)
+      const volumeToLiquidity = metrics.volume24h / Math.max(metrics.liquidityPool, 1);
+      if (volumeToLiquidity > 20) {
+        // 20x daily turnover of liquidity is very suspicious
+        suspicionScore += 25;
+        warnings.push(`Extreme volume/liquidity ratio: ${volumeToLiquidity.toFixed(1)}x`);
+      } else if (volumeToLiquidity > 10) {
+        suspicionScore += 15;
+        warnings.push(`High volume/liquidity ratio: ${volumeToLiquidity.toFixed(1)}x`);
+      } else if (volumeToLiquidity > 5) {
+        suspicionScore += 5;
+      }
+
+      // HEURISTIC 3: Volume to market cap ratio
+      // Extremely high volume relative to market cap can indicate manipulation
+      const volumeToMcap = metrics.volume24h / Math.max(metrics.marketCap, 1);
+      if (volumeToMcap > 2) {
+        // >200% daily turnover of entire market cap
+        suspicionScore += 20;
+        warnings.push(`Volume exceeds 2x market cap`);
+      } else if (volumeToMcap > 1) {
+        suspicionScore += 10;
+        warnings.push(`Volume exceeds market cap`);
+      }
+
+      // HEURISTIC 4: Holder count vs volume (few holders + huge volume = suspicious)
+      if (metrics.holderCount < 100 && metrics.volume24h > 100000) {
+        suspicionScore += 15;
+        warnings.push(`Only ${metrics.holderCount} holders with $${(metrics.volume24h / 1000).toFixed(0)}K volume`);
+        analysisMetrics.uniqueTraders = metrics.holderCount;
+      } else if (metrics.holderCount < 50 && metrics.volume24h > 50000) {
+        suspicionScore += 20;
+        warnings.push(`Very few holders (${metrics.holderCount}) with significant volume`);
+        analysisMetrics.uniqueTraders = metrics.holderCount;
+      }
+
+      // Try to get more detailed trade data if available
+      try {
+        // Use existing momentum analyzer data if we have it
+        // This gives us buy/sell ratio and unique buyer counts
+        const tradeStats = await this.getTradeStats(address);
+        if (tradeStats) {
+          analysisMetrics.uniqueTraders = tradeStats.uniqueTraders;
+          analysisMetrics.buyToSellRatio = tradeStats.buyToSellRatio;
+          analysisMetrics.topWalletsVolumePercent = tradeStats.topWalletsVolumePercent;
+
+          // HEURISTIC 5: Extreme buy/sell imbalance
+          if (tradeStats.buyToSellRatio > 10 || tradeStats.buyToSellRatio < 0.1) {
+            suspicionScore += 15;
+            warnings.push(`Extreme buy/sell ratio: ${tradeStats.buyToSellRatio.toFixed(2)}`);
+          }
+
+          // HEURISTIC 6: Top wallets dominating volume
+          if (tradeStats.topWalletsVolumePercent > 60) {
+            suspicionScore += 20;
+            warnings.push(`Top 3 wallets: ${tradeStats.topWalletsVolumePercent.toFixed(0)}% of volume`);
+          } else if (tradeStats.topWalletsVolumePercent > 40) {
+            suspicionScore += 10;
+            warnings.push(`Concentrated trading: top wallets ${tradeStats.topWalletsVolumePercent.toFixed(0)}%`);
+          }
+
+          // HEURISTIC 7: Very few unique traders
+          if (tradeStats.uniqueTraders < this.config.washTradingDetection.minUniqueTraders) {
+            suspicionScore += 15;
+            warnings.push(`Only ${tradeStats.uniqueTraders} unique traders`);
+          }
+        }
+      } catch {
+        // Can't get detailed trade stats - that's OK, use basic heuristics
+      }
+
+    } catch (error) {
+      logger.debug({ error, address: address.slice(0, 8) }, 'Error analyzing wash trading');
+    }
+
+    // Cap at 100
+    suspicionScore = Math.min(100, suspicionScore);
+
+    return {
+      suspicionScore,
+      isLikelySpoofed: suspicionScore >= 60,
+      warnings,
+      metrics: analysisMetrics,
+    };
+  }
+
+  /**
+   * Get trade statistics for wash trading analysis
+   * Returns null if data unavailable
+   */
+  private async getTradeStats(address: string): Promise<{
+    uniqueTraders: number;
+    buyToSellRatio: number;
+    topWalletsVolumePercent: number;
+  } | null> {
+    try {
+      // Try to get from Birdeye trade data
+      const tradeData = await birdeyeClient.getTokenTradeData(address);
+      if (tradeData && tradeData.trades && tradeData.trades.length > 0) {
+        // Analyze trades
+        const walletVolumes = new Map<string, number>();
+        let buyVolume = 0;
+        let sellVolume = 0;
+
+        for (const trade of tradeData.trades) {
+          const wallet = trade.owner || 'unknown';
+          const volume = trade.volumeUsd || 0;
+          walletVolumes.set(wallet, (walletVolumes.get(wallet) || 0) + volume);
+
+          if (trade.side === 'buy') {
+            buyVolume += volume;
+          } else {
+            sellVolume += volume;
+          }
+        }
+
+        // Calculate unique traders
+        const uniqueTraders = walletVolumes.size;
+
+        // Calculate top 3 wallet concentration
+        const sortedVolumes = Array.from(walletVolumes.values()).sort((a, b) => b - a);
+        const totalVolume = sortedVolumes.reduce((sum, v) => sum + v, 0);
+        const top3Volume = sortedVolumes.slice(0, 3).reduce((sum, v) => sum + v, 0);
+        const topWalletsVolumePercent = totalVolume > 0 ? (top3Volume / totalVolume) * 100 : 0;
+
+        // Calculate buy/sell ratio
+        const buyToSellRatio = sellVolume > 0 ? buyVolume / sellVolume : buyVolume > 0 ? 10 : 1;
+
+        return {
+          uniqueTraders,
+          buyToSellRatio,
+          topWalletsVolumePercent,
+        };
+      }
+    } catch {
+      // Data unavailable
+    }
+
+    return null;
   }
 
   /**

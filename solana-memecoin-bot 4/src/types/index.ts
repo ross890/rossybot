@@ -415,6 +415,12 @@ export interface DexScreenerPair {
   };
   fdv: number;
   pairCreatedAt?: number; // Unix timestamp in milliseconds when the pair was created
+  priceChange?: {
+    m5?: number;   // 5 minute price change percentage
+    h1?: number;   // 1 hour price change percentage
+    h6?: number;   // 6 hour price change percentage
+    h24?: number;  // 24 hour price change percentage
+  };
   info?: {
     imageUrl?: string;
     header?: string;

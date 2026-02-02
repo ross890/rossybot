@@ -1102,8 +1102,8 @@ export class TelegramAlertBot {
         message += `*${thresholdInfo.name}*\n`;
         message += `Previous: ${thresholdInfo.format(oldValue)}\n`;
         message += `New: ${thresholdInfo.format(newValue)}\n\n`;
-        message += `_Use /thresholds to see all current values_\n`;
-        message += `_Use /adjust\\_thresholds to change another threshold_`;
+        message += `Use /thresholds to see all current values\n`;
+        message += `Use /adjust\\_thresholds to change another threshold`;
 
         await this.bot!.sendMessage(chatId, message, { parse_mode: 'Markdown' });
 
@@ -1169,6 +1169,27 @@ export class TelegramAlertBot {
             message += `• ${pattern.name}: ${pattern.winRate}% WR\n`;
           }
           message += '\n';
+        }
+
+        // DUAL-TRACK performance stats
+        try {
+          const stats = await signalPerformanceTracker.getPerformanceStats(168); // 7 days
+          if (stats.byTrack) {
+            const provenStats = stats.byTrack.PROVEN_RUNNER;
+            const earlyStats = stats.byTrack.EARLY_QUALITY;
+            if (provenStats.count > 0 || earlyStats.count > 0) {
+              message += '🔀 *Track Performance (7d):*\n';
+              if (provenStats.count > 0) {
+                message += `• 🏃 Proven Runner: ${provenStats.count} signals, ${provenStats.winRate.toFixed(0)}% WR\n`;
+              }
+              if (earlyStats.count > 0) {
+                message += `• ⚡ Early Quality: ${earlyStats.count} signals, ${earlyStats.winRate.toFixed(0)}% WR\n`;
+              }
+              message += '\n';
+            }
+          }
+        } catch (trackError) {
+          // Ignore track stats errors
         }
 
         // Prediction output explanation
@@ -1599,6 +1620,17 @@ export class TelegramAlertBot {
       msg += `*By Strength*\n`;
       for (const [strength, data] of activeStrengths) {
         msg += `${strength}: ${data.count} signals, ${data.winRate.toFixed(0)}% WR\n`;
+      }
+      msg += '\n';
+    }
+
+    // By Track (DUAL-TRACK system)
+    const activeTracks = Object.entries(stats.byTrack).filter(([_, d]) => d.count > 0);
+    if (activeTracks.length > 0) {
+      msg += `*By Track*\n`;
+      for (const [track, data] of activeTracks) {
+        const trackLabel = track === 'PROVEN_RUNNER' ? '🏃 Proven' : '⚡ Early';
+        msg += `${trackLabel}: ${data.count} signals, ${data.winRate.toFixed(0)}% WR\n`;
       }
       msg += '\n';
     }

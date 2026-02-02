@@ -16,7 +16,7 @@ import { kolAnalytics } from './kol/kol-analytics.js';
 import { alphaWalletManager } from './alpha/index.js';
 import { bondingCurveMonitor } from './pumpfun/bonding-monitor.js';
 import { dailyDigestGenerator } from './telegram/daily-digest.js';
-import { dailyReportGenerator, signalPerformanceTracker, thresholdOptimizer, winPredictor } from './performance/index.js';
+import { dailyReportGenerator, signalPerformanceTracker, thresholdOptimizer, winPredictor, aiQueryInterface } from './performance/index.js';
 import {
   BuySignal,
   KolWalletActivity,
@@ -465,6 +465,9 @@ export class TelegramAlertBot {
         '*Signal Commands:*\n' +
         '/status - Bot status, uptime & connection health\n' +
         '/performance - Signal performance & win rate report\n' +
+        '/report - Full AI performance analysis with recommendations\n' +
+        '/tweaks - AI-suggested threshold adjustments\n' +
+        '/ask <question> - Ask about performance (e.g. /ask win rate)\n' +
         '/safety <token> - Run safety check on any token\n' +
         '/conviction - High-conviction tokens (2+ KOLs)\n' +
         '/leaderboard - KOL performance rankings\n' +
@@ -776,6 +779,82 @@ export class TelegramAlertBot {
         const errorMessage = error instanceof Error ? error.message : 'Unknown error';
         logger.error({ error, chatId }, 'Failed to get performance report');
         await this.bot!.sendMessage(chatId, `Failed to get performance report: ${errorMessage}`);
+      }
+    });
+
+    // /report command - Full AI-powered performance analysis with recommendations
+    this.bot.onText(/\/report(?:\s+(\d+))?/, async (msg, match) => {
+      const chatId = msg.chat.id;
+      const hours = match?.[1] ? parseInt(match[1]) : 168; // Default 7 days
+
+      try {
+        await this.bot!.sendMessage(chatId, `📊 Generating AI performance report (last ${Math.round(hours / 24)} days)...`, { parse_mode: 'Markdown' });
+
+        const report = await aiQueryInterface.getPerformanceReport(hours);
+        const formattedReport = this.formatAIReport(report);
+
+        // Split into multiple messages if too long
+        const messages = this.splitLongMessage(formattedReport, 4000);
+        for (const message of messages) {
+          await this.bot!.sendMessage(chatId, message, { parse_mode: 'Markdown' });
+        }
+      } catch (error) {
+        const errorMessage = error instanceof Error ? error.message : 'Unknown error';
+        logger.error({ error, chatId }, 'Failed to generate AI report');
+        await this.bot!.sendMessage(chatId, `Failed to generate report: ${errorMessage}`);
+      }
+    });
+
+    // /tweaks command - Get AI-suggested threshold adjustments
+    this.bot.onText(/\/tweaks/, async (msg) => {
+      const chatId = msg.chat.id;
+
+      try {
+        await this.bot!.sendMessage(chatId, '🔧 Analyzing performance data for optimization suggestions...', { parse_mode: 'Markdown' });
+
+        const tweaks = await aiQueryInterface.getSuggestedTweaks();
+
+        if (tweaks.length === 0) {
+          await this.bot!.sendMessage(chatId, '✅ No tweaks suggested - current thresholds appear optimal or insufficient data.', { parse_mode: 'Markdown' });
+          return;
+        }
+
+        let message = '🎯 *AI-SUGGESTED TWEAKS*\n\n';
+        for (const tweak of tweaks) {
+          message += `*${tweak.parameter}*\n`;
+          message += `Current: ${tweak.currentValue} → Suggested: ${tweak.suggestedValue}\n`;
+          message += `📝 _${tweak.reason}_\n`;
+          message += `📈 Expected: ${tweak.expectedImpact}\n\n`;
+        }
+        message += '_Use /adjust\\_thresholds to apply changes manually_';
+
+        await this.bot!.sendMessage(chatId, message, { parse_mode: 'Markdown' });
+      } catch (error) {
+        const errorMessage = error instanceof Error ? error.message : 'Unknown error';
+        logger.error({ error, chatId }, 'Failed to get tweaks');
+        await this.bot!.sendMessage(chatId, `Failed to get suggestions: ${errorMessage}`);
+      }
+    });
+
+    // /ask command - Ask a specific question about performance
+    this.bot.onText(/\/ask\s+(.+)/, async (msg, match) => {
+      const chatId = msg.chat.id;
+      const question = match?.[1];
+
+      if (!question) {
+        await this.bot!.sendMessage(chatId, 'Usage: /ask <question>\nExample: /ask What is the win rate?', { parse_mode: 'Markdown' });
+        return;
+      }
+
+      try {
+        await this.bot!.sendMessage(chatId, '🤔 Analyzing...', { parse_mode: 'Markdown' });
+
+        const answer = await aiQueryInterface.answerQuestion(question);
+        await this.bot!.sendMessage(chatId, answer, { parse_mode: 'Markdown' });
+      } catch (error) {
+        const errorMessage = error instanceof Error ? error.message : 'Unknown error';
+        logger.error({ error, chatId }, 'Failed to answer question');
+        await this.bot!.sendMessage(chatId, `Failed to analyze: ${errorMessage}`);
       }
     });
 
@@ -3108,6 +3187,129 @@ export class TelegramAlertBot {
     if (price >= 1) return price.toFixed(4);
     if (price >= 0.0001) return price.toFixed(6);
     return price.toExponential(4);
+  }
+
+  /**
+   * Format AI performance report for Telegram
+   */
+  private formatAIReport(report: import('./performance/ai-query-interface.js').BotPerformanceReport): string {
+    const healthEmoji = {
+      'EXCELLENT': '🟢',
+      'GOOD': '🟢',
+      'FAIR': '🟡',
+      'POOR': '🟠',
+      'CRITICAL': '🔴',
+    }[report.overallHealth] || '⚪';
+
+    let message = `📊 *ROSSYBOT PERFORMANCE REPORT*\n`;
+    message += `_Last ${Math.round(report.reportPeriodHours / 24)} days_\n\n`;
+
+    // Overall Health
+    message += `${healthEmoji} *Overall Health:* ${report.overallHealth} (${report.healthScore}/100)\n\n`;
+
+    // Trading Performance
+    message += `💰 *TRADING PERFORMANCE*\n`;
+    message += `├ Win Rate: *${report.trading.winRate.toFixed(1)}%*\n`;
+    message += `├ Wins: ${report.trading.wins} | Losses: ${report.trading.losses}\n`;
+    message += `├ Pending: ${report.trading.pending}\n`;
+    message += `├ Avg Win: +${report.trading.avgWinRoi.toFixed(1)}%\n`;
+    message += `└ Avg Loss: ${report.trading.avgLossRoi.toFixed(1)}%\n`;
+
+    if (report.trading.bestTrade) {
+      message += `   🏆 Best: ${report.trading.bestTrade.token} (+${report.trading.bestTrade.roi.toFixed(0)}%)\n`;
+    }
+    if (report.trading.worstTrade) {
+      message += `   💔 Worst: ${report.trading.worstTrade.token} (${report.trading.worstTrade.roi.toFixed(0)}%)\n`;
+    }
+    message += '\n';
+
+    // Signal Breakdown
+    message += `📡 *SIGNALS*\n`;
+    message += `├ Generated: ${report.signals.totalGenerated}\n`;
+    message += `├ Sent: ${report.signals.totalSent}\n`;
+    message += `├ Filtered: ${report.signals.totalFiltered} (${report.signals.filterRate.toFixed(0)}%)\n`;
+    message += `└ By Type: On-chain ${report.signals.byType.onchain} | KOL ${report.signals.byType.kol}\n\n`;
+
+    // Track Performance
+    if (report.signals.byTrack.provenRunner.count > 0 || report.signals.byTrack.earlyQuality.count > 0) {
+      message += `🛤 *BY TRACK*\n`;
+      message += `├ PROVEN\\_RUNNER: ${report.signals.byTrack.provenRunner.winRate.toFixed(0)}% win (${report.signals.byTrack.provenRunner.count})\n`;
+      message += `└ EARLY\\_QUALITY: ${report.signals.byTrack.earlyQuality.winRate.toFixed(0)}% win (${report.signals.byTrack.earlyQuality.count})\n\n`;
+    }
+
+    // System Health
+    message += `🖥 *SYSTEM HEALTH*\n`;
+    message += `├ API Score: ${report.systemHealth.apiHealthScore}/100\n`;
+    message += `├ DB Score: ${report.systemHealth.dbHealthScore}/100\n`;
+    message += `├ Memory: ${report.systemHealth.memoryUsageMb.toFixed(0)} MB\n`;
+    message += `└ Errors (24h): ${report.systemHealth.errorCount}\n\n`;
+
+    // Factor Analysis
+    if (report.factorAnalysis.workingWell.length > 0) {
+      message += `✅ *WORKING WELL*\n`;
+      message += `${report.factorAnalysis.workingWell.slice(0, 3).join(', ')}\n\n`;
+    }
+
+    if (report.factorAnalysis.needsImprovement.length > 0) {
+      message += `⚠️ *NEEDS ATTENTION*\n`;
+      message += `${report.factorAnalysis.needsImprovement.slice(0, 3).join(', ')}\n\n`;
+    }
+
+    // Recommendations
+    if (report.recommendations.length > 0) {
+      message += `💡 *RECOMMENDATIONS*\n`;
+      const topRecs = report.recommendations.slice(0, 3);
+      for (const rec of topRecs) {
+        const priorityEmoji = rec.priority === 'HIGH' ? '🔴' : rec.priority === 'MEDIUM' ? '🟡' : '🟢';
+        message += `${priorityEmoji} ${rec.issue}\n`;
+        message += `   _${rec.suggestion}_\n`;
+      }
+      message += '\n';
+    }
+
+    // Current Thresholds
+    message += `⚙️ *CURRENT THRESHOLDS*\n`;
+    message += `├ Min OnChain: ${report.currentThresholds.minOnChainScore}\n`;
+    message += `├ Min Momentum: ${report.currentThresholds.minMomentumScore}\n`;
+    message += `├ Min Safety: ${report.currentThresholds.minSafetyScore}\n`;
+    message += `└ Max Bundle Risk: ${report.currentThresholds.maxBundleRiskScore}\n\n`;
+
+    message += `_Use /tweaks for AI-suggested optimizations_`;
+
+    return message;
+  }
+
+  /**
+   * Split a long message into multiple messages
+   */
+  private splitLongMessage(message: string, maxLength: number): string[] {
+    if (message.length <= maxLength) {
+      return [message];
+    }
+
+    const messages: string[] = [];
+    let remaining = message;
+
+    while (remaining.length > 0) {
+      if (remaining.length <= maxLength) {
+        messages.push(remaining);
+        break;
+      }
+
+      // Find a good break point (newline or space)
+      let breakPoint = remaining.lastIndexOf('\n', maxLength);
+      if (breakPoint === -1 || breakPoint < maxLength * 0.5) {
+        breakPoint = remaining.lastIndexOf(' ', maxLength);
+      }
+      if (breakPoint === -1) {
+        breakPoint = maxLength;
+      }
+
+      messages.push(remaining.substring(0, breakPoint));
+      remaining = remaining.substring(breakPoint).trim();
+    }
+
+    return messages;
   }
 }
 

@@ -29,7 +29,25 @@ export enum LinkMethod {
   BEHAVIOURAL_MATCH = 'BEHAVIOURAL_MATCH',
   TEMPORAL_CORRELATION = 'TEMPORAL_CORRELATION',
   CEX_WITHDRAWAL_PATTERN = 'CEX_WITHDRAWAL_PATTERN',
-  SHARED_TOKEN_OVERLAP = 'SHARED_TOKEN_OVERLAP'
+  SHARED_TOKEN_OVERLAP = 'SHARED_TOKEN_OVERLAP',
+  MANUAL_ALPHA = 'MANUAL_ALPHA'  // User-submitted alpha wallet
+}
+
+// ============ ALPHA WALLET ENUMS ============
+
+// Source of KOL/wallet entry - distinguishes verified KOLs from user-submitted alpha wallets
+export enum WalletSource {
+  VERIFIED = 'VERIFIED',    // Manually verified KOL wallet
+  MANUAL = 'MANUAL'         // User-submitted alpha wallet via Telegram
+}
+
+// Alpha wallet lifecycle status
+export enum AlphaWalletStatus {
+  PROBATION = 'PROBATION',   // < 10 trades, being evaluated
+  ACTIVE = 'ACTIVE',         // Passed probation, generating signals
+  TRUSTED = 'TRUSTED',       // High performer, full signal weight
+  SUSPENDED = 'SUSPENDED',   // Below threshold, on warning
+  REMOVED = 'REMOVED'        // Auto-pruned due to poor performance
 }
 
 export enum ScamFilterResult {
@@ -153,6 +171,72 @@ export interface KolWalletActivity {
     supplyPercent: number;
     timestamp: Date;
   };
+}
+
+// ============ ALPHA WALLET TYPES ============
+
+// Alpha wallet - user-submitted wallet for tracking
+export interface AlphaWallet {
+  id: string;
+  address: string;
+  label: string | null;           // Optional user-provided label
+  source: WalletSource;
+  status: AlphaWalletStatus;
+  addedBy: string;                // Telegram user ID who added it
+  addedAt: Date;
+
+  // Performance metrics (rolling 30 days)
+  totalTrades: number;
+  wins: number;
+  losses: number;
+  winRate: number;
+  avgRoi: number;
+
+  // Lifecycle tracking
+  probationEndsAt: Date | null;   // After 10 trades
+  lastTradeAt: Date | null;
+  lastEvaluatedAt: Date | null;
+  suspendedAt: Date | null;
+  suspensionCount: number;        // Number of times suspended
+
+  // Signal weight (0-1.0)
+  signalWeight: number;
+
+  updatedAt: Date;
+}
+
+// Alpha wallet trade record
+export interface AlphaWalletTrade {
+  id: string;
+  walletId: string;
+  walletAddress: string;
+  tokenAddress: string;
+  tokenTicker: string | null;
+  tradeType: 'BUY' | 'SELL';
+  solAmount: number;
+  tokenAmount: number;
+  priceAtTrade: number;
+  txSignature: string;
+  timestamp: Date;
+
+  // For completed round-trips
+  entryTradeId: string | null;    // Links sell to buy
+  roi: number | null;
+  isWin: boolean | null;
+  holdTimeHours: number | null;
+}
+
+// Alpha wallet performance evaluation result
+export interface AlphaWalletEvaluation {
+  walletId: string;
+  address: string;
+  previousStatus: AlphaWalletStatus;
+  newStatus: AlphaWalletStatus;
+  winRate: number;
+  totalTrades: number;
+  avgRoi: number;
+  recommendation: 'KEEP' | 'WARN' | 'SUSPEND' | 'REMOVE';
+  reason: string;
 }
 
 // ============ TOKEN TYPES ============

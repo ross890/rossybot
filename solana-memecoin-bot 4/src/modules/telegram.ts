@@ -63,6 +63,12 @@ export class TelegramAlertBot {
   private startTime: Date | null = null;
   private isWebhookMode: boolean = false;
 
+  // NEW: In-memory deduplication - tracks recently sent signals to prevent duplicates
+  // This catches duplicates faster than database lookup (within same scan cycle)
+  private recentlySentSignals: Map<string, number> = new Map();
+  private readonly DEDUP_CACHE_TTL_MS = 30 * 60 * 1000; // 30 minutes
+  private readonly LEARNING_MODE_COOLDOWN_MS = 30 * 60 * 1000; // 30 min cooldown in learning mode
+
   // State tracking for conversational threshold adjustment
   private thresholdAdjustmentState: Map<number, ThresholdAdjustmentState> = new Map();
 
@@ -1164,21 +1170,24 @@ export class TelegramAlertBot {
       
       // Update KOL cooldown
       this.lastKolSignalTime.set(signal.kolActivity.kol.handle, Date.now());
-      
+
+      // Mark signal as sent in dedup cache to prevent duplicates
+      this.markSignalSent(signal.tokenAddress);
+
       logger.info({
         tokenAddress: signal.tokenAddress,
         ticker: signal.tokenTicker,
         score: signal.score.compositeScore,
         kol: signal.kolActivity.kol.handle,
       }, 'Buy signal sent');
-      
+
       return true;
     } catch (error) {
       logger.error({ error, signal: signal.tokenAddress }, 'Failed to send Telegram alert');
       return false;
     }
   }
-  
+
   /**
    * Format buy signal message
    */
@@ -1518,15 +1527,51 @@ export class TelegramAlertBot {
 
   /**
    * Check rate limits before sending
-   * LEARNING MODE: Bypasses all rate limits to maximize data collection
+   * LEARNING MODE: Bypasses most rate limits but KEEPS deduplication to prevent spam
    */
   private async checkRateLimits(signal: BuySignal): Promise<{ allowed: boolean; reason?: string }> {
-    // LEARNING MODE: Bypass all rate limits to collect more training data
+    // Clean up old entries from in-memory dedup cache
+    this.cleanupDedupCache();
+
+    // CRITICAL: Check in-memory dedup cache FIRST (fastest check, catches same-cycle duplicates)
+    const lastSentTime = this.recentlySentSignals.get(signal.tokenAddress);
+    if (lastSentTime) {
+      const timeSince = Date.now() - lastSentTime;
+      const cooldown = appConfig.trading.learningMode
+        ? this.LEARNING_MODE_COOLDOWN_MS
+        : RATE_LIMITS.TOKEN_COOLDOWN_MS;
+
+      if (timeSince < cooldown) {
+        logger.debug({
+          tokenAddress: signal.tokenAddress,
+          timeSinceMs: timeSince,
+          cooldownMs: cooldown,
+        }, 'Duplicate signal blocked by in-memory cache');
+        return { allowed: false, reason: 'Duplicate signal (in-memory cache)' };
+      }
+    }
+
+    // LEARNING MODE: Bypass hourly/daily limits but KEEP deduplication
+    // This allows more signals while preventing spam from the same token
     if (appConfig.trading.learningMode) {
-      logger.debug({ tokenAddress: signal.tokenAddress }, 'Learning mode: bypassing rate limits');
+      // Still check database for token cooldown (in case bot restarted)
+      const lastTokenSignal = await Database.getLastSignalTime(signal.tokenAddress);
+      if (lastTokenSignal) {
+        const timeSince = Date.now() - lastTokenSignal.getTime();
+        if (timeSince < this.LEARNING_MODE_COOLDOWN_MS) {
+          logger.debug({
+            tokenAddress: signal.tokenAddress,
+            timeSinceMs: timeSince,
+          }, 'Learning mode: duplicate blocked (30 min cooldown)');
+          return { allowed: false, reason: 'Token duplicate (30 min learning cooldown)' };
+        }
+      }
+
+      logger.debug({ tokenAddress: signal.tokenAddress }, 'Learning mode: rate limits bypassed (dedup passed)');
       return { allowed: true };
     }
 
+    // PRODUCTION MODE: Full rate limiting
     // Check hourly limit
     const hourlyCount = await Database.getRecentSignalCount(1);
     if (hourlyCount >= RATE_LIMITS.MAX_SIGNALS_PER_HOUR) {
@@ -1539,7 +1584,7 @@ export class TelegramAlertBot {
       return { allowed: false, reason: 'Daily signal limit reached' };
     }
 
-    // Check token cooldown
+    // Check token cooldown from database
     const lastTokenSignal = await Database.getLastSignalTime(signal.tokenAddress);
     if (lastTokenSignal) {
       const timeSince = Date.now() - lastTokenSignal.getTime();
@@ -1558,6 +1603,25 @@ export class TelegramAlertBot {
     }
 
     return { allowed: true };
+  }
+
+  /**
+   * Clean up old entries from deduplication cache
+   */
+  private cleanupDedupCache(): void {
+    const now = Date.now();
+    for (const [address, timestamp] of this.recentlySentSignals) {
+      if (now - timestamp > this.DEDUP_CACHE_TTL_MS) {
+        this.recentlySentSignals.delete(address);
+      }
+    }
+  }
+
+  /**
+   * Mark a signal as sent in the dedup cache
+   */
+  private markSignalSent(tokenAddress: string): void {
+    this.recentlySentSignals.set(tokenAddress, Date.now());
   }
   
   /**
@@ -2068,6 +2132,42 @@ export class TelegramAlertBot {
       return false;
     }
 
+    // Clean up and check dedup cache
+    this.cleanupDedupCache();
+
+    const lastSentTime = this.recentlySentSignals.get(signal.tokenAddress);
+    if (lastSentTime) {
+      const timeSince = Date.now() - lastSentTime;
+      const cooldown = appConfig.trading.learningMode
+        ? this.LEARNING_MODE_COOLDOWN_MS
+        : RATE_LIMITS.TOKEN_COOLDOWN_MS;
+
+      if (timeSince < cooldown) {
+        logger.debug({
+          tokenAddress: signal.tokenAddress,
+          timeSinceMs: timeSince,
+        }, 'On-chain signal blocked by dedup cache');
+        return false;
+      }
+    }
+
+    // Check database for recent signals (in case of restart)
+    const lastDbSignal = await Database.getLastSignalTime(signal.tokenAddress);
+    if (lastDbSignal) {
+      const timeSince = Date.now() - lastDbSignal.getTime();
+      const cooldown = appConfig.trading.learningMode
+        ? this.LEARNING_MODE_COOLDOWN_MS
+        : RATE_LIMITS.TOKEN_COOLDOWN_MS;
+
+      if (timeSince < cooldown) {
+        logger.debug({
+          tokenAddress: signal.tokenAddress,
+          timeSinceMs: timeSince,
+        }, 'On-chain signal blocked by database check');
+        return false;
+      }
+    }
+
     try {
       const message = this.formatOnChainSignal(signal);
 
@@ -2084,6 +2184,9 @@ export class TelegramAlertBot {
         signal.onChainScore?.total || 0,
         'ONCHAIN_MOMENTUM'
       );
+
+      // Mark signal as sent in dedup cache
+      this.markSignalSent(signal.tokenAddress);
 
       logger.info({
         tokenAddress: signal.tokenAddress,

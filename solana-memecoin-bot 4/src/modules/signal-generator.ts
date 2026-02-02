@@ -506,26 +506,30 @@ export class SignalGenerator {
     // ============ PATH B: NO KOL - ON-CHAIN MOMENTUM ANALYSIS ============
     // NEW: Use on-chain momentum analysis instead of social metrics
 
+    logger.info({ tokenAddress: shortAddr, ticker: metrics.ticker }, 'EVAL: Entering PATH B (no KOL) - calculating on-chain score');
+
     // Step 1: Calculate comprehensive on-chain score (handles momentum + bundle internally)
     const onChainScore = await onChainScoringEngine.calculateScore(tokenAddress, metrics);
 
-    logger.debug({
-      tokenAddress,
+    logger.info({
+      tokenAddress: shortAddr,
       ticker: metrics.ticker,
       onChainTotal: onChainScore.total,
       recommendation: onChainScore.recommendation,
       riskLevel: onChainScore.riskLevel,
-      components: onChainScore.components,
-    }, 'On-chain scoring complete');
+      momentum: onChainScore.components.momentum,
+      safety: onChainScore.components.safety,
+    }, 'EVAL: On-chain scoring complete');
 
     // Step 2: Check if bundle/safety risk is too high
     // Only block CRITICAL risk - HIGH risk tokens can still generate signals with warnings
     if (onChainScore.riskLevel === 'CRITICAL') {
-      logger.debug({
-        tokenAddress,
+      logger.info({
+        tokenAddress: shortAddr,
+        ticker: metrics.ticker,
         riskLevel: onChainScore.riskLevel,
         warnings: onChainScore.warnings,
-      }, 'Token blocked by risk assessment');
+      }, 'EVAL: BLOCKED - Critical risk level');
       return SignalGenerator.EVAL_RESULTS.BUNDLE_BLOCKED;
     }
 
@@ -535,11 +539,12 @@ export class SignalGenerator {
     const MIN_ONCHAIN_SCORE = thresholds.minOnChainScore;
 
     if (onChainScore.components.momentum < MIN_MOMENTUM_SCORE) {
-      logger.debug({
-        tokenAddress,
+      logger.info({
+        tokenAddress: shortAddr,
+        ticker: metrics.ticker,
         momentumScore: onChainScore.components.momentum,
         minRequired: MIN_MOMENTUM_SCORE,
-      }, 'Token did not meet momentum threshold');
+      }, 'EVAL: BLOCKED - Momentum below threshold');
       return SignalGenerator.EVAL_RESULTS.MOMENTUM_FAILED;
     }
 

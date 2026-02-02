@@ -209,6 +209,22 @@ export class DailyReportGenerator {
     }
     msg += '\n';
 
+    // DUAL-TRACK: By Signal Track
+    if (stats.byTrack) {
+      const provenStats = stats.byTrack.PROVEN_RUNNER;
+      const earlyStats = stats.byTrack.EARLY_QUALITY;
+      if (provenStats.count > 0 || earlyStats.count > 0) {
+        msg += `🔀 **By Signal Track**\n`;
+        if (provenStats.count > 0) {
+          msg += `• 🏃 Proven Runner: ${provenStats.count} signals, ${provenStats.winRate.toFixed(0)}% win, ${this.formatReturn(provenStats.avgReturn)} avg\n`;
+        }
+        if (earlyStats.count > 0) {
+          msg += `• ⚡ Early Quality: ${earlyStats.count} signals, ${earlyStats.winRate.toFixed(0)}% win, ${this.formatReturn(earlyStats.avgReturn)} avg\n`;
+        }
+        msg += '\n';
+      }
+    }
+
     // Separator
     msg += `━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n`;
 

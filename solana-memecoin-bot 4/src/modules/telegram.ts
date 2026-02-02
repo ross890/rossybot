@@ -91,6 +91,11 @@ export class TelegramAlertBot {
   private readonly SIGNAL_HISTORY_TTL_MS = 4 * 60 * 60 * 1000; // 4 hours - track follow-ups within this window
   private readonly MIN_FOLLOWUP_INTERVAL_MS = 10 * 60 * 1000; // 10 min minimum between follow-ups
 
+  // RACE CONDITION PROTECTION: Synchronous lock to prevent parallel processes from sending duplicate signals
+  // A token is added to this Set IMMEDIATELY when signal processing starts, before any async operations
+  // This prevents TOCTOU (Time Of Check To Time Of Use) race conditions where two processes both pass the history check
+  private signalsInProgress: Set<string> = new Set();
+
   // State tracking for conversational threshold adjustment
   private thresholdAdjustmentState: Map<number, ThresholdAdjustmentState> = new Map();
 
@@ -1164,19 +1169,30 @@ export class TelegramAlertBot {
       return false;
     }
 
-    // Check rate limits
-    const rateLimitResult = await this.checkRateLimits(signal);
-    if (!rateLimitResult.allowed) {
-      logger.info({ reason: rateLimitResult.reason, tokenAddress: signal.tokenAddress },
-        'Signal blocked by rate limit');
-      this.signalQueue.push(signal);
+    // RACE CONDITION PROTECTION: Synchronous check BEFORE any async operations
+    if (this.signalsInProgress.has(signal.tokenAddress)) {
+      logger.debug({
+        tokenAddress: signal.tokenAddress,
+      }, 'Buy signal already in progress (race condition prevented)');
       return false;
     }
 
-    // Analyze follow-up context BEFORE recording (so we compare to previous state)
-    const followUpContext = this.analyzeFollowUpContext(signal);
+    // Immediately mark as in-progress (synchronous)
+    this.signalsInProgress.add(signal.tokenAddress);
 
     try {
+      // Check rate limits
+      const rateLimitResult = await this.checkRateLimits(signal);
+      if (!rateLimitResult.allowed) {
+        logger.info({ reason: rateLimitResult.reason, tokenAddress: signal.tokenAddress },
+          'Signal blocked by rate limit');
+        this.signalQueue.push(signal);
+        return false;
+      }
+
+      // Analyze follow-up context BEFORE recording (so we compare to previous state)
+      const followUpContext = this.analyzeFollowUpContext(signal);
+
       const message = this.formatBuySignal(signal, followUpContext);
 
       await this.bot.sendMessage(this.chatId, message, {
@@ -1212,6 +1228,9 @@ export class TelegramAlertBot {
     } catch (error) {
       logger.error({ error, signal: signal.tokenAddress }, 'Failed to send Telegram alert');
       return false;
+    } finally {
+      // Always remove from in-progress set when done
+      this.signalsInProgress.delete(signal.tokenAddress);
     }
   }
 
@@ -2334,26 +2353,38 @@ export class TelegramAlertBot {
       return false;
     }
 
-    // Clean up signal history
-    this.cleanupSignalHistory();
-
-    // Check minimum interval between signals for the same token
-    const previousSnapshot = this.signalHistory.get(signal.tokenAddress);
-    if (previousSnapshot) {
-      const timeSince = Date.now() - previousSnapshot.timestamp;
-      if (timeSince < this.MIN_FOLLOWUP_INTERVAL_MS) {
-        logger.debug({
-          tokenAddress: signal.tokenAddress,
-          timeSinceMs: timeSince,
-        }, 'On-chain follow-up too soon (10 min minimum)');
-        return false;
-      }
+    // RACE CONDITION PROTECTION: Synchronous check BEFORE any async operations
+    // This prevents two parallel processes from both passing the history check
+    if (this.signalsInProgress.has(signal.tokenAddress)) {
+      logger.debug({
+        tokenAddress: signal.tokenAddress,
+      }, 'Signal already in progress (race condition prevented)');
+      return false;
     }
 
-    // Analyze follow-up context for on-chain signals
-    const followUpContext = this.analyzeOnChainFollowUp(signal, previousSnapshot);
+    // Immediately mark as in-progress (synchronous - prevents race condition)
+    this.signalsInProgress.add(signal.tokenAddress);
 
     try {
+      // Clean up signal history
+      this.cleanupSignalHistory();
+
+      // Check minimum interval between signals for the same token
+      const previousSnapshot = this.signalHistory.get(signal.tokenAddress);
+      if (previousSnapshot) {
+        const timeSince = Date.now() - previousSnapshot.timestamp;
+        if (timeSince < this.MIN_FOLLOWUP_INTERVAL_MS) {
+          logger.debug({
+            tokenAddress: signal.tokenAddress,
+            timeSinceMs: timeSince,
+          }, 'On-chain follow-up too soon (10 min minimum)');
+          return false;
+        }
+      }
+
+      // Analyze follow-up context for on-chain signals
+      const followUpContext = this.analyzeOnChainFollowUp(signal, previousSnapshot);
+
       const message = this.formatOnChainSignal(signal, followUpContext);
 
       await this.bot.sendMessage(this.chatId, message, {
@@ -2408,6 +2439,9 @@ export class TelegramAlertBot {
         logger.error({ error: fallbackError }, 'Failed to send fallback signal too');
         return false;
       }
+    } finally {
+      // Always remove from in-progress set when done (success or failure)
+      this.signalsInProgress.delete(signal.tokenAddress);
     }
   }
 

@@ -807,7 +807,7 @@ export class SignalGenerator {
       recommendation: onChainScore.recommendation,
       positionSize: positionSize.solAmount,
       signalStrength: signalQuality.signalStrength,
-    }, 'On-chain momentum signal sent');
+    }, 'On-chain signal evaluation complete');
 
     // Track Pump.fun tokens
     if (await bondingCurveMonitor.isPumpfunToken(tokenAddress)) {

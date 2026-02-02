@@ -35,7 +35,7 @@ import { onChainScoringEngine, OnChainScore } from './onchain-scoring.js';
 import { smallCapitalManager, SignalQuality } from './small-capital-manager.js';
 
 // Performance tracking and prediction
-import { signalPerformanceTracker, thresholdOptimizer, winPredictor, WinPrediction } from './performance/index.js';
+import { signalPerformanceTracker, thresholdOptimizer, winPredictor, WinPrediction, performanceLogger } from './performance/index.js';
 
 // Social/X integration
 import { socialAnalyzer } from './social/index.js';
@@ -166,6 +166,14 @@ export class SignalGenerator {
       logger.warn({ error }, 'Failed to initialize discovery engine - using basic discovery');
     }
 
+    // Initialize performance logger for metrics collection
+    try {
+      await performanceLogger.initialize();
+      logger.info('Performance logger initialized - metrics and logs collection active');
+    } catch (error) {
+      logger.warn({ error }, 'Failed to initialize performance logger');
+    }
+
     // Log learning mode status prominently
     const learningMode = appConfig.trading.learningMode;
     logger.info({
@@ -226,6 +234,13 @@ export class SignalGenerator {
       // Ignore errors on stop
     }
 
+    // Stop performance logger
+    try {
+      performanceLogger.stop();
+    } catch {
+      // Ignore errors on stop
+    }
+
     logger.info('Signal generator stopped');
   }
   
@@ -233,6 +248,7 @@ export class SignalGenerator {
    * Run a single scan cycle
    */
   private async runScanCycle(): Promise<void> {
+    const cycleStartTime = Date.now();
     try {
       // Step 1: Get candidate tokens (new listings + active tokens)
       const candidates = await this.getCandidateTokens();
@@ -312,8 +328,26 @@ export class SignalGenerator {
         discoveries: discoverySignals,
         kolValidations: kolValidationSignals,
       }, '=== SCAN CYCLE COMPLETE: Token evaluation results ===');
+
+      // Log scan cycle metrics for performance tracking
+      const cycleTimeMs = Date.now() - cycleStartTime;
+      await performanceLogger.logScanCycle({
+        totalCandidates: candidates.length,
+        preFilterPassed: preFiltered.length,
+        safetyBlocked,
+        scamRejected,
+        scoringFailed,
+        momentumFailed,
+        bundleBlocked,
+        signalsGenerated: signalsGenerated + onchainSignals + kolValidationSignals,
+        onchainSignals,
+        kolSignals: signalsGenerated,
+        discoverySignals,
+        cycleTimeMs,
+      }).catch(err => logger.debug({ err }, 'Failed to log scan cycle metrics'));
     } catch (error) {
       logger.error({ error }, 'Error in scan cycle');
+      await performanceLogger.logError('SYSTEM', 'Scan cycle error', error).catch(() => {});
     }
   }
   

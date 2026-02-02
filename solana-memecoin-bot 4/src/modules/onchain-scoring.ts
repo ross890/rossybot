@@ -597,13 +597,17 @@ export class OnChainScoringEngine {
       if (bullishSignals.length > 0) {
         rationale.push(`Bullish: ${bullishSignals.slice(0, 2).join(', ')}`);
       }
-    } else if (score >= 40) {  // Lowered from WATCH (50) to 40
+    } else if (score >= 30) {  // ALIGNED WITH minOnChainScore (30) - prevents threshold conflict
+      // Previously set to 40, which caused conflict:
+      // - minOnChainScore: 30 (tokens with score >= 30 should pass)
+      // - WATCH threshold: 40 (tokens 30-39 got AVOID and were blocked)
+      // Now aligned to 30 so tokens 30-39 get WATCH (can generate signals) not AVOID (blocked)
       recommendation = 'WATCH';
       rationale.push(`Moderate score (${score}) - monitor for improvement`);
       if (warnings.length > 0) {
         rationale.push(`Watch for: ${warnings.slice(0, 2).join(', ')}`);
       }
-    } else if (score >= 25) {  // Lowered from AVOID (35) to 25
+    } else if (score >= 20) {  // Lowered from 25 to 20 - gives AVOID more range
       recommendation = 'AVOID';
       rationale.push(`Below threshold (${score})`);
       if (bearishSignals.length > 0) {

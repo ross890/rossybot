@@ -381,7 +381,8 @@ export class TelegramAlertBot {
         '/apply\\_thresholds - Apply recommended changes\n' +
         '/reset\\_thresholds - Reset to defaults\n\n' +
         '*Learning & Predictions:*\n' +
-        '/learning - ML prediction system info\n\n' +
+        '/learning - ML prediction system info\n' +
+        '/learningmode - Check learning mode status\n\n' +
         '/help - Show all commands',
         { parse_mode: 'Markdown' }
       );
@@ -422,7 +423,8 @@ export class TelegramAlertBot {
         '/apply\\_thresholds - Apply recommended changes\n' +
         '/reset\\_thresholds - Reset to defaults\n\n' +
         '*Learning & Predictions:*\n' +
-        '/learning - How the ML prediction system works\n\n' +
+        '/learning - How the ML prediction system works\n' +
+        '/learningmode - Check/configure learning mode\n\n' +
         '*Signal Format:*\n' +
         'Each buy signal includes:\n' +
         '• Token details and metrics\n' +
@@ -974,6 +976,69 @@ export class TelegramAlertBot {
         const errorMessage = error instanceof Error ? error.message : 'Unknown error';
         logger.error({ error, chatId }, 'Failed to get learning info');
         await this.bot!.sendMessage(chatId, `Failed to get learning info: ${errorMessage}`);
+      }
+    });
+
+    // /learningmode command - Show current learning mode status
+    this.bot.onText(/\/learningmode/, async (msg) => {
+      const chatId = msg.chat.id;
+
+      try {
+        const isLearningMode = appConfig.trading.learningMode;
+        const modelSummary = winPredictor.getModelSummary();
+        const thresholds = thresholdOptimizer.getCurrentThresholds();
+
+        let message = '🎓 *LEARNING MODE STATUS*\n\n';
+
+        // Current status
+        if (isLearningMode) {
+          message += '✅ *Learning Mode:* ENABLED\n\n';
+          message += '*What this means:*\n';
+          message += '• Signal filtering is RELAXED to collect more data\n';
+          message += '• Only STRONG\\_AVOID recommendations are blocked\n';
+          message += '• ML probability threshold lowered to 15%\n';
+          message += '• More signals will come through for training\n\n';
+        } else {
+          message += '🔒 *Learning Mode:* DISABLED\n\n';
+          message += '*What this means:*\n';
+          message += '• Signal filtering is STRICT for quality\n';
+          message += '• Both AVOID and STRONG\\_AVOID blocked\n';
+          message += '• ML probability threshold at 25%\n';
+          message += '• Fewer but higher quality signals\n\n';
+        }
+
+        // Signal thresholds in effect
+        message += '*Current Signal Thresholds:*\n';
+        message += `• Min Momentum Score: ${thresholds.minMomentumScore}\n`;
+        message += `• Min OnChain Score: ${thresholds.minOnChainScore}\n`;
+        message += `• ML Probability Threshold: ${isLearningMode ? '15%' : '25%'}\n\n`;
+
+        // Training data status
+        message += '*Training Data:*\n';
+        message += `• Model trained: ${modelSummary.lastTrained ? 'Yes' : 'Not yet'}\n`;
+        message += `• Patterns discovered: ${modelSummary.winningPatterns.length + modelSummary.losingPatterns.length}\n\n`;
+
+        // Recommendation
+        if (isLearningMode) {
+          message += '💡 *Recommendation:*\n';
+          message += 'Keep learning mode ON until you have:\n';
+          message += '• At least 30 completed signals\n';
+          message += '• At least 5 winning patterns discovered\n';
+          message += '• Stable win rate in performance reports\n\n';
+          message += '_Set LEARNING\\_MODE=false in .env to disable_';
+        } else {
+          message += '💡 *Recommendation:*\n';
+          message += 'If you are not receiving signals, consider:\n';
+          message += '• Setting LEARNING\\_MODE=true in .env\n';
+          message += '• Lowering minOnChainScore threshold\n';
+          message += '• Checking /thresholds for current values';
+        }
+
+        await this.bot!.sendMessage(chatId, message, { parse_mode: 'Markdown' });
+      } catch (error) {
+        const errorMessage = error instanceof Error ? error.message : 'Unknown error';
+        logger.error({ error, chatId }, 'Failed to get learning mode info');
+        await this.bot!.sendMessage(chatId, `Failed to get learning mode info: ${errorMessage}`);
       }
     });
   }

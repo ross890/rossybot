@@ -298,6 +298,7 @@ export interface TradingConfig {
   maxSignalsPerDay: number;
   minScoreBuySignal: number;
   minScoreWatchSignal: number;
+  learningMode: boolean;
 }
 
 export interface ScreeningConfig {

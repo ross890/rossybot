@@ -43,6 +43,11 @@ const envSchema = z.object({
   MAX_SIGNALS_PER_DAY: z.coerce.number().default(20),
   MIN_SCORE_BUY_SIGNAL: z.coerce.number().default(70),
   MIN_SCORE_WATCH_SIGNAL: z.coerce.number().default(55),
+
+  // Learning mode (default: true - allows more signals for ML training)
+  // When enabled: relaxes signal filtering to collect more data for model training
+  // Set to false once you have enough data and want stricter signal quality
+  LEARNING_MODE: z.coerce.boolean().default(true),
   
   // Screening (with defaults) - Aggressively optimized for early entries
   MIN_MARKET_CAP: z.coerce.number().default(10000),      // Lowered from 25k - catch microcaps early
@@ -87,6 +92,7 @@ function loadConfig(): AppConfig {
       maxSignalsPerDay: env.MAX_SIGNALS_PER_DAY,
       minScoreBuySignal: env.MIN_SCORE_BUY_SIGNAL,
       minScoreWatchSignal: env.MIN_SCORE_WATCH_SIGNAL,
+      learningMode: env.LEARNING_MODE,
     },
     
     screening: {

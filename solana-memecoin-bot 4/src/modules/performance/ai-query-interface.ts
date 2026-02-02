@@ -214,11 +214,13 @@ export class AIQueryInterface {
           tradesDetected: winLossAnalysis?.byKol?.reduce((sum, k) => sum + k.wins + k.losses, 0) || 0,
           topPerformers: (winLossAnalysis?.byKol || [])
             .filter(k => k.winRate >= 50)
-            .slice(0, 5),
+            .slice(0, 5)
+            .map(k => ({ handle: k.kolHandle, wins: k.wins, losses: k.losses, winRate: k.winRate })),
           bottomPerformers: (winLossAnalysis?.byKol || [])
             .filter(k => k.winRate < 50)
             .sort((a, b) => a.winRate - b.winRate)
-            .slice(0, 5),
+            .slice(0, 5)
+            .map(k => ({ handle: k.kolHandle, wins: k.wins, losses: k.losses, winRate: k.winRate })),
         },
 
         systemHealth: {

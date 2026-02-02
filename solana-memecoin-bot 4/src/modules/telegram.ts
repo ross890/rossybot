@@ -2084,9 +2084,9 @@ export class TelegramAlertBot {
       mentionVelocity: signal.socialMetrics.mentionVelocity1h,
       kolHandle: signal.kolActivity.kol.handle,
       kolCount: 1,
-      // Enhanced fields
-      buySellRatio: signal.tokenMetrics.buySellRatio5m,
-      uniqueBuyers5m: signal.tokenMetrics.uniqueBuyers5m,
+      // Enhanced fields - use optional chaining for momentum data
+      buySellRatio: (signal as any).momentumData?.buySellRatio,
+      uniqueBuyers5m: (signal as any).momentumData?.uniqueBuyers,
       top10Concentration: signal.tokenMetrics.top10Concentration,
       prediction: prediction ? {
         winProbability: prediction.winProbability,
@@ -2164,18 +2164,18 @@ export class TelegramAlertBot {
     let predictionComparison: FollowUpContext['predictionComparison'] | undefined;
     if (previous.prediction && currentPrediction) {
       const probChange = currentPrediction.winProbability - previous.prediction.winProbability;
-      const prevPatterns = new Set(previous.prediction.matchedPatterns || []);
-      const currPatterns = new Set(currentPrediction.matchedPatterns || []);
-      const prevRisks = new Set(previous.prediction.riskFactors || []);
-      const currRisks = new Set(currentPrediction.riskFactors || []);
+      const prevPatterns = new Set<string>(previous.prediction.matchedPatterns || []);
+      const currPatterns = new Set<string>(currentPrediction.matchedPatterns || []);
+      const prevRisks = new Set<string>(previous.prediction.riskFactors || []);
+      const currRisks = new Set<string>(currentPrediction.riskFactors || []);
 
       predictionComparison = {
         previousWinProb: previous.prediction.winProbability,
         currentWinProb: currentPrediction.winProbability,
         probChange,
-        lostPatterns: [...prevPatterns].filter(p => !currPatterns.has(p)),
-        gainedPatterns: [...currPatterns].filter(p => !prevPatterns.has(p)),
-        newRiskFactors: [...currRisks].filter(r => !prevRisks.has(r)),
+        lostPatterns: [...prevPatterns].filter((p: string) => !currPatterns.has(p)),
+        gainedPatterns: [...currPatterns].filter((p: string) => !prevPatterns.has(p)),
+        newRiskFactors: [...currRisks].filter((r: string) => !prevRisks.has(r)),
       };
 
       // Factor prediction change into momentum score
@@ -2432,18 +2432,18 @@ export class TelegramAlertBot {
     let predictionComparison: FollowUpContext['predictionComparison'] | undefined;
     if (previous.prediction && currentPrediction) {
       const probChange = currentPrediction.winProbability - previous.prediction.winProbability;
-      const prevPatterns = new Set(previous.prediction.matchedPatterns || []);
-      const currPatterns = new Set(currentPrediction.matchedPatterns || []);
-      const prevRisks = new Set(previous.prediction.riskFactors || []);
-      const currRisks = new Set(currentPrediction.riskFactors || []);
+      const prevPatterns = new Set<string>(previous.prediction.matchedPatterns || []);
+      const currPatterns = new Set<string>(currentPrediction.matchedPatterns || []);
+      const prevRisks = new Set<string>(previous.prediction.riskFactors || []);
+      const currRisks = new Set<string>(currentPrediction.riskFactors || []);
 
       predictionComparison = {
         previousWinProb: previous.prediction.winProbability,
         currentWinProb: currentPrediction.winProbability,
         probChange,
-        lostPatterns: [...prevPatterns].filter(p => !currPatterns.has(p)),
-        gainedPatterns: [...currPatterns].filter(p => !prevPatterns.has(p)),
-        newRiskFactors: [...currRisks].filter(r => !prevRisks.has(r)),
+        lostPatterns: [...prevPatterns].filter((p: string) => !currPatterns.has(p)),
+        gainedPatterns: [...currPatterns].filter((p: string) => !prevPatterns.has(p)),
+        newRiskFactors: [...currRisks].filter((r: string) => !prevRisks.has(r)),
       };
 
       if (probChange >= 10) positiveChanges++;
@@ -3112,12 +3112,12 @@ export class TelegramAlertBot {
       logger.info({
         tokenAddress: signal.tokenAddress,
         ticker: signal.tokenTicker,
-        momentumScore: signal.momentumScore?.total,
+        signalMomentumScore: signal.momentumScore?.total,
         onChainScore: signal.onChainScore?.total,
         isFollowUp: followUpContext.isFollowUp,
         classification: followUpContext.classification,
         narrative: followUpContext.narrative,
-        momentumScore: followUpContext.momentumScore,
+        followUpMomentumScore: followUpContext.momentumScore,
       }, followUpContext.isFollowUp ? `On-chain follow-up sent (${followUpContext.classification})` : 'On-chain momentum signal sent');
 
       return true;

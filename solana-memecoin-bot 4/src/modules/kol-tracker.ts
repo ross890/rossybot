@@ -5,6 +5,7 @@
 import { heliusClient, birdeyeClient } from './onchain.js';
 import { Database } from '../utils/database.js';
 import { logger } from '../utils/logger.js';
+import { kolAnalytics } from './kol/kol-analytics.js';
 import {
   Kol,
   KolWallet,
@@ -100,8 +101,18 @@ export class KolWalletMonitor {
           const tokenBuy = this.parseTokenBuy(txDetails, tokenAddress, walletAddress);
           if (!tokenBuy) continue;
           
-          // Get KOL performance
-          const performance = await Database.getKolPerformance(walletInfo.kolId) || {
+          // Get KOL performance from kol-analytics (single source of truth)
+          const stats = await kolAnalytics.getKolStats(walletInfo.kolId);
+          const performance: KolPerformance = stats ? {
+            kolId: walletInfo.kolId,
+            totalTrades: stats.totalTrades,
+            wins: Math.round(stats.winRate * stats.totalTrades),
+            losses: stats.totalTrades - Math.round(stats.winRate * stats.totalTrades),
+            winRate: stats.winRate,
+            avgRoi: stats.avgRoi,
+            medianRoi: stats.avgRoi, // Use avgRoi as approximation
+            lastCalculated: new Date(),
+          } : {
             kolId: walletInfo.kolId,
             totalTrades: 0,
             wins: 0,

@@ -537,32 +537,43 @@ export class SignalGenerator {
     const thresholds = thresholdOptimizer.getCurrentThresholds();
     const MIN_MOMENTUM_SCORE = thresholds.minMomentumScore;
     const MIN_ONCHAIN_SCORE = thresholds.minOnChainScore;
-
-    // LEARNING MODE FIX: In learning mode, use a much lower momentum threshold (10)
-    // to allow more signals through for ML training data collection.
-    // The default minMomentumScore of 25 was blocking ALL tokens during learning phase.
     const isLearningMode = appConfig.trading.learningMode;
-    const effectiveMomentumThreshold = isLearningMode ? Math.min(MIN_MOMENTUM_SCORE, 10) : MIN_MOMENTUM_SCORE;
 
-    if (onChainScore.components.momentum < effectiveMomentumThreshold) {
+    // LEARNING MODE v2: Skip momentum hard gate entirely in learning mode
+    //
+    // PROBLEM: Momentum is already weighted at 30% in the total on-chain score.
+    // Using a separate hard gate on momentum was double-penalizing low-momentum tokens
+    // and blocking signals that might have excellent safety/structure fundamentals.
+    //
+    // Example: Token with momentum=15, safety=90, bundle=85, structure=70, timing=80
+    // Weighted total = 0.30(15) + 0.25(90) + 0.20(85) + 0.15(70) + 0.10(80) = 66.5 (good score!)
+    // But it was blocked before this calculation because momentum < threshold
+    //
+    // SOLUTION: In learning mode, rely on the weighted total score to evaluate tokens.
+    // This lets the ML model learn actual correlations between components and outcomes.
+    // In production mode, keep the momentum hard gate for quality filtering.
+
+    if (!isLearningMode && onChainScore.components.momentum < MIN_MOMENTUM_SCORE) {
       logger.info({
         tokenAddress: shortAddr,
         ticker: metrics.ticker,
         momentumScore: onChainScore.components.momentum,
-        minRequired: effectiveMomentumThreshold,
+        minRequired: MIN_MOMENTUM_SCORE,
         learningMode: isLearningMode,
-      }, 'EVAL: BLOCKED - Momentum below threshold');
+      }, 'EVAL: BLOCKED - Momentum below threshold (production mode)');
       return SignalGenerator.EVAL_RESULTS.MOMENTUM_FAILED;
     }
 
-    // Log when momentum passes in learning mode
+    // Log momentum status in learning mode
     if (isLearningMode) {
       logger.info({
         tokenAddress: shortAddr,
         ticker: metrics.ticker,
         momentumScore: onChainScore.components.momentum,
-        threshold: effectiveMomentumThreshold,
-      }, 'EVAL: PASSED - Momentum check (learning mode)');
+        safetyScore: onChainScore.components.safety,
+        totalWeighted: onChainScore.total,
+        note: 'Learning mode: momentum hard gate skipped, using weighted total',
+      }, 'EVAL: Learning mode - evaluating by weighted total score');
     }
 
     // Check if on-chain score recommends action
@@ -580,15 +591,19 @@ export class SignalGenerator {
       ? onChainScore.recommendation === 'STRONG_AVOID'
       : (onChainScore.recommendation === 'STRONG_AVOID' || onChainScore.recommendation === 'AVOID');
 
-    if (onChainScore.total < MIN_ONCHAIN_SCORE || shouldBlockByRecommendation) {
+    // LEARNING MODE: Use lower total score threshold (20 vs 30) to collect more training data
+    // The weighted scoring already balances momentum/safety/structure - let ML learn correlations
+    const effectiveMinScore = isLearningMode ? Math.min(MIN_ONCHAIN_SCORE, 20) : MIN_ONCHAIN_SCORE;
+
+    if (onChainScore.total < effectiveMinScore || shouldBlockByRecommendation) {
       logger.info({
         tokenAddress,
         ticker: metrics.ticker,
         onChainScore: onChainScore.total,
-        minRequired: MIN_ONCHAIN_SCORE,
+        minRequired: effectiveMinScore,
         recommendation: onChainScore.recommendation,
         learningMode: isLearningMode,
-        blockedBy: onChainScore.total < MIN_ONCHAIN_SCORE ? 'SCORE_TOO_LOW' : 'RECOMMENDATION',
+        blockedBy: onChainScore.total < effectiveMinScore ? 'SCORE_TOO_LOW' : 'RECOMMENDATION',
       }, 'Token filtered by on-chain score requirements');
       return SignalGenerator.EVAL_RESULTS.DISCOVERY_FAILED;
     }

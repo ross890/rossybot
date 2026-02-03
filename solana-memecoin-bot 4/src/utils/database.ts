@@ -978,6 +978,134 @@ CREATE INDEX IF NOT EXISTS idx_smart_money_trades_sig ON smart_money_trades(tx_s
 
 CREATE INDEX IF NOT EXISTS idx_smart_money_eval_candidate ON smart_money_evaluations(candidate_id);
 CREATE INDEX IF NOT EXISTS idx_smart_money_eval_time ON smart_money_evaluations(evaluated_at DESC);
+
+-- ============ USER PORTFOLIO TRACKING ============
+-- Tracks user wallet holdings for TP/SL alerts (Established Token Strategy v2)
+
+-- Portfolio Position Status enum
+DO $$ BEGIN
+  CREATE TYPE portfolio_position_status AS ENUM ('ACTIVE', 'TP1_HIT', 'TP2_HIT', 'TP3_HIT', 'STOPPED_OUT', 'CLOSED');
+EXCEPTION
+  WHEN duplicate_object THEN null;
+END $$;
+
+-- User Portfolios table - tracks registered user wallets
+CREATE TABLE IF NOT EXISTS user_portfolios (
+  id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+  wallet_address VARCHAR(64) NOT NULL UNIQUE,
+  label VARCHAR(100),
+  telegram_chat_id VARCHAR(50),  -- For sending alerts
+  is_active BOOLEAN DEFAULT TRUE,
+  tracking_started_at TIMESTAMP DEFAULT NOW(),  -- Only track buys after this date
+  last_synced_at TIMESTAMP,
+  created_at TIMESTAMP DEFAULT NOW(),
+  updated_at TIMESTAMP DEFAULT NOW()
+);
+
+-- Portfolio Positions table - tracks individual token positions
+CREATE TABLE IF NOT EXISTS portfolio_positions (
+  id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+  portfolio_id UUID REFERENCES user_portfolios(id) ON DELETE CASCADE,
+  wallet_address VARCHAR(64) NOT NULL,
+  token_address VARCHAR(64) NOT NULL,
+  token_ticker VARCHAR(20),
+  token_name VARCHAR(100),
+
+  -- Position data
+  entry_price DECIMAL(30, 18) NOT NULL,
+  entry_timestamp TIMESTAMP NOT NULL,
+  entry_tx_signature VARCHAR(128),
+  quantity DECIMAL(30, 10) NOT NULL,
+  entry_sol_amount DECIMAL(20, 10),
+  entry_market_cap DECIMAL(20, 2),
+
+  -- Current state
+  current_price DECIMAL(30, 18),
+  current_market_cap DECIMAL(20, 2),
+  unrealized_pnl_percent DECIMAL(10, 4),
+  peak_price DECIMAL(30, 18),
+  peak_pnl_percent DECIMAL(10, 4),
+
+  -- Tier-based TP/SL levels (from Established Token Strategy v2)
+  token_tier VARCHAR(20),  -- EMERGING, GRADUATED, ESTABLISHED
+  stop_loss_price DECIMAL(30, 18),
+  stop_loss_percent DECIMAL(5, 2),
+  take_profit_1_price DECIMAL(30, 18),  -- +30%
+  take_profit_2_price DECIMAL(30, 18),  -- +60%
+  take_profit_3_price DECIMAL(30, 18),  -- +100%
+
+  -- Alert tracking
+  status portfolio_position_status DEFAULT 'ACTIVE',
+  tp1_hit_at TIMESTAMP,
+  tp2_hit_at TIMESTAMP,
+  tp3_hit_at TIMESTAMP,
+  stop_loss_hit_at TIMESTAMP,
+
+  -- Trailing stop (after TP3)
+  trailing_stop_active BOOLEAN DEFAULT FALSE,
+  trailing_stop_price DECIMAL(30, 18),
+  trailing_stop_percent DECIMAL(5, 2) DEFAULT 20,
+
+  -- Close data
+  closed_at TIMESTAMP,
+  close_price DECIMAL(30, 18),
+  close_tx_signature VARCHAR(128),
+  realized_pnl_percent DECIMAL(10, 4),
+  realized_pnl_sol DECIMAL(20, 10),
+  close_reason VARCHAR(50),  -- TP1, TP2, TP3, STOP_LOSS, MANUAL, TRAILING_STOP
+
+  -- Metadata
+  created_at TIMESTAMP DEFAULT NOW(),
+  updated_at TIMESTAMP DEFAULT NOW(),
+
+  -- Unique constraint: one active position per token per wallet
+  CONSTRAINT unique_active_position UNIQUE (wallet_address, token_address, status)
+);
+
+-- Portfolio Alerts table - tracks sent alerts to avoid duplicates
+CREATE TABLE IF NOT EXISTS portfolio_alerts (
+  id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+  position_id UUID REFERENCES portfolio_positions(id) ON DELETE CASCADE,
+  wallet_address VARCHAR(64) NOT NULL,
+  token_address VARCHAR(64) NOT NULL,
+  alert_type VARCHAR(30) NOT NULL,  -- TP1_APPROACHING, TP1_HIT, TP2_HIT, TP3_HIT, STOP_APPROACHING, STOP_HIT, etc.
+  price_at_alert DECIMAL(30, 18),
+  pnl_at_alert DECIMAL(10, 4),
+  message TEXT,
+  telegram_message_id VARCHAR(50),
+  sent_at TIMESTAMP DEFAULT NOW()
+);
+
+-- Portfolio Sync Log - tracks wallet sync history
+CREATE TABLE IF NOT EXISTS portfolio_sync_log (
+  id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+  portfolio_id UUID REFERENCES user_portfolios(id) ON DELETE CASCADE,
+  wallet_address VARCHAR(64) NOT NULL,
+  tokens_found INTEGER DEFAULT 0,
+  new_positions INTEGER DEFAULT 0,
+  closed_positions INTEGER DEFAULT 0,
+  sync_duration_ms INTEGER,
+  error TEXT,
+  synced_at TIMESTAMP DEFAULT NOW()
+);
+
+-- Indexes for portfolio tables
+CREATE INDEX IF NOT EXISTS idx_user_portfolios_address ON user_portfolios(wallet_address);
+CREATE INDEX IF NOT EXISTS idx_user_portfolios_active ON user_portfolios(is_active);
+
+CREATE INDEX IF NOT EXISTS idx_portfolio_positions_portfolio ON portfolio_positions(portfolio_id);
+CREATE INDEX IF NOT EXISTS idx_portfolio_positions_wallet ON portfolio_positions(wallet_address);
+CREATE INDEX IF NOT EXISTS idx_portfolio_positions_token ON portfolio_positions(token_address);
+CREATE INDEX IF NOT EXISTS idx_portfolio_positions_status ON portfolio_positions(status);
+CREATE INDEX IF NOT EXISTS idx_portfolio_positions_entry ON portfolio_positions(entry_timestamp DESC);
+
+CREATE INDEX IF NOT EXISTS idx_portfolio_alerts_position ON portfolio_alerts(position_id);
+CREATE INDEX IF NOT EXISTS idx_portfolio_alerts_wallet ON portfolio_alerts(wallet_address);
+CREATE INDEX IF NOT EXISTS idx_portfolio_alerts_type ON portfolio_alerts(alert_type);
+CREATE INDEX IF NOT EXISTS idx_portfolio_alerts_time ON portfolio_alerts(sent_at DESC);
+
+CREATE INDEX IF NOT EXISTS idx_portfolio_sync_portfolio ON portfolio_sync_log(portfolio_id);
+CREATE INDEX IF NOT EXISTS idx_portfolio_sync_time ON portfolio_sync_log(synced_at DESC);
 `;
 
 // ============ DATABASE OPERATIONS ============
@@ -2192,6 +2320,357 @@ export class Database {
       isWin: row.is_win,
       holdTimeHours: row.hold_time_hours ? parseFloat(row.hold_time_hours) : null,
       createdAt: row.created_at,
+    };
+  }
+
+  // ============ USER PORTFOLIO OPERATIONS ============
+
+  static async createUserPortfolio(
+    walletAddress: string,
+    telegramChatId: string,
+    label?: string
+  ): Promise<{ id: string; isNew: boolean }> {
+    // Check if wallet already exists
+    const existing = await pool.query(
+      'SELECT id FROM user_portfolios WHERE wallet_address = $1',
+      [walletAddress]
+    );
+
+    if (existing.rows.length > 0) {
+      // Update telegram chat ID if different
+      await pool.query(
+        `UPDATE user_portfolios SET
+          telegram_chat_id = $2,
+          is_active = true,
+          updated_at = NOW()
+         WHERE id = $1`,
+        [existing.rows[0].id, telegramChatId]
+      );
+      return { id: existing.rows[0].id, isNew: false };
+    }
+
+    const result = await pool.query(
+      `INSERT INTO user_portfolios (wallet_address, label, telegram_chat_id, tracking_started_at)
+       VALUES ($1, $2, $3, NOW())
+       RETURNING id`,
+      [walletAddress, label || null, telegramChatId]
+    );
+
+    return { id: result.rows[0].id, isNew: true };
+  }
+
+  static async getUserPortfolio(walletAddress: string): Promise<any | null> {
+    const result = await pool.query(
+      'SELECT * FROM user_portfolios WHERE wallet_address = $1',
+      [walletAddress]
+    );
+    if (result.rows.length === 0) return null;
+    return this.mapUserPortfolioRow(result.rows[0]);
+  }
+
+  static async getUserPortfolioById(id: string): Promise<any | null> {
+    const result = await pool.query(
+      'SELECT * FROM user_portfolios WHERE id = $1',
+      [id]
+    );
+    if (result.rows.length === 0) return null;
+    return this.mapUserPortfolioRow(result.rows[0]);
+  }
+
+  static async getActiveUserPortfolios(): Promise<any[]> {
+    const result = await pool.query(
+      `SELECT * FROM user_portfolios WHERE is_active = true ORDER BY created_at`
+    );
+    return result.rows.map(this.mapUserPortfolioRow);
+  }
+
+  static async updatePortfolioSyncTime(portfolioId: string): Promise<void> {
+    await pool.query(
+      `UPDATE user_portfolios SET last_synced_at = NOW(), updated_at = NOW() WHERE id = $1`,
+      [portfolioId]
+    );
+  }
+
+  static async createPortfolioPosition(position: {
+    portfolioId: string;
+    walletAddress: string;
+    tokenAddress: string;
+    tokenTicker?: string;
+    tokenName?: string;
+    entryPrice: number;
+    entryTimestamp: Date;
+    entryTxSignature?: string;
+    quantity: number;
+    entrySolAmount?: number;
+    entryMarketCap?: number;
+    tokenTier?: string;
+    stopLossPrice?: number;
+    stopLossPercent?: number;
+    takeProfit1Price?: number;
+    takeProfit2Price?: number;
+    takeProfit3Price?: number;
+  }): Promise<string> {
+    const result = await pool.query(
+      `INSERT INTO portfolio_positions (
+        portfolio_id, wallet_address, token_address, token_ticker, token_name,
+        entry_price, entry_timestamp, entry_tx_signature, quantity, entry_sol_amount,
+        entry_market_cap, token_tier, stop_loss_price, stop_loss_percent,
+        take_profit_1_price, take_profit_2_price, take_profit_3_price,
+        current_price, peak_price
+      ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $6, $6)
+      ON CONFLICT (wallet_address, token_address, status) DO UPDATE SET
+        quantity = portfolio_positions.quantity + EXCLUDED.quantity,
+        entry_sol_amount = COALESCE(portfolio_positions.entry_sol_amount, 0) + COALESCE(EXCLUDED.entry_sol_amount, 0),
+        updated_at = NOW()
+      RETURNING id`,
+      [
+        position.portfolioId, position.walletAddress, position.tokenAddress,
+        position.tokenTicker, position.tokenName, position.entryPrice,
+        position.entryTimestamp, position.entryTxSignature, position.quantity,
+        position.entrySolAmount, position.entryMarketCap, position.tokenTier,
+        position.stopLossPrice, position.stopLossPercent,
+        position.takeProfit1Price, position.takeProfit2Price, position.takeProfit3Price
+      ]
+    );
+    return result.rows[0].id;
+  }
+
+  static async getActivePortfolioPositions(walletAddress: string): Promise<any[]> {
+    const result = await pool.query(
+      `SELECT * FROM portfolio_positions
+       WHERE wallet_address = $1
+         AND status IN ('ACTIVE', 'TP1_HIT', 'TP2_HIT')
+       ORDER BY entry_timestamp DESC`,
+      [walletAddress]
+    );
+    return result.rows.map(this.mapPortfolioPositionRow);
+  }
+
+  static async getAllActivePortfolioPositions(): Promise<any[]> {
+    const result = await pool.query(
+      `SELECT pp.*, up.telegram_chat_id
+       FROM portfolio_positions pp
+       JOIN user_portfolios up ON pp.portfolio_id = up.id
+       WHERE pp.status IN ('ACTIVE', 'TP1_HIT', 'TP2_HIT')
+         AND up.is_active = true
+       ORDER BY pp.entry_timestamp DESC`
+    );
+    return result.rows.map(row => ({
+      ...this.mapPortfolioPositionRow(row),
+      telegramChatId: row.telegram_chat_id,
+    }));
+  }
+
+  static async getPortfolioPosition(walletAddress: string, tokenAddress: string): Promise<any | null> {
+    const result = await pool.query(
+      `SELECT * FROM portfolio_positions
+       WHERE wallet_address = $1
+         AND token_address = $2
+         AND status IN ('ACTIVE', 'TP1_HIT', 'TP2_HIT')
+       ORDER BY entry_timestamp DESC LIMIT 1`,
+      [walletAddress, tokenAddress]
+    );
+    if (result.rows.length === 0) return null;
+    return this.mapPortfolioPositionRow(result.rows[0]);
+  }
+
+  static async updatePortfolioPositionPrice(
+    positionId: string,
+    currentPrice: number,
+    currentMarketCap?: number
+  ): Promise<void> {
+    await pool.query(
+      `UPDATE portfolio_positions SET
+        current_price = $2,
+        current_market_cap = COALESCE($3, current_market_cap),
+        unrealized_pnl_percent = ((($2 - entry_price) / entry_price) * 100),
+        peak_price = GREATEST(peak_price, $2),
+        peak_pnl_percent = GREATEST(peak_pnl_percent, ((($2 - entry_price) / entry_price) * 100)),
+        updated_at = NOW()
+       WHERE id = $1`,
+      [positionId, currentPrice, currentMarketCap]
+    );
+  }
+
+  static async updatePortfolioPositionStatus(
+    positionId: string,
+    status: string,
+    closeReason?: string
+  ): Promise<void> {
+    const updates: string[] = [`status = '${status}'`, 'updated_at = NOW()'];
+
+    if (status === 'TP1_HIT') {
+      updates.push('tp1_hit_at = NOW()');
+    } else if (status === 'TP2_HIT') {
+      updates.push('tp2_hit_at = NOW()');
+    } else if (status === 'TP3_HIT') {
+      updates.push('tp3_hit_at = NOW()');
+      updates.push('trailing_stop_active = true');
+    } else if (status === 'STOPPED_OUT' || status === 'CLOSED') {
+      updates.push('closed_at = NOW()');
+      updates.push('close_price = current_price');
+      updates.push('realized_pnl_percent = unrealized_pnl_percent');
+      if (closeReason) {
+        updates.push(`close_reason = '${closeReason}'`);
+      }
+      if (status === 'STOPPED_OUT') {
+        updates.push('stop_loss_hit_at = NOW()');
+      }
+    }
+
+    await pool.query(
+      `UPDATE portfolio_positions SET ${updates.join(', ')} WHERE id = $1`,
+      [positionId]
+    );
+  }
+
+  static async updateTrailingStop(positionId: string, trailingStopPrice: number): Promise<void> {
+    await pool.query(
+      `UPDATE portfolio_positions SET
+        trailing_stop_price = $2,
+        updated_at = NOW()
+       WHERE id = $1`,
+      [positionId, trailingStopPrice]
+    );
+  }
+
+  static async closePortfolioPosition(
+    positionId: string,
+    closePrice: number,
+    closeTxSignature: string | null,
+    closeReason: string
+  ): Promise<void> {
+    await pool.query(
+      `UPDATE portfolio_positions SET
+        status = 'CLOSED',
+        closed_at = NOW(),
+        close_price = $2,
+        close_tx_signature = $3,
+        close_reason = $4,
+        realized_pnl_percent = ((($2 - entry_price) / entry_price) * 100),
+        updated_at = NOW()
+       WHERE id = $1`,
+      [positionId, closePrice, closeTxSignature, closeReason]
+    );
+  }
+
+  static async logPortfolioAlert(alert: {
+    positionId: string;
+    walletAddress: string;
+    tokenAddress: string;
+    alertType: string;
+    priceAtAlert?: number;
+    pnlAtAlert?: number;
+    message?: string;
+    telegramMessageId?: string;
+  }): Promise<string> {
+    const result = await pool.query(
+      `INSERT INTO portfolio_alerts (
+        position_id, wallet_address, token_address, alert_type,
+        price_at_alert, pnl_at_alert, message, telegram_message_id
+      ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+      RETURNING id`,
+      [
+        alert.positionId, alert.walletAddress, alert.tokenAddress,
+        alert.alertType, alert.priceAtAlert, alert.pnlAtAlert,
+        alert.message, alert.telegramMessageId
+      ]
+    );
+    return result.rows[0].id;
+  }
+
+  static async hasRecentAlert(
+    positionId: string,
+    alertType: string,
+    withinMinutes: number = 60
+  ): Promise<boolean> {
+    const result = await pool.query(
+      `SELECT 1 FROM portfolio_alerts
+       WHERE position_id = $1
+         AND alert_type = $2
+         AND sent_at > NOW() - INTERVAL '${withinMinutes} minutes'
+       LIMIT 1`,
+      [positionId, alertType]
+    );
+    return result.rows.length > 0;
+  }
+
+  static async logPortfolioSync(log: {
+    portfolioId: string;
+    walletAddress: string;
+    tokensFound: number;
+    newPositions: number;
+    closedPositions: number;
+    syncDurationMs: number;
+    error?: string;
+  }): Promise<void> {
+    await pool.query(
+      `INSERT INTO portfolio_sync_log (
+        portfolio_id, wallet_address, tokens_found, new_positions,
+        closed_positions, sync_duration_ms, error
+      ) VALUES ($1, $2, $3, $4, $5, $6, $7)`,
+      [
+        log.portfolioId, log.walletAddress, log.tokensFound,
+        log.newPositions, log.closedPositions, log.syncDurationMs, log.error
+      ]
+    );
+  }
+
+  private static mapUserPortfolioRow(row: any): any {
+    return {
+      id: row.id,
+      walletAddress: row.wallet_address,
+      label: row.label,
+      telegramChatId: row.telegram_chat_id,
+      isActive: row.is_active,
+      trackingStartedAt: row.tracking_started_at,
+      lastSyncedAt: row.last_synced_at,
+      createdAt: row.created_at,
+      updatedAt: row.updated_at,
+    };
+  }
+
+  private static mapPortfolioPositionRow(row: any): any {
+    return {
+      id: row.id,
+      portfolioId: row.portfolio_id,
+      walletAddress: row.wallet_address,
+      tokenAddress: row.token_address,
+      tokenTicker: row.token_ticker,
+      tokenName: row.token_name,
+      entryPrice: parseFloat(row.entry_price) || 0,
+      entryTimestamp: row.entry_timestamp,
+      entryTxSignature: row.entry_tx_signature,
+      quantity: parseFloat(row.quantity) || 0,
+      entrySolAmount: row.entry_sol_amount ? parseFloat(row.entry_sol_amount) : null,
+      entryMarketCap: row.entry_market_cap ? parseFloat(row.entry_market_cap) : null,
+      currentPrice: row.current_price ? parseFloat(row.current_price) : null,
+      currentMarketCap: row.current_market_cap ? parseFloat(row.current_market_cap) : null,
+      unrealizedPnlPercent: row.unrealized_pnl_percent ? parseFloat(row.unrealized_pnl_percent) : null,
+      peakPrice: row.peak_price ? parseFloat(row.peak_price) : null,
+      peakPnlPercent: row.peak_pnl_percent ? parseFloat(row.peak_pnl_percent) : null,
+      tokenTier: row.token_tier,
+      stopLossPrice: row.stop_loss_price ? parseFloat(row.stop_loss_price) : null,
+      stopLossPercent: row.stop_loss_percent ? parseFloat(row.stop_loss_percent) : null,
+      takeProfit1Price: row.take_profit_1_price ? parseFloat(row.take_profit_1_price) : null,
+      takeProfit2Price: row.take_profit_2_price ? parseFloat(row.take_profit_2_price) : null,
+      takeProfit3Price: row.take_profit_3_price ? parseFloat(row.take_profit_3_price) : null,
+      status: row.status,
+      tp1HitAt: row.tp1_hit_at,
+      tp2HitAt: row.tp2_hit_at,
+      tp3HitAt: row.tp3_hit_at,
+      stopLossHitAt: row.stop_loss_hit_at,
+      trailingStopActive: row.trailing_stop_active,
+      trailingStopPrice: row.trailing_stop_price ? parseFloat(row.trailing_stop_price) : null,
+      trailingStopPercent: row.trailing_stop_percent ? parseFloat(row.trailing_stop_percent) : null,
+      closedAt: row.closed_at,
+      closePrice: row.close_price ? parseFloat(row.close_price) : null,
+      closeTxSignature: row.close_tx_signature,
+      realizedPnlPercent: row.realized_pnl_percent ? parseFloat(row.realized_pnl_percent) : null,
+      realizedPnlSol: row.realized_pnl_sol ? parseFloat(row.realized_pnl_sol) : null,
+      closeReason: row.close_reason,
+      createdAt: row.created_at,
+      updatedAt: row.updated_at,
     };
   }
 }

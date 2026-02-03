@@ -25,7 +25,8 @@ const envSchema = z.object({
   TWITTER_CONSUMER_KEY: z.string().optional(),
   TWITTER_CONSUMER_SECRET: z.string().optional(),
   // Set to false to disable Twitter API entirely (saves credits, uses DexScreener social data only)
-  TWITTER_ENABLED: z.coerce.boolean().default(false),
+  // Explicitly parse string "true"/"false" from env vars (Railway passes strings)
+  TWITTER_ENABLED: z.string().optional().transform(val => val?.toLowerCase() === 'true'),
 
   // Telegram
   TELEGRAM_BOT_TOKEN: z.string().min(1),

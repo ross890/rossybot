@@ -107,7 +107,7 @@ export class WinPredictor {
   private winningPatterns: WinningPattern[] = [];
   private losingPatterns: WinningPattern[] = [];
   private lastTrainingTime: Date | null = null;
-  private readonly RETRAIN_INTERVAL_MS = 6 * 60 * 60 * 1000; // Retrain every 6 hours
+  private readonly RETRAIN_INTERVAL_MS = 7 * 24 * 60 * 60 * 1000; // Retrain weekly for statistical significance
 
   /**
    * Initialize the predictor and load/train model

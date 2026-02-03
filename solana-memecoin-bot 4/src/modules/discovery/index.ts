@@ -1,15 +1,24 @@
 // ===========================================
 // TOKEN DISCOVERY MODULE
 // Phase 1: Multi-source token discovery for comprehensive market coverage
+// Phase 2: Smart Money auto-discovery (KOLScan alternative)
 // ===========================================
 
 export { volumeAnomalyScanner, VolumeAnomaly } from './volume-anomaly-scanner.js';
 export { holderGrowthScanner, HolderGrowthSignal } from './holder-growth-scanner.js';
 export { narrativeScanner, NarrativeToken } from './narrative-scanner.js';
+export {
+  smartMoneyScanner,
+  SmartMoneyScanner,
+  SMART_MONEY_THRESHOLDS,
+  DiscoverySource,
+  SmartMoneyStatus,
+} from './smart-money-scanner.js';
 
 import { volumeAnomalyScanner } from './volume-anomaly-scanner.js';
 import { holderGrowthScanner } from './holder-growth-scanner.js';
 import { narrativeScanner } from './narrative-scanner.js';
+import { smartMoneyScanner } from './smart-money-scanner.js';
 import { logger } from '../../utils/logger.js';
 
 // ============ UNIFIED DISCOVERY ENGINE ============
@@ -27,9 +36,10 @@ class DiscoveryEngine {
       volumeAnomalyScanner.initialize(),
       holderGrowthScanner.initialize(),
       narrativeScanner.initialize(),
+      smartMoneyScanner.initialize(),
     ]);
 
-    logger.info('Discovery engine initialized with all scanners');
+    logger.info('Discovery engine initialized with all scanners (including Smart Money Scanner)');
   }
 
   /**
@@ -46,8 +56,9 @@ class DiscoveryEngine {
     volumeAnomalyScanner.start();
     holderGrowthScanner.start();
     narrativeScanner.start();
+    smartMoneyScanner.start();
 
-    logger.info('Discovery engine started - all scanners active');
+    logger.info('Discovery engine started - all scanners active (including Smart Money Scanner)');
   }
 
   /**
@@ -61,8 +72,30 @@ class DiscoveryEngine {
     volumeAnomalyScanner.stop();
     holderGrowthScanner.stop();
     narrativeScanner.stop();
+    smartMoneyScanner.stop();
 
     logger.info('Discovery engine stopped');
+  }
+
+  /**
+   * Set notification callback for smart money alerts
+   */
+  setSmartMoneyNotifyCallback(callback: (message: string) => Promise<void>): void {
+    smartMoneyScanner.setNotifyCallback(callback);
+  }
+
+  /**
+   * Get smart money scanner stats
+   */
+  async getSmartMoneyStats() {
+    return smartMoneyScanner.getStats();
+  }
+
+  /**
+   * Format smart money stats for display
+   */
+  async formatSmartMoneyStats(): Promise<string> {
+    return smartMoneyScanner.formatStatsMessage();
   }
 
   /**
@@ -120,6 +153,25 @@ class DiscoveryEngine {
       holderGrowthStats: holderGrowthScanner.getStats(),
       narrativeStats: narrativeScanner.getStats(),
     };
+  }
+
+  /**
+   * Observe a trade for smart money tracking
+   * Called from signal generator when a high-value trade is detected
+   */
+  async observeTradeForSmartMoney(trade: {
+    walletAddress: string;
+    tokenAddress: string;
+    tokenTicker?: string;
+    tradeType: 'BUY' | 'SELL';
+    solAmount: number;
+    tokenAmount: number;
+    priceAtTrade: number;
+    tokenAgeAtTrade?: number;
+    txSignature: string;
+    blockTime: Date;
+  }): Promise<void> {
+    await smartMoneyScanner.observeTrade(trade);
   }
 }
 

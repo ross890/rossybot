@@ -771,6 +771,167 @@ CREATE INDEX IF NOT EXISTS idx_trade_outcome_token ON trade_outcome_analysis(tok
 CREATE INDEX IF NOT EXISTS idx_trade_outcome_time ON trade_outcome_analysis(analyzed_at DESC);
 CREATE INDEX IF NOT EXISTS idx_trade_outcome_outcome ON trade_outcome_analysis(outcome);
 CREATE INDEX IF NOT EXISTS idx_trade_outcome_kol ON trade_outcome_analysis(kol_handle);
+
+-- ============ SMART MONEY AUTO-DISCOVERY TABLES ============
+-- Replicates KOLScan functionality: auto-discovers profitable traders
+
+-- Smart Money Candidate Status enum
+DO $$ BEGIN
+  CREATE TYPE smart_money_status AS ENUM (
+    'MONITORING',     -- Being monitored, collecting trade data
+    'EVALUATING',     -- Has enough trades, being evaluated
+    'PROMOTED',       -- Promoted to alpha wallet tracking
+    'REJECTED',       -- Did not meet thresholds
+    'INACTIVE'        -- No recent activity, paused monitoring
+  );
+EXCEPTION
+  WHEN duplicate_object THEN null;
+END $$;
+
+-- Smart Money Discovery Source enum
+DO $$ BEGIN
+  CREATE TYPE discovery_source AS ENUM (
+    'PUMPFUN_TRADER',      -- High-volume pump.fun trader
+    'RAYDIUM_TRADER',      -- Profitable raydium trader
+    'EARLY_BUYER',         -- Consistently early on winners
+    'HIGH_WIN_RATE',       -- Discovered via win rate analysis
+    'WHALE_TRACKER',       -- Large wallet with good performance
+    'REFERRAL'             -- Referred by another smart money wallet
+  );
+EXCEPTION
+  WHEN duplicate_object THEN null;
+END $$;
+
+-- Smart Money Candidates table - wallets being evaluated for tracking
+CREATE TABLE IF NOT EXISTS smart_money_candidates (
+  id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+  address VARCHAR(64) NOT NULL UNIQUE,
+
+  -- Discovery info
+  discovery_source discovery_source NOT NULL,
+  discovered_at TIMESTAMP DEFAULT NOW(),
+  discovery_reason TEXT,
+
+  -- Status
+  status smart_money_status DEFAULT 'MONITORING',
+
+  -- Performance metrics (rolling window)
+  total_trades INTEGER DEFAULT 0,
+  wins INTEGER DEFAULT 0,
+  losses INTEGER DEFAULT 0,
+  win_rate DECIMAL(5, 4) DEFAULT 0,
+  avg_roi DECIMAL(10, 4) DEFAULT 0,
+  total_profit_sol DECIMAL(20, 10) DEFAULT 0,
+
+  -- Quality metrics
+  unique_tokens_traded INTEGER DEFAULT 0,
+  avg_entry_timing_percentile DECIMAL(5, 2) DEFAULT 50, -- How early they enter (0-100, lower = earlier)
+  avg_hold_time_hours DECIMAL(10, 2) DEFAULT 0,
+  largest_win_roi DECIMAL(10, 4) DEFAULT 0,
+  largest_loss_roi DECIMAL(10, 4) DEFAULT 0,
+  consistency_score DECIMAL(5, 2) DEFAULT 0, -- Std dev of ROI, lower = more consistent
+
+  -- Trade size metrics
+  avg_trade_size_sol DECIMAL(20, 10) DEFAULT 0,
+  min_trade_size_sol DECIMAL(20, 10) DEFAULT 0,
+  max_trade_size_sol DECIMAL(20, 10) DEFAULT 0,
+
+  -- Activity tracking
+  first_trade_seen TIMESTAMP,
+  last_trade_seen TIMESTAMP,
+  monitoring_started_at TIMESTAMP DEFAULT NOW(),
+
+  -- Evaluation results
+  evaluated_at TIMESTAMP,
+  evaluation_score INTEGER DEFAULT 0,
+  promotion_eligible BOOLEAN DEFAULT FALSE,
+  rejection_reason TEXT,
+
+  -- Link to alpha wallet if promoted
+  promoted_wallet_id UUID REFERENCES alpha_wallets(id),
+  promoted_at TIMESTAMP,
+
+  created_at TIMESTAMP DEFAULT NOW(),
+  updated_at TIMESTAMP DEFAULT NOW()
+);
+
+-- Smart Money Trades table - tracks all observed trades from candidates
+CREATE TABLE IF NOT EXISTS smart_money_trades (
+  id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+  candidate_id UUID REFERENCES smart_money_candidates(id) ON DELETE CASCADE,
+  wallet_address VARCHAR(64) NOT NULL,
+
+  -- Token info
+  token_address VARCHAR(64) NOT NULL,
+  token_ticker VARCHAR(20),
+  token_name VARCHAR(100),
+
+  -- Trade details
+  trade_type VARCHAR(10) NOT NULL, -- 'BUY' or 'SELL'
+  sol_amount DECIMAL(20, 10),
+  token_amount DECIMAL(30, 10),
+  price_at_trade DECIMAL(30, 18),
+
+  -- Timing metrics
+  token_age_at_trade INTEGER, -- Token age in minutes when trade happened
+  entry_percentile DECIMAL(5, 2), -- What % of holders they were (lower = earlier)
+
+  -- Transaction
+  tx_signature VARCHAR(128) UNIQUE,
+  block_time TIMESTAMP NOT NULL,
+
+  -- For round-trip tracking (sells linked to buys)
+  entry_trade_id UUID REFERENCES smart_money_trades(id),
+  roi DECIMAL(10, 4),
+  is_win BOOLEAN,
+  hold_time_hours DECIMAL(10, 2),
+
+  created_at TIMESTAMP DEFAULT NOW()
+);
+
+-- Smart Money Evaluation Log - audit trail of evaluations
+CREATE TABLE IF NOT EXISTS smart_money_evaluations (
+  id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+  candidate_id UUID REFERENCES smart_money_candidates(id) ON DELETE CASCADE,
+  wallet_address VARCHAR(64) NOT NULL,
+
+  -- Metrics at evaluation time
+  total_trades INTEGER NOT NULL,
+  win_rate DECIMAL(5, 4) NOT NULL,
+  avg_roi DECIMAL(10, 4) NOT NULL,
+  total_profit_sol DECIMAL(20, 10),
+  unique_tokens INTEGER,
+  consistency_score DECIMAL(5, 2),
+
+  -- Evaluation result
+  evaluation_score INTEGER NOT NULL,
+  passed_win_rate BOOLEAN NOT NULL,
+  passed_min_trades BOOLEAN NOT NULL,
+  passed_profit BOOLEAN NOT NULL,
+  passed_consistency BOOLEAN NOT NULL,
+
+  -- Outcome
+  result VARCHAR(20) NOT NULL, -- 'PROMOTE', 'REJECT', 'CONTINUE_MONITORING'
+  reason TEXT NOT NULL,
+
+  evaluated_at TIMESTAMP DEFAULT NOW()
+);
+
+-- Indexes for smart money tables
+CREATE INDEX IF NOT EXISTS idx_smart_money_address ON smart_money_candidates(address);
+CREATE INDEX IF NOT EXISTS idx_smart_money_status ON smart_money_candidates(status);
+CREATE INDEX IF NOT EXISTS idx_smart_money_win_rate ON smart_money_candidates(win_rate DESC);
+CREATE INDEX IF NOT EXISTS idx_smart_money_last_trade ON smart_money_candidates(last_trade_seen DESC);
+CREATE INDEX IF NOT EXISTS idx_smart_money_promotion ON smart_money_candidates(promotion_eligible);
+
+CREATE INDEX IF NOT EXISTS idx_smart_money_trades_candidate ON smart_money_trades(candidate_id);
+CREATE INDEX IF NOT EXISTS idx_smart_money_trades_wallet ON smart_money_trades(wallet_address);
+CREATE INDEX IF NOT EXISTS idx_smart_money_trades_token ON smart_money_trades(token_address);
+CREATE INDEX IF NOT EXISTS idx_smart_money_trades_time ON smart_money_trades(block_time DESC);
+CREATE INDEX IF NOT EXISTS idx_smart_money_trades_sig ON smart_money_trades(tx_signature);
+
+CREATE INDEX IF NOT EXISTS idx_smart_money_eval_candidate ON smart_money_evaluations(candidate_id);
+CREATE INDEX IF NOT EXISTS idx_smart_money_eval_time ON smart_money_evaluations(evaluated_at DESC);
 `;
 
 // ============ DATABASE OPERATIONS ============
@@ -1589,6 +1750,397 @@ export class Database {
       priceAtTrade: parseFloat(row.price_at_trade) || 0,
       txSignature: row.tx_signature,
       timestamp: row.timestamp,
+      entryTradeId: row.entry_trade_id,
+      roi: row.roi ? parseFloat(row.roi) : null,
+      isWin: row.is_win,
+      holdTimeHours: row.hold_time_hours ? parseFloat(row.hold_time_hours) : null,
+      createdAt: row.created_at,
+    };
+  }
+
+  // ============ SMART MONEY DISCOVERY OPERATIONS ============
+
+  static async createSmartMoneyCandidate(
+    address: string,
+    discoverySource: string,
+    discoveryReason?: string
+  ): Promise<{ id: string; isNew: boolean }> {
+    // Check if already exists
+    const existing = await pool.query(
+      'SELECT id, status FROM smart_money_candidates WHERE address = $1',
+      [address]
+    );
+
+    if (existing.rows.length > 0) {
+      // Reactivate if previously rejected/inactive
+      const row = existing.rows[0];
+      if (row.status === 'REJECTED' || row.status === 'INACTIVE') {
+        await pool.query(
+          `UPDATE smart_money_candidates
+           SET status = 'MONITORING', updated_at = NOW()
+           WHERE id = $1`,
+          [row.id]
+        );
+      }
+      return { id: row.id, isNew: false };
+    }
+
+    const result = await pool.query(
+      `INSERT INTO smart_money_candidates (address, discovery_source, discovery_reason)
+       VALUES ($1, $2, $3)
+       RETURNING id`,
+      [address, discoverySource, discoveryReason]
+    );
+
+    return { id: result.rows[0].id, isNew: true };
+  }
+
+  static async getSmartMoneyCandidateByAddress(address: string): Promise<any | null> {
+    const result = await pool.query(
+      'SELECT * FROM smart_money_candidates WHERE address = $1',
+      [address]
+    );
+    if (result.rows.length === 0) return null;
+    return this.mapSmartMoneyCandidateRow(result.rows[0]);
+  }
+
+  static async getSmartMoneyCandidateById(id: string): Promise<any | null> {
+    const result = await pool.query(
+      'SELECT * FROM smart_money_candidates WHERE id = $1',
+      [id]
+    );
+    if (result.rows.length === 0) return null;
+    return this.mapSmartMoneyCandidateRow(result.rows[0]);
+  }
+
+  static async getSmartMoneyCandidatesByStatus(status: string): Promise<any[]> {
+    const result = await pool.query(
+      `SELECT * FROM smart_money_candidates
+       WHERE status = $1
+       ORDER BY win_rate DESC, total_trades DESC`,
+      [status]
+    );
+    return result.rows.map(this.mapSmartMoneyCandidateRow);
+  }
+
+  static async getSmartMoneyCandidatesForEvaluation(minTrades: number = 10): Promise<any[]> {
+    const result = await pool.query(
+      `SELECT * FROM smart_money_candidates
+       WHERE status = 'MONITORING'
+         AND total_trades >= $1
+       ORDER BY total_trades DESC`,
+      [minTrades]
+    );
+    return result.rows.map(this.mapSmartMoneyCandidateRow);
+  }
+
+  static async getPromotionEligibleCandidates(): Promise<any[]> {
+    const result = await pool.query(
+      `SELECT * FROM smart_money_candidates
+       WHERE promotion_eligible = true
+         AND status = 'MONITORING'
+       ORDER BY evaluation_score DESC`
+    );
+    return result.rows.map(this.mapSmartMoneyCandidateRow);
+  }
+
+  static async recordSmartMoneyTrade(trade: {
+    candidateId: string;
+    walletAddress: string;
+    tokenAddress: string;
+    tokenTicker?: string;
+    tokenName?: string;
+    tradeType: 'BUY' | 'SELL';
+    solAmount: number;
+    tokenAmount: number;
+    priceAtTrade: number;
+    tokenAgeAtTrade?: number;
+    entryPercentile?: number;
+    txSignature: string;
+    blockTime: Date;
+    entryTradeId?: string;
+    roi?: number;
+    isWin?: boolean;
+    holdTimeHours?: number;
+  }): Promise<string | null> {
+    const result = await pool.query(
+      `INSERT INTO smart_money_trades (
+        candidate_id, wallet_address, token_address, token_ticker, token_name,
+        trade_type, sol_amount, token_amount, price_at_trade,
+        token_age_at_trade, entry_percentile, tx_signature, block_time,
+        entry_trade_id, roi, is_win, hold_time_hours
+      ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17)
+      ON CONFLICT (tx_signature) DO NOTHING
+      RETURNING id`,
+      [
+        trade.candidateId, trade.walletAddress, trade.tokenAddress,
+        trade.tokenTicker, trade.tokenName, trade.tradeType,
+        trade.solAmount, trade.tokenAmount, trade.priceAtTrade,
+        trade.tokenAgeAtTrade, trade.entryPercentile, trade.txSignature, trade.blockTime,
+        trade.entryTradeId, trade.roi, trade.isWin, trade.holdTimeHours
+      ]
+    );
+
+    // Update candidate activity tracking
+    await pool.query(
+      `UPDATE smart_money_candidates SET
+        last_trade_seen = $2,
+        first_trade_seen = COALESCE(first_trade_seen, $2),
+        updated_at = NOW()
+       WHERE id = $1`,
+      [trade.candidateId, trade.blockTime]
+    );
+
+    return result.rows[0]?.id || null;
+  }
+
+  static async getSmartMoneyOpenBuys(candidateId: string, tokenAddress: string): Promise<any[]> {
+    const result = await pool.query(
+      `SELECT * FROM smart_money_trades
+       WHERE candidate_id = $1
+         AND token_address = $2
+         AND trade_type = 'BUY'
+         AND id NOT IN (
+           SELECT entry_trade_id FROM smart_money_trades
+           WHERE entry_trade_id IS NOT NULL
+         )
+       ORDER BY block_time ASC`,
+      [candidateId, tokenAddress]
+    );
+    return result.rows.map(this.mapSmartMoneyTradeRow);
+  }
+
+  static async getSmartMoneyTradesInWindow(
+    candidateId: string,
+    windowDays: number = 30
+  ): Promise<any[]> {
+    const result = await pool.query(
+      `SELECT * FROM smart_money_trades
+       WHERE candidate_id = $1
+         AND block_time > NOW() - INTERVAL '${windowDays} days'
+       ORDER BY block_time DESC`,
+      [candidateId]
+    );
+    return result.rows.map(this.mapSmartMoneyTradeRow);
+  }
+
+  static async updateSmartMoneyCandidatePerformance(
+    candidateId: string,
+    metrics: {
+      totalTrades: number;
+      wins: number;
+      losses: number;
+      winRate: number;
+      avgRoi: number;
+      totalProfitSol: number;
+      uniqueTokensTraded: number;
+      avgEntryTimingPercentile?: number;
+      avgHoldTimeHours?: number;
+      largestWinRoi?: number;
+      largestLossRoi?: number;
+      consistencyScore?: number;
+      avgTradeSizeSol?: number;
+      minTradeSizeSol?: number;
+      maxTradeSizeSol?: number;
+    }
+  ): Promise<void> {
+    await pool.query(
+      `UPDATE smart_money_candidates SET
+        total_trades = $2,
+        wins = $3,
+        losses = $4,
+        win_rate = $5,
+        avg_roi = $6,
+        total_profit_sol = $7,
+        unique_tokens_traded = $8,
+        avg_entry_timing_percentile = COALESCE($9, avg_entry_timing_percentile),
+        avg_hold_time_hours = COALESCE($10, avg_hold_time_hours),
+        largest_win_roi = COALESCE($11, largest_win_roi),
+        largest_loss_roi = COALESCE($12, largest_loss_roi),
+        consistency_score = COALESCE($13, consistency_score),
+        avg_trade_size_sol = COALESCE($14, avg_trade_size_sol),
+        min_trade_size_sol = COALESCE($15, min_trade_size_sol),
+        max_trade_size_sol = COALESCE($16, max_trade_size_sol),
+        updated_at = NOW()
+       WHERE id = $1`,
+      [
+        candidateId,
+        metrics.totalTrades,
+        metrics.wins,
+        metrics.losses,
+        metrics.winRate,
+        metrics.avgRoi,
+        metrics.totalProfitSol,
+        metrics.uniqueTokensTraded,
+        metrics.avgEntryTimingPercentile,
+        metrics.avgHoldTimeHours,
+        metrics.largestWinRoi,
+        metrics.largestLossRoi,
+        metrics.consistencyScore,
+        metrics.avgTradeSizeSol,
+        metrics.minTradeSizeSol,
+        metrics.maxTradeSizeSol
+      ]
+    );
+  }
+
+  static async updateSmartMoneyCandidateStatus(
+    candidateId: string,
+    status: string,
+    evaluationScore?: number,
+    promotionEligible?: boolean,
+    rejectionReason?: string
+  ): Promise<void> {
+    await pool.query(
+      `UPDATE smart_money_candidates SET
+        status = $2,
+        evaluation_score = COALESCE($3, evaluation_score),
+        promotion_eligible = COALESCE($4, promotion_eligible),
+        rejection_reason = $5,
+        evaluated_at = NOW(),
+        updated_at = NOW()
+       WHERE id = $1`,
+      [candidateId, status, evaluationScore, promotionEligible, rejectionReason]
+    );
+  }
+
+  static async promoteSmartMoneyCandidate(
+    candidateId: string,
+    alphaWalletId: string
+  ): Promise<void> {
+    await pool.query(
+      `UPDATE smart_money_candidates SET
+        status = 'PROMOTED',
+        promoted_wallet_id = $2,
+        promoted_at = NOW(),
+        updated_at = NOW()
+       WHERE id = $1`,
+      [candidateId, alphaWalletId]
+    );
+  }
+
+  static async logSmartMoneyEvaluation(evaluation: {
+    candidateId: string;
+    walletAddress: string;
+    totalTrades: number;
+    winRate: number;
+    avgRoi: number;
+    totalProfitSol?: number;
+    uniqueTokens?: number;
+    consistencyScore?: number;
+    evaluationScore: number;
+    passedWinRate: boolean;
+    passedMinTrades: boolean;
+    passedProfit: boolean;
+    passedConsistency: boolean;
+    result: 'PROMOTE' | 'REJECT' | 'CONTINUE_MONITORING';
+    reason: string;
+  }): Promise<void> {
+    await pool.query(
+      `INSERT INTO smart_money_evaluations (
+        candidate_id, wallet_address, total_trades, win_rate, avg_roi,
+        total_profit_sol, unique_tokens, consistency_score, evaluation_score,
+        passed_win_rate, passed_min_trades, passed_profit, passed_consistency,
+        result, reason
+      ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15)`,
+      [
+        evaluation.candidateId, evaluation.walletAddress, evaluation.totalTrades,
+        evaluation.winRate, evaluation.avgRoi, evaluation.totalProfitSol,
+        evaluation.uniqueTokens, evaluation.consistencyScore, evaluation.evaluationScore,
+        evaluation.passedWinRate, evaluation.passedMinTrades, evaluation.passedProfit,
+        evaluation.passedConsistency, evaluation.result, evaluation.reason
+      ]
+    );
+  }
+
+  static async isSmartMoneyCandidate(address: string): Promise<boolean> {
+    const result = await pool.query(
+      `SELECT 1 FROM smart_money_candidates
+       WHERE address = $1 AND status NOT IN ('REJECTED', 'INACTIVE')`,
+      [address]
+    );
+    return result.rows.length > 0;
+  }
+
+  static async getSmartMoneyStats(): Promise<{
+    totalCandidates: number;
+    monitoring: number;
+    promoted: number;
+    rejected: number;
+    avgWinRate: number;
+  }> {
+    const result = await pool.query(
+      `SELECT
+         COUNT(*) as total,
+         COUNT(*) FILTER (WHERE status = 'MONITORING') as monitoring,
+         COUNT(*) FILTER (WHERE status = 'PROMOTED') as promoted,
+         COUNT(*) FILTER (WHERE status = 'REJECTED') as rejected,
+         AVG(win_rate) FILTER (WHERE total_trades >= 5) as avg_win_rate
+       FROM smart_money_candidates`
+    );
+    const row = result.rows[0];
+    return {
+      totalCandidates: parseInt(row.total) || 0,
+      monitoring: parseInt(row.monitoring) || 0,
+      promoted: parseInt(row.promoted) || 0,
+      rejected: parseInt(row.rejected) || 0,
+      avgWinRate: parseFloat(row.avg_win_rate) || 0,
+    };
+  }
+
+  private static mapSmartMoneyCandidateRow(row: any): any {
+    return {
+      id: row.id,
+      address: row.address,
+      discoverySource: row.discovery_source,
+      discoveredAt: row.discovered_at,
+      discoveryReason: row.discovery_reason,
+      status: row.status,
+      totalTrades: row.total_trades,
+      wins: row.wins,
+      losses: row.losses,
+      winRate: parseFloat(row.win_rate) || 0,
+      avgRoi: parseFloat(row.avg_roi) || 0,
+      totalProfitSol: parseFloat(row.total_profit_sol) || 0,
+      uniqueTokensTraded: row.unique_tokens_traded,
+      avgEntryTimingPercentile: parseFloat(row.avg_entry_timing_percentile) || 50,
+      avgHoldTimeHours: parseFloat(row.avg_hold_time_hours) || 0,
+      largestWinRoi: parseFloat(row.largest_win_roi) || 0,
+      largestLossRoi: parseFloat(row.largest_loss_roi) || 0,
+      consistencyScore: parseFloat(row.consistency_score) || 0,
+      avgTradeSizeSol: parseFloat(row.avg_trade_size_sol) || 0,
+      minTradeSizeSol: parseFloat(row.min_trade_size_sol) || 0,
+      maxTradeSizeSol: parseFloat(row.max_trade_size_sol) || 0,
+      firstTradeSeen: row.first_trade_seen,
+      lastTradeSeen: row.last_trade_seen,
+      monitoringStartedAt: row.monitoring_started_at,
+      evaluatedAt: row.evaluated_at,
+      evaluationScore: row.evaluation_score,
+      promotionEligible: row.promotion_eligible,
+      rejectionReason: row.rejection_reason,
+      promotedWalletId: row.promoted_wallet_id,
+      promotedAt: row.promoted_at,
+      createdAt: row.created_at,
+      updatedAt: row.updated_at,
+    };
+  }
+
+  private static mapSmartMoneyTradeRow(row: any): any {
+    return {
+      id: row.id,
+      candidateId: row.candidate_id,
+      walletAddress: row.wallet_address,
+      tokenAddress: row.token_address,
+      tokenTicker: row.token_ticker,
+      tokenName: row.token_name,
+      tradeType: row.trade_type,
+      solAmount: parseFloat(row.sol_amount) || 0,
+      tokenAmount: parseFloat(row.token_amount) || 0,
+      priceAtTrade: parseFloat(row.price_at_trade) || 0,
+      tokenAgeAtTrade: row.token_age_at_trade,
+      entryPercentile: parseFloat(row.entry_percentile) || 50,
+      txSignature: row.tx_signature,
+      blockTime: row.block_time,
       entryTradeId: row.entry_trade_id,
       roi: row.roi ? parseFloat(row.roi) : null,
       isWin: row.is_win,

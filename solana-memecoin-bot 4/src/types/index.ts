@@ -239,6 +239,119 @@ export interface AlphaWalletEvaluation {
   reason: string;
 }
 
+// ============ SMART MONEY TYPES ============
+
+// Smart money discovery source - how the wallet was discovered
+export enum SmartMoneyDiscoverySource {
+  PUMPFUN_TRADER = 'PUMPFUN_TRADER',       // High-volume pump.fun trader
+  RAYDIUM_TRADER = 'RAYDIUM_TRADER',       // Profitable raydium trader
+  EARLY_BUYER = 'EARLY_BUYER',             // Consistently early on winners
+  HIGH_WIN_RATE = 'HIGH_WIN_RATE',         // Discovered via win rate analysis
+  WHALE_TRACKER = 'WHALE_TRACKER',         // Large wallet with good performance
+  REFERRAL = 'REFERRAL',                   // Referred by another smart money wallet
+}
+
+// Smart money candidate status
+export enum SmartMoneyCandidateStatus {
+  MONITORING = 'MONITORING',     // Being monitored, collecting trade data
+  EVALUATING = 'EVALUATING',     // Has enough trades, being evaluated
+  PROMOTED = 'PROMOTED',         // Promoted to alpha wallet tracking
+  REJECTED = 'REJECTED',         // Did not meet thresholds
+  INACTIVE = 'INACTIVE',         // No recent activity, paused monitoring
+}
+
+// Smart money candidate - wallet being evaluated for tracking
+export interface SmartMoneyCandidate {
+  id: string;
+  address: string;
+  discoverySource: SmartMoneyDiscoverySource;
+  discoveredAt: Date;
+  discoveryReason: string | null;
+  status: SmartMoneyCandidateStatus;
+
+  // Performance metrics
+  totalTrades: number;
+  wins: number;
+  losses: number;
+  winRate: number;
+  avgRoi: number;
+  totalProfitSol: number;
+
+  // Quality metrics
+  uniqueTokensTraded: number;
+  avgEntryTimingPercentile: number;
+  avgHoldTimeHours: number;
+  largestWinRoi: number;
+  largestLossRoi: number;
+  consistencyScore: number;
+
+  // Trade size metrics
+  avgTradeSizeSol: number;
+  minTradeSizeSol: number;
+  maxTradeSizeSol: number;
+
+  // Activity tracking
+  firstTradeSeen: Date | null;
+  lastTradeSeen: Date | null;
+  monitoringStartedAt: Date;
+
+  // Evaluation
+  evaluatedAt: Date | null;
+  evaluationScore: number;
+  promotionEligible: boolean;
+  rejectionReason: string | null;
+
+  // Promotion
+  promotedWalletId: string | null;
+  promotedAt: Date | null;
+
+  createdAt: Date;
+  updatedAt: Date;
+}
+
+// Smart money trade record
+export interface SmartMoneyTrade {
+  id: string;
+  candidateId: string;
+  walletAddress: string;
+  tokenAddress: string;
+  tokenTicker: string | null;
+  tokenName: string | null;
+  tradeType: 'BUY' | 'SELL';
+  solAmount: number;
+  tokenAmount: number;
+  priceAtTrade: number;
+  tokenAgeAtTrade: number | null;
+  entryPercentile: number;
+  txSignature: string;
+  blockTime: Date;
+  entryTradeId: string | null;
+  roi: number | null;
+  isWin: boolean | null;
+  holdTimeHours: number | null;
+  createdAt: Date;
+}
+
+// Smart money evaluation result
+export interface SmartMoneyEvaluation {
+  candidateId: string;
+  walletAddress: string;
+  totalTrades: number;
+  winRate: number;
+  avgRoi: number;
+  totalProfitSol: number | null;
+  uniqueTokens: number | null;
+  consistencyScore: number | null;
+  evaluationScore: number;
+  passedWinRate: boolean;
+  passedMinTrades: boolean;
+  passedProfit: boolean;
+  passedConsistency: boolean;
+  result: 'PROMOTE' | 'REJECT' | 'CONTINUE_MONITORING';
+  reason: string;
+  evaluatedAt: Date;
+}
+
 // ============ TOKEN TYPES ============
 
 export interface TokenMetrics {

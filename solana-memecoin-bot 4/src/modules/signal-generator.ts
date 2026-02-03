@@ -485,6 +485,47 @@ export class SignalGenerator {
       age: metrics.tokenAge,
     }, 'EVAL: Got metrics, checking screening criteria');
 
+    // PRE-BOND TOKEN FILTER: Exclude pump.fun tokens that haven't migrated
+    // unless they have very high social velocity (indicating genuine viral interest)
+    // Pre-bond tokens have unreliable holder numbers and high rug risk
+    const isPumpfunToken = await bondingCurveMonitor.isPumpfunToken(tokenAddress);
+    if (isPumpfunToken) {
+      const bondingStatus = await bondingCurveMonitor.getBondingCurveStatus(tokenAddress);
+
+      // Check if token has NOT migrated (still on bonding curve)
+      if (bondingStatus && !bondingStatus.isMigrated) {
+        // Get social metrics to check velocity
+        const preBondSocialMetrics = await socialAnalyzer.analyzeToken(tokenAddress, metrics.ticker);
+        const socialVelocity = preBondSocialMetrics?.mentionVelocity1h || 0;
+
+        // Require very high social velocity for pre-bond tokens (>= 20 mentions/hr)
+        const MIN_PREBOND_SOCIAL_VELOCITY = 20;
+        if (socialVelocity < MIN_PREBOND_SOCIAL_VELOCITY) {
+          logger.info({
+            tokenAddress: shortAddr,
+            ticker: metrics.ticker,
+            isPumpfun: true,
+            isMigrated: false,
+            bondingProgress: bondingStatus.bondingProgress,
+            socialVelocity,
+            minRequired: MIN_PREBOND_SOCIAL_VELOCITY,
+            reason: 'Pre-bond token without high social velocity - holder numbers unreliable',
+          }, 'EVAL: BLOCKED - Pre-bond pump.fun token (need high social velocity to signal)');
+          return SignalGenerator.EVAL_RESULTS.SCREENING_FAILED;
+        }
+
+        logger.info({
+          tokenAddress: shortAddr,
+          ticker: metrics.ticker,
+          isPumpfun: true,
+          isMigrated: false,
+          bondingProgress: bondingStatus.bondingProgress,
+          socialVelocity,
+          minRequired: MIN_PREBOND_SOCIAL_VELOCITY,
+        }, 'EVAL: Pre-bond token ALLOWED - has high social velocity');
+      }
+    }
+
     // Check if token meets minimum screening criteria
     if (!this.meetsScreeningCriteria(metrics)) {
       return SignalGenerator.EVAL_RESULTS.SCREENING_FAILED;

@@ -271,6 +271,52 @@ CREATE TABLE IF NOT EXISTS pumpfun_tokens (
   updated_at TIMESTAMP DEFAULT NOW()
 );
 
+-- ============ GRADUATION PIPELINE (Established Token Strategy v2) ============
+
+-- Graduation Pipeline table - tracks pump.fun tokens during 21-day observation period
+-- Part of Established Token Strategy v2 - repurposes pump.fun monitor as intelligence
+CREATE TABLE IF NOT EXISTS graduation_pipeline (
+  id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+  token_address VARCHAR(64) UNIQUE NOT NULL,
+  token_name VARCHAR(200),
+  ticker VARCHAR(20),
+
+  -- Launch data (from pump.fun)
+  pump_fun_mint VARCHAR(64),
+  launch_timestamp TIMESTAMP,
+  graduation_timestamp TIMESTAMP,
+
+  -- Observation metrics (collected during 21-day waiting period)
+  launch_bundle_percent DECIMAL(5, 2),
+  dev_sell_percent DECIMAL(5, 2),
+  initial_holder_count INTEGER,
+  holder_retention_rate DECIMAL(5, 2),
+  growth_trajectory VARCHAR(50),  -- organic, manipulated, mixed
+  kol_involvement_count INTEGER DEFAULT 0,
+  first_dump_recovered BOOLEAN,
+  peak_market_cap DECIMAL(20, 2),
+  lowest_market_cap DECIMAL(20, 2),
+
+  -- Quality scoring (calculated at end of observation)
+  graduation_quality_score INTEGER,  -- 0-100
+  quality_factors JSONB,
+
+  -- Status
+  observation_start TIMESTAMP DEFAULT NOW(),
+  observation_end TIMESTAMP,  -- observation_start + 21 days
+  promoted_to_universe BOOLEAN DEFAULT FALSE,
+  promoted_at TIMESTAMP,
+  rejection_reason VARCHAR(200),
+
+  created_at TIMESTAMP DEFAULT NOW(),
+  updated_at TIMESTAMP DEFAULT NOW()
+);
+
+-- Indexes for graduation pipeline
+CREATE INDEX IF NOT EXISTS idx_graduation_pipeline_promoted ON graduation_pipeline(promoted_to_universe);
+CREATE INDEX IF NOT EXISTS idx_graduation_pipeline_observation ON graduation_pipeline(observation_end);
+CREATE INDEX IF NOT EXISTS idx_graduation_pipeline_token ON graduation_pipeline(token_address);
+
 -- KOL Extended Performance table (Feature 7)
 CREATE TABLE IF NOT EXISTS kol_extended_performance (
   kol_id UUID PRIMARY KEY REFERENCES kols(id) ON DELETE CASCADE,

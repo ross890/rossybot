@@ -1,9 +1,21 @@
 // ===========================================
 // MATURE TOKEN MODULE - EXPORTS
+// Established Token Strategy v2
 // ===========================================
 
-// Types
+// Types and Configuration
 export * from './types.js';
+
+// Re-export key types for convenience
+export {
+  TokenTier,
+  TIER_CONFIG,
+  TAKE_PROFIT_CONFIG,
+  POSITION_CONFIG,
+  getTokenTier,
+  getStopLossForTier,
+  getPositionSize,
+} from './types.js';
 
 // Analyzers
 export { accumulationDetector, AccumulationDetector } from './accumulation-detector.js';

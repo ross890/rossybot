@@ -1,9 +1,20 @@
 // ===========================================
 // MATURE TOKEN SIGNAL MODULE - TYPE DEFINITIONS
-// For tokens that have been live 24+ hours
+// For established tokens (21+ days old, $8M-$150M market cap)
+// Updated for Established Token Strategy v2
 // ===========================================
 
 // ============ ENUMS ============
+
+/**
+ * Token tier based on market cap
+ * Each tier has different risk parameters
+ */
+export enum TokenTier {
+  EMERGING = 'EMERGING',       // $8-20M - Higher risk/reward
+  GRADUATED = 'GRADUATED',     // $20-50M - Balanced
+  ESTABLISHED = 'ESTABLISHED', // $50-150M - Lower risk
+}
 
 export enum MatureSignalType {
   ACCUMULATION_BREAKOUT = 'ACCUMULATION_BREAKOUT',
@@ -39,6 +50,65 @@ export enum ExitRecommendation {
   MOVE_STOP = 'MOVE_STOP',
   HOLD = 'HOLD',
 }
+
+// ============ TIER CONFIGURATION ============
+
+/**
+ * Tier-specific configuration for stop losses and position allocation
+ */
+export interface TierConfig {
+  minMarketCap: number;
+  maxMarketCap: number;
+  minVolume24h: number;
+  stopLoss: {
+    initial: number;    // Initial stop loss percent
+    timeDecay: number;  // Stop loss after 8h (tighter)
+  };
+  signalAllocation: number;  // What % of signals should be this tier
+}
+
+export const TIER_CONFIG: Record<TokenTier, TierConfig> = {
+  [TokenTier.EMERGING]: {
+    minMarketCap: 8_000_000,
+    maxMarketCap: 20_000_000,
+    minVolume24h: 300_000,
+    stopLoss: { initial: 20, timeDecay: 15 },
+    signalAllocation: 0.40,
+  },
+  [TokenTier.GRADUATED]: {
+    minMarketCap: 20_000_000,
+    maxMarketCap: 50_000_000,
+    minVolume24h: 500_000,
+    stopLoss: { initial: 18, timeDecay: 12 },
+    signalAllocation: 0.40,
+  },
+  [TokenTier.ESTABLISHED]: {
+    minMarketCap: 50_000_000,
+    maxMarketCap: 150_000_000,
+    minVolume24h: 1_000_000,
+    stopLoss: { initial: 15, timeDecay: 10 },
+    signalAllocation: 0.20,
+  },
+};
+
+/**
+ * Take profit configuration (same for all tiers)
+ */
+export const TAKE_PROFIT_CONFIG = {
+  tp1: { percent: 30, sellPercent: 40 },
+  tp2: { percent: 60, sellPercent: 40 },
+  tp3: { percent: 100, sellPercent: 20, trailing: true },
+} as const;
+
+/**
+ * Position sizing configuration
+ */
+export const POSITION_CONFIG = {
+  strong: { sizePercent: 25, maxRiskPercent: 5 },   // 80+ score
+  standard: { sizePercent: 15, maxRiskPercent: 3 }, // 65-79 score
+  maxConcurrentPositions: 3,
+  dryPowderReserve: 50,  // Always keep 50% in reserve
+} as const;
 
 // ============ ELIGIBILITY ============
 
@@ -279,6 +349,9 @@ export interface MatureTokenSignal {
   score: MatureTokenScore;
   confidence: 'HIGH' | 'MEDIUM' | 'LOW';
   riskLevel: number; // 1-5
+
+  // Token tier (determines TP/SL levels)
+  tier: TokenTier;
 
   // Token age info
   tokenAgeHours: number;
@@ -532,12 +605,12 @@ export const SCORE_MULTIPLIERS = {
 // ============ DEFAULT CONFIG ============
 
 export const DEFAULT_MATURE_TOKEN_CONFIG: MatureTokenConfig = {
-  scanIntervalMinutes: 5,
+  scanIntervalMinutes: 1,  // Scan every minute (was 5)
   maxTokensPerScan: 100,
 
   tokenAgeRange: {
-    minHours: 24,
-    maxDays: 90,  // Extended from 14 days to catch more opportunities
+    minHours: 504,  // 21 days minimum (was 24 hours)
+    maxDays: 365,   // No practical upper limit
   },
 
   rateLimits: {
@@ -547,15 +620,15 @@ export const DEFAULT_MATURE_TOKEN_CONFIG: MatureTokenConfig = {
   },
 
   thresholds: {
-    strongBuy: 75,
-    buy: 60,
-    watch: 45,
+    strongBuy: 80,  // Updated from 75
+    buy: 65,        // Updated from 60
+    watch: 50,      // Updated from 45
   },
 
   riskLimits: {
-    maxPortfolioAllocation: 0.20,
-    maxSinglePosition: 0.05,
-    maxOpenPositions: 5,
+    maxPortfolioAllocation: 0.50,  // Max 50% deployed
+    maxSinglePosition: 0.25,       // Max 25% per position (strong signal)
+    maxOpenPositions: 3,           // Max 3 concurrent (was 5)
   },
 
   features: {
@@ -570,17 +643,69 @@ export const DEFAULT_MATURE_TOKEN_CONFIG: MatureTokenConfig = {
 // ============ ELIGIBILITY DEFAULTS ============
 
 export const DEFAULT_ELIGIBILITY: MatureTokenEligibility = {
-  minTokenAgeHours: 24,
-  maxTokenAgeDays: 90,  // Extended from 14 days to discover older opportunities
-  minMarketCap: 100_000,
-  maxMarketCap: 50_000_000,
-  minLiquidity: 50_000,
-  minLiquidityRatio: 0.05,
-  min24hVolume: 50_000,
-  minVolumeMarketCapRatio: 0.10,
-  minHolderCount: 200,
-  maxTop10Concentration: 50,
+  // Age requirements - 21 days minimum
+  minTokenAgeHours: 504,  // 21 days (was 24 hours)
+  maxTokenAgeDays: 365,   // No practical upper limit
+
+  // Market cap range: $8M - $150M (across all tiers)
+  minMarketCap: 8_000_000,    // $8M (was $100K)
+  maxMarketCap: 150_000_000,  // $150M (was $50M)
+
+  // Liquidity requirements
+  minLiquidity: 50_000,       // $50K minimum
+  minLiquidityRatio: 0.02,    // 2% of mcap (was 5%)
+
+  // Volume requirements (lowest tier minimum)
+  min24hVolume: 300_000,      // $300K (was $50K)
+  minVolumeMarketCapRatio: 0.02,  // 2% (was 10%)
+
+  // Holder requirements
+  minHolderCount: 100,        // 100 holders (was 200)
+  maxTop10Concentration: 50,  // Max 50% in top 10
+
+  // Safety requirements
   mintAuthorityDisabled: true,
   freezeAuthorityDisabled: true,
-  lpLocked: true,
+  lpLocked: false,  // Not strictly required for established tokens
 };
+
+/**
+ * Helper function to determine token tier from market cap
+ */
+export function getTokenTier(marketCap: number): TokenTier | null {
+  if (marketCap >= TIER_CONFIG[TokenTier.ESTABLISHED].minMarketCap &&
+      marketCap <= TIER_CONFIG[TokenTier.ESTABLISHED].maxMarketCap) {
+    return TokenTier.ESTABLISHED;
+  }
+  if (marketCap >= TIER_CONFIG[TokenTier.GRADUATED].minMarketCap &&
+      marketCap < TIER_CONFIG[TokenTier.GRADUATED].maxMarketCap) {
+    return TokenTier.GRADUATED;
+  }
+  if (marketCap >= TIER_CONFIG[TokenTier.EMERGING].minMarketCap &&
+      marketCap < TIER_CONFIG[TokenTier.EMERGING].maxMarketCap) {
+    return TokenTier.EMERGING;
+  }
+  return null;  // Outside our range
+}
+
+/**
+ * Get stop loss percentage for a given tier
+ */
+export function getStopLossForTier(tier: TokenTier, hoursHeld: number = 0): number {
+  const tierConfig = TIER_CONFIG[tier];
+  // Use time-decay stop after 8 hours
+  if (hoursHeld >= 8) {
+    return tierConfig.stopLoss.timeDecay;
+  }
+  return tierConfig.stopLoss.initial;
+}
+
+/**
+ * Get position size percentage based on signal strength
+ */
+export function getPositionSize(compositeScore: number): { sizePercent: number; riskPercent: number } {
+  if (compositeScore >= 80) {
+    return POSITION_CONFIG.strong;
+  }
+  return POSITION_CONFIG.standard;
+}

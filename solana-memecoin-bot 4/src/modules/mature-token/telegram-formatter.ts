@@ -15,6 +15,8 @@ import {
   AccumulationPattern,
   VolumeTrend,
   ExitRecommendation,
+  TokenTier,
+  TAKE_PROFIT_CONFIG,
 } from './types.js';
 
 // ============ CLASS ============
@@ -121,16 +123,21 @@ export class MatureTokenTelegramFormatter {
     // Signal type emoji and label
     const signalTypeInfo = this.getSignalTypeInfo(signal.signalType);
 
+    // Get tier label for display
+    const tierLabel = this.getTierLabel(signal.tier);
+    const tierEmoji = this.getTierEmoji(signal.tier);
+
     // Build the message with clear visual hierarchy
     let msg = `\n`;
     msg += `═══════════════════════════════\n`;
-    msg += `${signalTypeInfo.emoji}  *MATURE TOKEN SIGNAL*\n`;
-    msg += `    ${signalTypeInfo.label} · Score: *${score.compositeScore}/100*\n`;
+    msg += `${signalTypeInfo.emoji}  *ESTABLISHED TOKEN SIGNAL*\n`;
+    msg += `    ${tierEmoji} ${tierLabel} · Score: *${score.compositeScore}/100*\n`;
     msg += `═══════════════════════════════\n\n`;
 
     // Token info
     msg += `*Token:* \`$${signal.tokenTicker}\`\n`;
     msg += `*Address:* \`${signal.tokenAddress}\`\n`;
+    msg += `*Tier:* ${tierEmoji} *${tierLabel}*\n`;
     msg += `*Chain:* Solana\n\n`;
 
     msg += `───────────────────────────────\n`;
@@ -224,16 +231,17 @@ export class MatureTokenTelegramFormatter {
     // Trade Setup
     msg += `⚡ *TRADE SETUP*\n\n`;
     msg += `📍 Entry Zone: $${this.formatPrice(signal.entryZone.low)} - $${this.formatPrice(signal.entryZone.high)}\n`;
-    msg += `📊 Position Size: *${signal.positionSizePercent}%* of portfolio\n\n`;
+    msg += `📊 Position Size: *${signal.positionSizePercent}%* of portfolio\n`;
+    msg += `🎚️ Tier: ${tierEmoji} *${tierLabel}* (SL: -${signal.stopLoss.percent}%)\n\n`;
 
     msg += `🎯 *Take Profits:*\n`;
-    msg += `├─ TP1 (50%): $${this.formatPrice(signal.takeProfit1.price)} (+50%) → Sell 33%\n`;
-    msg += `├─ TP2 (100%): $${this.formatPrice(signal.takeProfit2.price)} (+100%) → Sell 33%\n`;
-    msg += `└─ TP3 (200%): $${this.formatPrice(signal.takeProfit3.price)} (+200%) → Sell 34%\n\n`;
+    msg += `├─ TP1 (+${TAKE_PROFIT_CONFIG.tp1.percent}%): $${this.formatPrice(signal.takeProfit1.price)} → Sell ${TAKE_PROFIT_CONFIG.tp1.sellPercent}%\n`;
+    msg += `├─ TP2 (+${TAKE_PROFIT_CONFIG.tp2.percent}%): $${this.formatPrice(signal.takeProfit2.price)} → Sell ${TAKE_PROFIT_CONFIG.tp2.sellPercent}%\n`;
+    msg += `└─ TP3 (+${TAKE_PROFIT_CONFIG.tp3.percent}%): $${this.formatPrice(signal.takeProfit3.price)} → Trailing ${TAKE_PROFIT_CONFIG.tp3.sellPercent}%\n\n`;
 
-    msg += `🛑 Stop Loss: $${this.formatPrice(signal.stopLoss.price)} (-${signal.stopLoss.percent}%)\n`;
-    msg += `📈 Trailing Stop: -15% from highs (after TP1)\n`;
-    msg += `⏱️ Max Hold: ${signal.maxHoldDays} days\n\n`;
+    msg += `🛑 Stop Loss: $${this.formatPrice(signal.stopLoss.price)} (*-${signal.stopLoss.percent}%*)\n`;
+    msg += `📈 Trailing Stop: -20% from highs (after +30%)\n`;
+    msg += `⏱️ Max Hold: ${signal.maxHoldDays * 24}h (${signal.maxHoldDays} days)\n\n`;
 
     msg += `───────────────────────────────\n`;
 
@@ -244,8 +252,8 @@ export class MatureTokenTelegramFormatter {
 
     // Footer
     msg += `⏱️ _${signal.generatedAt.toISOString().replace('T', ' ').slice(0, 19)} UTC_\n`;
-    msg += `🔵 *Mature Token Signal* - Tokens 24hrs+\n\n`;
-    msg += `⚠️ _DYOR. Not financial advice. Mature tokens have lower rug risk but can still lose value rapidly._\n`;
+    msg += `🟢 *Established Token Signal* - ${tierLabel} ($${this.formatNumber(signal.marketCap)})\n\n`;
+    msg += `⚠️ _DYOR. Not financial advice. Established tokens (21+ days) have lower rug risk but can still lose value._\n`;
     msg += `═══════════════════════════════\n`;
 
     return msg;
@@ -417,6 +425,24 @@ export class MatureTokenTelegramFormatter {
   private formatPercent(value: number): string {
     const percent = value * 100;
     return `${percent >= 0 ? '+' : ''}${percent.toFixed(1)}%`;
+  }
+
+  private getTierLabel(tier: TokenTier): string {
+    switch (tier) {
+      case TokenTier.EMERGING: return 'EMERGING ($8-20M)';
+      case TokenTier.GRADUATED: return 'GRADUATED ($20-50M)';
+      case TokenTier.ESTABLISHED: return 'ESTABLISHED ($50-150M)';
+      default: return 'UNKNOWN';
+    }
+  }
+
+  private getTierEmoji(tier: TokenTier): string {
+    switch (tier) {
+      case TokenTier.EMERGING: return '🌱';      // Higher risk/reward
+      case TokenTier.GRADUATED: return '🎓';     // Balanced
+      case TokenTier.ESTABLISHED: return '🏛️';   // Lower risk
+      default: return '🔵';
+    }
   }
 }
 

@@ -18,6 +18,13 @@ import {
   ExitRecommendation,
   DEFAULT_MATURE_TOKEN_CONFIG,
   DEFAULT_ELIGIBILITY,
+  TokenTier,
+  TIER_CONFIG,
+  TAKE_PROFIT_CONFIG,
+  POSITION_CONFIG,
+  getTokenTier,
+  getStopLossForTier,
+  getPositionSize,
 } from './types.js';
 import { TokenMetrics } from '../../types/index.js';
 
@@ -190,14 +197,33 @@ export class MatureTokenScanner {
 
   /**
    * Filter tokens by eligibility criteria
+   * Updated for Established Token Strategy v2 with tier-based filtering
    */
   private async filterEligibleTokens(tokens: TokenMetrics[]): Promise<TokenMetrics[]> {
     const eligible: TokenMetrics[] = [];
 
     for (const token of tokens) {
-      // Market cap check
+      // Market cap check (must be in one of our tiers: $8M - $150M)
       if (token.marketCap < this.eligibility.minMarketCap ||
           token.marketCap > this.eligibility.maxMarketCap) {
+        continue;
+      }
+
+      // Determine tier and check tier-specific volume requirement
+      const tier = getTokenTier(token.marketCap);
+      if (!tier) {
+        continue;  // Outside all tiers
+      }
+
+      // Tier-specific volume check
+      const tierConfig = TIER_CONFIG[tier];
+      if (token.volume24h < tierConfig.minVolume24h) {
+        logger.debug({
+          tokenAddress: token.address,
+          tier,
+          volume24h: token.volume24h,
+          requiredVolume: tierConfig.minVolume24h,
+        }, 'Token rejected: volume below tier minimum');
         continue;
       }
 
@@ -208,16 +234,6 @@ export class MatureTokenScanner {
 
       const liquidityRatio = token.liquidityPool / token.marketCap;
       if (liquidityRatio < this.eligibility.minLiquidityRatio) {
-        continue;
-      }
-
-      // Volume check
-      if (token.volume24h < this.eligibility.min24hVolume) {
-        continue;
-      }
-
-      const volumeRatio = token.volume24h / token.marketCap;
-      if (volumeRatio < this.eligibility.minVolumeMarketCapRatio) {
         continue;
       }
 
@@ -376,6 +392,7 @@ export class MatureTokenScanner {
 
   /**
    * Build the signal object
+   * Updated for Established Token Strategy v2 with tier-based TP/SL
    */
   private buildSignal(
     metrics: TokenMetrics,
@@ -390,17 +407,24 @@ export class MatureTokenScanner {
   ): MatureTokenSignal {
     const price = metrics.price;
 
-    // Calculate position size based on signal strength
-    const signalStrength = matureTokenScorer.getSignalStrength(score);
-    let positionSize = 2; // Base 2%
-    if (signalStrength === 'STRONG') positionSize = 3;
-    else if (signalStrength === 'WEAK') positionSize = 1;
+    // Determine token tier
+    const tier = getTokenTier(metrics.marketCap) || TokenTier.EMERGING;
 
-    // Risk level (1-5)
+    // Get tier-specific stop loss
+    const stopLossPercent = getStopLossForTier(tier, 0);  // Initial stop loss
+
+    // Get position size based on signal strength
+    const positionConfig = getPositionSize(score.compositeScore);
+    const positionSize = positionConfig.sizePercent;
+
+    // Risk level (1-5) based on tier
     let riskLevel = 3;
-    if (score.compositeScore >= 75) riskLevel = 2;
-    else if (score.compositeScore >= 60) riskLevel = 3;
-    else riskLevel = 4;
+    if (tier === TokenTier.ESTABLISHED) riskLevel = 2;
+    else if (tier === TokenTier.GRADUATED) riskLevel = 3;
+    else riskLevel = 4;  // EMERGING
+
+    // Adjust risk level by score
+    if (score.compositeScore >= 80) riskLevel = Math.max(1, riskLevel - 1);
 
     return {
       id: `mature_${Date.now()}_${metrics.address.slice(0, 8)}`,
@@ -412,6 +436,9 @@ export class MatureTokenScanner {
       score,
       confidence: score.confidence,
       riskLevel,
+
+      // Token tier for this signal
+      tier,
 
       tokenAgeHours: Math.round(metrics.tokenAge / 60),
       tokenAgeDays: Math.round(metrics.tokenAge / 60 / 24),
@@ -435,23 +462,29 @@ export class MatureTokenScanner {
         high: price * 1.03,
       },
       positionSizePercent: positionSize,
+
+      // Tier-based stop loss
       stopLoss: {
-        price: price * 0.75,
-        percent: 25,
+        price: price * (1 - stopLossPercent / 100),
+        percent: stopLossPercent,
       },
+
+      // Updated take profit targets (same for all tiers)
       takeProfit1: {
-        price: price * 1.5,
-        percent: 50,
+        price: price * (1 + TAKE_PROFIT_CONFIG.tp1.percent / 100),
+        percent: TAKE_PROFIT_CONFIG.tp1.percent,
       },
       takeProfit2: {
-        price: price * 2,
-        percent: 100,
+        price: price * (1 + TAKE_PROFIT_CONFIG.tp2.percent / 100),
+        percent: TAKE_PROFIT_CONFIG.tp2.percent,
       },
       takeProfit3: {
-        price: price * 3,
-        percent: 200,
+        price: price * (1 + TAKE_PROFIT_CONFIG.tp3.percent / 100),
+        percent: TAKE_PROFIT_CONFIG.tp3.percent,
       },
-      maxHoldDays: 7,
+
+      // Shorter hold time for established token strategy
+      maxHoldDays: 2,  // 48 hours max (was 7 days)
 
       generatedAt: new Date(),
       expiresAt: new Date(Date.now() + SIGNAL_EXPIRY_HOURS * 60 * 60 * 1000),

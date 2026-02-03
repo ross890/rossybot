@@ -458,5 +458,141 @@ Before going live with real capital:
 
 ---
 
+## Appendix C: Implementation Mapping
+
+**Key Discovery:** The existing `mature-token/` module already provides 90% of the infrastructure needed. We extend it rather than rebuild.
+
+### Files to Modify
+
+| File | Changes Required |
+|------|------------------|
+| `src/modules/mature-token/types.ts` | Update `DEFAULT_ELIGIBILITY` and `DEFAULT_MATURE_TOKEN_CONFIG` with new values. Add `TokenTier` enum and tier-based configs. |
+| `src/modules/mature-token/mature-token-scanner.ts` | Add tier classification logic. Update position sizing and TP/SL to be tier-aware. |
+| `src/modules/pumpfun/bonding-monitor.ts` | Add graduation pipeline tracking. Store tokens for 21-day observation. |
+| `src/utils/database.ts` | Add `graduation_pipeline` table for tracking pump.fun graduates. |
+| `src/modules/mature-token/telegram-formatter.ts` | Update signal format to show tier and tier-specific TP/SL. |
+
+### Existing Infrastructure (Reuse As-Is)
+
+| Module | Purpose | Status |
+|--------|---------|--------|
+| `accumulation-detector.ts` | Wyckoff pattern detection | ✅ Ready |
+| `breakout-analyzer.ts` | RSI, MACD, volume breakout | ✅ Ready |
+| `holder-dynamics.ts` | Holder growth, retention | ✅ Ready |
+| `smart-money-tracker.ts` | Whale accumulation | ✅ Ready |
+| `kol-reentry-detector.ts` | KOL activity on tokens | ✅ Ready |
+| `volume-profile.ts` | Volume authenticity | ✅ Ready |
+| `mature-token-scorer.ts` | Composite scoring | ✅ Ready |
+
+### New Configuration Values
+
+```typescript
+// Token Tiers
+export enum TokenTier {
+  EMERGING = 'EMERGING',       // $8-20M
+  GRADUATED = 'GRADUATED',     // $20-50M
+  ESTABLISHED = 'ESTABLISHED', // $50-150M
+}
+
+// Tier-specific configuration
+export const TIER_CONFIG = {
+  EMERGING: {
+    minMarketCap: 8_000_000,
+    maxMarketCap: 20_000_000,
+    minVolume24h: 300_000,
+    stopLoss: { initial: 20, timeDecay: 15 },
+    signalAllocation: 0.40,
+  },
+  GRADUATED: {
+    minMarketCap: 20_000_000,
+    maxMarketCap: 50_000_000,
+    minVolume24h: 500_000,
+    stopLoss: { initial: 18, timeDecay: 12 },
+    signalAllocation: 0.40,
+  },
+  ESTABLISHED: {
+    minMarketCap: 50_000_000,
+    maxMarketCap: 150_000_000,
+    minVolume24h: 1_000_000,
+    stopLoss: { initial: 15, timeDecay: 10 },
+    signalAllocation: 0.20,
+  },
+};
+
+// Updated defaults
+export const DEFAULT_ELIGIBILITY = {
+  minTokenAgeHours: 504,  // 21 days (was 24 hours)
+  maxTokenAgeDays: 365,   // No upper limit effectively
+  minMarketCap: 8_000_000,
+  maxMarketCap: 150_000_000,
+  minLiquidity: 50_000,
+  minLiquidityRatio: 0.02,
+  min24hVolume: 300_000,  // Lowest tier minimum
+  minVolumeMarketCapRatio: 0.02,
+  minHolderCount: 100,
+  maxTop10Concentration: 50,
+  mintAuthorityDisabled: true,
+  freezeAuthorityDisabled: true,
+  lpLocked: false,  // Not strictly required for established
+};
+
+// Take profit targets (all tiers)
+export const TAKE_PROFIT_CONFIG = {
+  tp1: { percent: 30, sellPercent: 40 },
+  tp2: { percent: 60, sellPercent: 40 },
+  tp3: { percent: 100, sellPercent: 20, trailing: true },
+};
+
+// Position sizing
+export const POSITION_CONFIG = {
+  strong: { sizePercent: 25, maxRiskPercent: 5 },
+  standard: { sizePercent: 15, maxRiskPercent: 3 },
+  maxConcurrentPositions: 3,
+  dryPowderReserve: 50,
+};
+```
+
+### Database Schema Addition
+
+```sql
+-- Graduation Pipeline (pump.fun tracking)
+CREATE TABLE graduation_pipeline (
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  token_address VARCHAR(64) UNIQUE NOT NULL,
+  token_name VARCHAR(200),
+  ticker VARCHAR(20),
+
+  -- Launch data
+  pump_fun_mint VARCHAR(64),
+  launch_timestamp TIMESTAMP,
+  graduation_timestamp TIMESTAMP,
+
+  -- Observation metrics
+  launch_bundle_percent DECIMAL(5, 2),
+  dev_sell_percent DECIMAL(5, 2),
+  initial_holder_count INTEGER,
+  holder_retention_rate DECIMAL(5, 2),
+  growth_trajectory VARCHAR(50),
+  kol_involvement_count INTEGER,
+  first_dump_recovered BOOLEAN,
+
+  -- Quality scoring
+  graduation_quality_score INTEGER,
+
+  -- Status
+  observation_start TIMESTAMP DEFAULT NOW(),
+  observation_end TIMESTAMP,
+  promoted_to_universe BOOLEAN DEFAULT FALSE,
+  promoted_at TIMESTAMP,
+
+  created_at TIMESTAMP DEFAULT NOW()
+);
+
+CREATE INDEX idx_graduation_pipeline_promoted ON graduation_pipeline(promoted_to_universe);
+CREATE INDEX idx_graduation_pipeline_observation ON graduation_pipeline(observation_end);
+```
+
+---
+
 *Strategy Document v2.0 - February 2026*
 *Rossybot Established Token Trading System*

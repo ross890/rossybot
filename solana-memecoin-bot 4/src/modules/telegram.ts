@@ -3733,10 +3733,10 @@ export class TelegramAlertBot {
     message += `└ Avg Loss: ${report.trading.avgLossRoi.toFixed(1)}%\n`;
 
     if (report.trading.bestTrade) {
-      message += `   🏆 Best: ${report.trading.bestTrade.token} (+${report.trading.bestTrade.roi.toFixed(0)}%)\n`;
+      message += `   🏆 Best: ${this.escapeMarkdown(report.trading.bestTrade.token)} (+${report.trading.bestTrade.roi.toFixed(0)}%)\n`;
     }
     if (report.trading.worstTrade) {
-      message += `   💔 Worst: ${report.trading.worstTrade.token} (${report.trading.worstTrade.roi.toFixed(0)}%)\n`;
+      message += `   💔 Worst: ${this.escapeMarkdown(report.trading.worstTrade.token)} (${report.trading.worstTrade.roi.toFixed(0)}%)\n`;
     }
     message += '\n';
 
@@ -3764,12 +3764,12 @@ export class TelegramAlertBot {
     // Factor Analysis
     if (report.factorAnalysis.workingWell.length > 0) {
       message += `✅ *WORKING WELL*\n`;
-      message += `${report.factorAnalysis.workingWell.slice(0, 3).join(', ')}\n\n`;
+      message += `${report.factorAnalysis.workingWell.slice(0, 3).map(s => this.escapeMarkdown(s)).join(', ')}\n\n`;
     }
 
     if (report.factorAnalysis.needsImprovement.length > 0) {
       message += `⚠️ *NEEDS ATTENTION*\n`;
-      message += `${report.factorAnalysis.needsImprovement.slice(0, 3).join(', ')}\n\n`;
+      message += `${report.factorAnalysis.needsImprovement.slice(0, 3).map(s => this.escapeMarkdown(s)).join(', ')}\n\n`;
     }
 
     // Recommendations
@@ -3778,8 +3778,8 @@ export class TelegramAlertBot {
       const topRecs = report.recommendations.slice(0, 3);
       for (const rec of topRecs) {
         const priorityEmoji = rec.priority === 'HIGH' ? '🔴' : rec.priority === 'MEDIUM' ? '🟡' : '🟢';
-        message += `${priorityEmoji} ${rec.issue}\n`;
-        message += `   _${rec.suggestion}_\n`;
+        message += `${priorityEmoji} ${this.escapeMarkdown(rec.issue)}\n`;
+        message += `   ${this.escapeMarkdown(rec.suggestion)}\n`;
       }
       message += '\n';
     }

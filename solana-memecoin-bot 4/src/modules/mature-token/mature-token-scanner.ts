@@ -149,12 +149,14 @@ export class MatureTokenScanner {
       logger.info({
         candidates: candidates.length,
         eligible: eligible.length,
+        evaluated: Math.min(eligible.length, this.config.maxTokensPerScan),
         signalsSent,
         watchlistAdded,
         blocked,
+        skipped: Math.min(eligible.length, this.config.maxTokensPerScan) - signalsSent - watchlistAdded - blocked,
         activeSignals: this.activeSignals.size,
         watchlistSize: this.watchlist.size,
-      }, 'Mature token scan cycle complete');
+      }, '✅ Mature token scan cycle complete');
 
     } catch (error) {
       logger.error({ error }, 'Error in mature token scan cycle');
@@ -166,10 +168,15 @@ export class MatureTokenScanner {
    */
   private async getCandidateTokens(): Promise<TokenMetrics[]> {
     const candidates: TokenMetrics[] = [];
+    let fetchedCount = 0;
+    let metricsFailedCount = 0;
+    let tooYoungCount = 0;
+    let tooOldCount = 0;
 
     try {
       // Get trending tokens from DexScreener
       const trendingAddresses = await dexScreenerClient.getTrendingSolanaTokens(200);
+      fetchedCount = trendingAddresses.length;
 
       // Get metrics for each and filter by age
       const minAgeMinutes = this.eligibility.minTokenAgeHours * 60;
@@ -178,16 +185,37 @@ export class MatureTokenScanner {
       for (const address of trendingAddresses) {
         try {
           const metrics = await getTokenMetrics(address);
-          if (!metrics) continue;
-
-          // Check age range (24hrs - 14 days)
-          if (metrics.tokenAge >= minAgeMinutes && metrics.tokenAge <= maxAgeMinutes) {
-            candidates.push(metrics);
+          if (!metrics) {
+            metricsFailedCount++;
+            continue;
           }
+
+          // Check age range
+          if (metrics.tokenAge < minAgeMinutes) {
+            tooYoungCount++;
+            continue;
+          }
+          if (metrics.tokenAge > maxAgeMinutes) {
+            tooOldCount++;
+            continue;
+          }
+
+          candidates.push(metrics);
         } catch {
-          // Skip tokens we can't get metrics for
+          metricsFailedCount++;
         }
       }
+
+      logger.info({
+        fetched: fetchedCount,
+        metricsRetrieved: fetchedCount - metricsFailedCount,
+        tooYoung: tooYoungCount,
+        tooOld: tooOldCount,
+        passedAgeFilter: candidates.length,
+        minAgeHours: this.eligibility.minTokenAgeHours,
+        maxAgeDays: this.eligibility.maxTokenAgeDays,
+      }, '📊 FUNNEL: Age filter results');
+
     } catch (error) {
       logger.error({ error }, 'Failed to get mature token candidates');
     }
@@ -202,76 +230,92 @@ export class MatureTokenScanner {
   private async filterEligibleTokens(tokens: TokenMetrics[]): Promise<TokenMetrics[]> {
     const eligible: TokenMetrics[] = [];
 
+    // Track rejection reasons
+    const rejections = {
+      marketCapOutOfRange: 0,
+      noTierMatch: 0,
+      volumeTooLow: 0,
+      holdersTooLow: 0,
+      ageTooYoung: 0,
+      liquidityTooLow: 0,
+      liquidityRatioTooLow: 0,
+      concentrationTooHigh: 0,
+      onCooldown: 0,
+    };
+
+    // Track tier distribution
+    const tierCounts: Record<string, number> = { RISING: 0, EMERGING: 0, GRADUATED: 0, ESTABLISHED: 0 };
+
     for (const token of tokens) {
-      // Market cap check (must be in one of our tiers: $8M - $150M)
+      // Market cap check (must be in one of our tiers)
       if (token.marketCap < this.eligibility.minMarketCap ||
           token.marketCap > this.eligibility.maxMarketCap) {
+        rejections.marketCapOutOfRange++;
         continue;
       }
 
       // Determine tier and check tier-specific volume requirement
       const tier = getTokenTier(token.marketCap);
       if (!tier) {
-        continue;  // Outside all tiers
+        rejections.noTierMatch++;
+        continue;  // Outside all tiers (gap between $5M-$8M)
       }
+
+      tierCounts[tier]++;
+      const tierConfig = TIER_CONFIG[tier];
 
       // Tier-specific volume check
-      const tierConfig = TIER_CONFIG[tier];
       if (token.volume24h < tierConfig.minVolume24h) {
-        logger.debug({
-          tokenAddress: token.address,
-          tier,
-          volume24h: token.volume24h,
-          requiredVolume: tierConfig.minVolume24h,
-        }, 'Token rejected: volume below tier minimum');
+        rejections.volumeTooLow++;
         continue;
       }
 
-      // Tier-specific holder count check (RISING tier requires 3000+ holders)
+      // Tier-specific holder count check
       if (token.holderCount < tierConfig.minHolderCount) {
-        logger.debug({
-          tokenAddress: token.address,
-          tier,
-          holderCount: token.holderCount,
-          requiredHolders: tierConfig.minHolderCount,
-        }, 'Token rejected: holder count below tier minimum');
+        rejections.holdersTooLow++;
         continue;
       }
 
-      // Tier-specific token age check (RISING tier: 3+ days, others: 21+ days)
+      // Tier-specific token age check
       if (token.tokenAge && token.tokenAge < tierConfig.minTokenAgeHours) {
-        logger.debug({
-          tokenAddress: token.address,
-          tier,
-          tokenAgeHours: token.tokenAge,
-          requiredAgeHours: tierConfig.minTokenAgeHours,
-        }, 'Token rejected: age below tier minimum');
+        rejections.ageTooYoung++;
         continue;
       }
 
       // Liquidity check
       if (token.liquidityPool < this.eligibility.minLiquidity) {
+        rejections.liquidityTooLow++;
         continue;
       }
 
       const liquidityRatio = token.liquidityPool / token.marketCap;
       if (liquidityRatio < this.eligibility.minLiquidityRatio) {
+        rejections.liquidityRatioTooLow++;
         continue;
       }
 
       // Concentration check
       if (token.top10Concentration > this.eligibility.maxTop10Concentration) {
+        rejections.concentrationTooHigh++;
         continue;
       }
 
       // Check cooldown
       const cooldown = this.signalCooldowns.get(token.address);
       if (cooldown && Date.now() - cooldown < this.config.rateLimits.tokenCooldownHours * 60 * 60 * 1000) {
+        rejections.onCooldown++;
         continue;
       }
 
       eligible.push(token);
     }
+
+    logger.info({
+      input: tokens.length,
+      eligible: eligible.length,
+      rejections,
+      tierDistribution: tierCounts,
+    }, '📊 FUNNEL: Eligibility filter results');
 
     return eligible;
   }
@@ -311,8 +355,28 @@ export class MatureTokenScanner {
       metrics.price
     );
 
+    // Log score for visibility
+    logger.info({
+      ticker: metrics.ticker,
+      address: metrics.address.slice(0, 8),
+      compositeScore: score.compositeScore,
+      recommendation: score.recommendation,
+      confidence: score.confidence,
+      accumulationScore: score.accumulationScore,
+      breakoutScore: score.breakoutScore,
+      safetyScore: score.safetyScore,
+      marketCap: `$${(metrics.marketCap / 1_000_000).toFixed(2)}M`,
+      holders: metrics.holderCount,
+    }, '📊 FUNNEL: Token scored');
+
     // Determine action
     if (!matureTokenScorer.meetsSignalThreshold(score)) {
+      logger.info({
+        ticker: metrics.ticker,
+        compositeScore: score.compositeScore,
+        requiredScore: 50,
+        reason: score.compositeScore < 50 ? 'score_too_low' : 'sub_threshold_not_met',
+      }, '📊 FUNNEL: Token rejected - below signal threshold');
       return 'SKIPPED';
     }
 

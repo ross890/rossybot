@@ -261,15 +261,7 @@ export class MatureTokenScanner {
       this.funnelStats.rejections.tooYoung = tooYoungCount;
       this.funnelStats.rejections.tooOld = tooOldCount;
 
-      logger.info({
-        fetched: fetchedCount,
-        metricsRetrieved: fetchedCount - metricsFailedCount,
-        tooYoung: tooYoungCount,
-        tooOld: tooOldCount,
-        passedAgeFilter: candidates.length,
-        minAgeHours: this.eligibility.minTokenAgeHours,
-        maxAgeDays: this.eligibility.maxTokenAgeDays,
-      }, '📊 FUNNEL: Age filter results');
+      logger.info(`📊 FUNNEL: Age filter - Fetched: ${fetchedCount}, Too young: ${tooYoungCount}, Too old: ${tooOldCount}, Passed: ${candidates.length}`);
 
     } catch (error) {
       logger.error({ error }, 'Failed to get mature token candidates');
@@ -375,12 +367,7 @@ export class MatureTokenScanner {
     this.funnelStats.rejections.cooldown = rejections.onCooldown;
     this.funnelStats.tiers = tierCounts as { RISING: number; EMERGING: number; GRADUATED: number; ESTABLISHED: number };
 
-    logger.info({
-      input: tokens.length,
-      eligible: eligible.length,
-      rejections,
-      tierDistribution: tierCounts,
-    }, '📊 FUNNEL: Eligibility filter results');
+    logger.info(`📊 FUNNEL: Eligibility - Input: ${tokens.length}, Eligible: ${eligible.length} | Rejections: mcap=${rejections.marketCapOutOfRange}, vol=${rejections.volumeTooLow}, holders=${rejections.holdersTooLow}, liq=${rejections.liquidityTooLow}, conc=${rejections.concentrationTooHigh}, cooldown=${rejections.onCooldown} | Tiers: R=${tierCounts.RISING} E=${tierCounts.EMERGING} G=${tierCounts.GRADUATED} EST=${tierCounts.ESTABLISHED}`);
 
     return eligible;
   }
@@ -421,27 +408,12 @@ export class MatureTokenScanner {
     );
 
     // Log score for visibility
-    logger.info({
-      ticker: metrics.ticker,
-      address: metrics.address.slice(0, 8),
-      compositeScore: score.compositeScore,
-      recommendation: score.recommendation,
-      confidence: score.confidence,
-      accumulationScore: score.accumulationScore,
-      breakoutScore: score.breakoutScore,
-      safetyScore: score.contractSafetyScore,
-      marketCap: `$${(metrics.marketCap / 1_000_000).toFixed(2)}M`,
-      holders: metrics.holderCount,
-    }, '📊 FUNNEL: Token scored');
+    logger.info(`📊 FUNNEL: Scored ${metrics.ticker} (${metrics.address.slice(0, 8)}) - Score: ${score.compositeScore.toFixed(0)} [${score.recommendation}/${score.confidence}] | Acc: ${score.accumulationScore.toFixed(0)}, Brk: ${score.breakoutScore.toFixed(0)}, Safe: ${score.contractSafetyScore.toFixed(0)} | $${(metrics.marketCap / 1_000_000).toFixed(2)}M, ${metrics.holderCount} holders`);
 
     // Determine action
     if (!matureTokenScorer.meetsSignalThreshold(score)) {
-      logger.info({
-        ticker: metrics.ticker,
-        compositeScore: score.compositeScore,
-        requiredScore: 50,
-        reason: score.compositeScore < 50 ? 'score_too_low' : 'sub_threshold_not_met',
-      }, '📊 FUNNEL: Token rejected - below signal threshold');
+      const reason = score.compositeScore < 50 ? 'score_too_low' : 'sub_threshold_not_met';
+      logger.info(`📊 FUNNEL: Rejected ${metrics.ticker} - Score ${score.compositeScore.toFixed(0)} < 50 required (${reason})`);
       return 'SKIPPED';
     }
 

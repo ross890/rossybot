@@ -1079,20 +1079,33 @@ export class SignalGenerator {
     // New approach: Require meaningful statistical edge before signaling.
     // Learning mode still allows lower thresholds for data collection.
     //
+    // LEARNING MODE FIX: Skip ML gate entirely in learning mode.
+    // The ML model needs training data to learn from - we can't expect it to
+    // make good predictions without data. By skipping this gate in learning mode,
+    // we collect the signal outcomes that the ML model needs to improve.
+    //
     let mlProbabilityThreshold: number;
     let confidenceOk: boolean;
 
-    if (signalTrack === SignalTrack.PROVEN_RUNNER) {
+    if (isLearningMode) {
+      // LEARNING MODE: Skip ML gate entirely - we need to collect training data
+      // The model can't learn if we filter out all signals before generating them
+      mlProbabilityThreshold = 0;  // Accept any probability
+      confidenceOk = true;         // Accept any confidence
+      logger.info({
+        tokenAddress: shortAddr,
+        ticker: metrics.ticker,
+        winProbability: prediction.winProbability,
+        confidence: prediction.confidence,
+        note: 'Learning mode: ML gate bypassed for data collection',
+      }, 'EVAL: Learning mode - skipping ML probability filter');
+    } else if (signalTrack === SignalTrack.PROVEN_RUNNER) {
       // PROVEN RUNNER: Token has survived 45+ minutes, require decent edge
-      // Learning mode: Very low threshold (20%) - ML model needs data to learn from
-      mlProbabilityThreshold = isLearningMode ? 20 : 55;
-      confidenceOk = isLearningMode
-        ? true  // Accept any confidence in learning mode
-        : (prediction.confidence === 'HIGH' || prediction.confidence === 'MEDIUM');
+      mlProbabilityThreshold = 55;
+      confidenceOk = prediction.confidence === 'HIGH' || prediction.confidence === 'MEDIUM';
     } else {
       // EARLY_QUALITY: Already validated by KOL or superior on-chain metrics
-      // Learning mode: Very low threshold (15%) - collect data for ML training
-      mlProbabilityThreshold = isLearningMode ? 15 : 50;
+      mlProbabilityThreshold = 50;
       confidenceOk = true;  // Trust the external validation, don't double-gate
     }
 

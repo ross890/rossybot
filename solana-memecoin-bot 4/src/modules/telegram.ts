@@ -1259,7 +1259,7 @@ export class TelegramAlertBot {
         message += '• Analyzes historical signal outcomes (WIN/LOSS)\n';
         message += '• Learns which factors correlate with wins\n';
         message += '• Discovers winning and losing patterns\n';
-        message += '• Retrains every 6 hours with new data\n\n';
+        message += '• Retrains weekly for statistical significance\n\n';
 
         // Training status
         if (modelSummary.lastTrained) {

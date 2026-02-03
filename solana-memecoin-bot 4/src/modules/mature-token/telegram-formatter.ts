@@ -429,6 +429,7 @@ export class MatureTokenTelegramFormatter {
 
   private getTierLabel(tier: TokenTier): string {
     switch (tier) {
+      case TokenTier.RISING: return 'RISING ($1-5M)';
       case TokenTier.EMERGING: return 'EMERGING ($8-20M)';
       case TokenTier.GRADUATED: return 'GRADUATED ($20-50M)';
       case TokenTier.ESTABLISHED: return 'ESTABLISHED ($50-150M)';
@@ -438,6 +439,7 @@ export class MatureTokenTelegramFormatter {
 
   private getTierEmoji(tier: TokenTier): string {
     switch (tier) {
+      case TokenTier.RISING: return '🚀';        // High potential, strong holder base
       case TokenTier.EMERGING: return '🌱';      // Higher risk/reward
       case TokenTier.GRADUATED: return '🎓';     // Balanced
       case TokenTier.ESTABLISHED: return '🏛️';   // Lower risk

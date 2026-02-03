@@ -11,6 +11,7 @@
  * Each tier has different risk parameters
  */
 export enum TokenTier {
+  RISING = 'RISING',           // $1-5M - High risk, requires strong holder base (3000+)
   EMERGING = 'EMERGING',       // $8-20M - Higher risk/reward
   GRADUATED = 'GRADUATED',     // $20-50M - Balanced
   ESTABLISHED = 'ESTABLISHED', // $50-150M - Lower risk
@@ -60,6 +61,8 @@ export interface TierConfig {
   minMarketCap: number;
   maxMarketCap: number;
   minVolume24h: number;
+  minHolderCount: number;     // Minimum holder requirement for this tier
+  minTokenAgeHours: number;   // Minimum token age for this tier
   stopLoss: {
     initial: number;    // Initial stop loss percent
     timeDecay: number;  // Stop loss after 8h (tighter)
@@ -68,24 +71,39 @@ export interface TierConfig {
 }
 
 export const TIER_CONFIG: Record<TokenTier, TierConfig> = {
+  [TokenTier.RISING]: {
+    minMarketCap: 1_000_000,     // $1M
+    maxMarketCap: 5_000_000,     // $5M
+    minVolume24h: 100_000,       // $100K volume
+    minHolderCount: 3_000,       // Strong holder base required
+    minTokenAgeHours: 72,        // 3 days minimum
+    stopLoss: { initial: 25, timeDecay: 18 },  // Wider stops for volatility
+    signalAllocation: 0.20,      // 20% of signals
+  },
   [TokenTier.EMERGING]: {
     minMarketCap: 8_000_000,
     maxMarketCap: 20_000_000,
     minVolume24h: 300_000,
+    minHolderCount: 100,
+    minTokenAgeHours: 504,       // 21 days
     stopLoss: { initial: 20, timeDecay: 15 },
-    signalAllocation: 0.40,
+    signalAllocation: 0.30,      // Reduced from 0.40
   },
   [TokenTier.GRADUATED]: {
     minMarketCap: 20_000_000,
     maxMarketCap: 50_000_000,
     minVolume24h: 500_000,
+    minHolderCount: 100,
+    minTokenAgeHours: 504,       // 21 days
     stopLoss: { initial: 18, timeDecay: 12 },
-    signalAllocation: 0.40,
+    signalAllocation: 0.30,      // Reduced from 0.40
   },
   [TokenTier.ESTABLISHED]: {
     minMarketCap: 50_000_000,
     maxMarketCap: 150_000_000,
     minVolume24h: 1_000_000,
+    minHolderCount: 100,
+    minTokenAgeHours: 504,       // 21 days
     stopLoss: { initial: 15, timeDecay: 10 },
     signalAllocation: 0.20,
   },
@@ -643,24 +661,24 @@ export const DEFAULT_MATURE_TOKEN_CONFIG: MatureTokenConfig = {
 // ============ ELIGIBILITY DEFAULTS ============
 
 export const DEFAULT_ELIGIBILITY: MatureTokenEligibility = {
-  // Age requirements - 21 days minimum
-  minTokenAgeHours: 504,  // 21 days (was 24 hours)
-  maxTokenAgeDays: 365,   // No practical upper limit
+  // Age requirements - 3 days minimum (RISING tier), tier-specific checks applied later
+  minTokenAgeHours: 72,       // 3 days for RISING tier (other tiers require 21 days via TIER_CONFIG)
+  maxTokenAgeDays: 365,       // No practical upper limit
 
-  // Market cap range: $8M - $150M (across all tiers)
-  minMarketCap: 8_000_000,    // $8M (was $100K)
-  maxMarketCap: 150_000_000,  // $150M (was $50M)
+  // Market cap range: $1M - $150M (across all tiers, RISING tier starts at $1M)
+  minMarketCap: 1_000_000,    // $1M for RISING tier (other tiers have higher minimums)
+  maxMarketCap: 150_000_000,  // $150M
 
   // Liquidity requirements
   minLiquidity: 50_000,       // $50K minimum
-  minLiquidityRatio: 0.02,    // 2% of mcap (was 5%)
+  minLiquidityRatio: 0.02,    // 2% of mcap
 
-  // Volume requirements (lowest tier minimum)
-  min24hVolume: 300_000,      // $300K (was $50K)
-  minVolumeMarketCapRatio: 0.02,  // 2% (was 10%)
+  // Volume requirements (lowest tier minimum - RISING tier)
+  min24hVolume: 100_000,      // $100K for RISING tier
+  minVolumeMarketCapRatio: 0.02,  // 2%
 
-  // Holder requirements
-  minHolderCount: 100,        // 100 holders (was 200)
+  // Holder requirements (tier-specific via TIER_CONFIG, RISING requires 3000+)
+  minHolderCount: 100,        // Base requirement, RISING tier overrides to 3000
   maxTop10Concentration: 50,  // Max 50% in top 10
 
   // Safety requirements
@@ -684,6 +702,10 @@ export function getTokenTier(marketCap: number): TokenTier | null {
   if (marketCap >= TIER_CONFIG[TokenTier.EMERGING].minMarketCap &&
       marketCap < TIER_CONFIG[TokenTier.EMERGING].maxMarketCap) {
     return TokenTier.EMERGING;
+  }
+  if (marketCap >= TIER_CONFIG[TokenTier.RISING].minMarketCap &&
+      marketCap < TIER_CONFIG[TokenTier.RISING].maxMarketCap) {
+    return TokenTier.RISING;
   }
   return null;  // Outside our range
 }

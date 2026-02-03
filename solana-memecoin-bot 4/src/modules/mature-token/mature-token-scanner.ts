@@ -227,6 +227,28 @@ export class MatureTokenScanner {
         continue;
       }
 
+      // Tier-specific holder count check (RISING tier requires 3000+ holders)
+      if (token.holderCount < tierConfig.minHolderCount) {
+        logger.debug({
+          tokenAddress: token.address,
+          tier,
+          holderCount: token.holderCount,
+          requiredHolders: tierConfig.minHolderCount,
+        }, 'Token rejected: holder count below tier minimum');
+        continue;
+      }
+
+      // Tier-specific token age check (RISING tier: 3+ days, others: 21+ days)
+      if (token.tokenAge && token.tokenAge < tierConfig.minTokenAgeHours) {
+        logger.debug({
+          tokenAddress: token.address,
+          tier,
+          tokenAgeHours: token.tokenAge,
+          requiredAgeHours: tierConfig.minTokenAgeHours,
+        }, 'Token rejected: age below tier minimum');
+        continue;
+      }
+
       // Liquidity check
       if (token.liquidityPool < this.eligibility.minLiquidity) {
         continue;
@@ -234,11 +256,6 @@ export class MatureTokenScanner {
 
       const liquidityRatio = token.liquidityPool / token.marketCap;
       if (liquidityRatio < this.eligibility.minLiquidityRatio) {
-        continue;
-      }
-
-      // Holder check
-      if (token.holderCount < this.eligibility.minHolderCount) {
         continue;
       }
 
@@ -421,7 +438,8 @@ export class MatureTokenScanner {
     let riskLevel = 3;
     if (tier === TokenTier.ESTABLISHED) riskLevel = 2;
     else if (tier === TokenTier.GRADUATED) riskLevel = 3;
-    else riskLevel = 4;  // EMERGING
+    else if (tier === TokenTier.EMERGING) riskLevel = 4;
+    else if (tier === TokenTier.RISING) riskLevel = 5;  // Highest risk due to smaller mcap
 
     // Adjust risk level by score
     if (score.compositeScore >= 80) riskLevel = Math.max(1, riskLevel - 1);

@@ -71,10 +71,21 @@ function printStartupDiagnostics(): void {
     }
   }
 
+  // Strategy Configuration
+  logger.info('');
+  logger.info('🎯 STRATEGY CONFIGURATION');
+  logger.info(`   Early Token Strategy: ${appConfig.trading.enableEarlyStrategy ? '✅ ENABLED (5min-90min tokens)' : '❌ DISABLED'}`);
+  logger.info(`   Mature Token Strategy: ${appConfig.trading.enableMatureStrategy ? '✅ ENABLED (21+ day tokens)' : '❌ DISABLED'}`);
+
   // Signal Generation Settings
   logger.info('');
   logger.info('📡 SIGNAL GENERATION');
-  logger.info(`   Scan Interval: 20 seconds`);
+  if (appConfig.trading.enableEarlyStrategy) {
+    logger.info(`   Early Strategy Scan Interval: 20 seconds`);
+  }
+  if (appConfig.trading.enableMatureStrategy) {
+    logger.info(`   Mature Strategy Scan Interval: 5 minutes`);
+  }
   logger.info(`   Max Signals/Hour: ${appConfig.trading.maxSignalsPerHour}`);
   logger.info(`   Max Signals/Day: ${appConfig.trading.maxSignalsPerDay}`);
   logger.info(`   Min Score (Buy): ${appConfig.trading.minScoreBuySignal}`);
@@ -127,11 +138,20 @@ async function main(): Promise<void> {
   // Initialize database
   await initializeDatabase();
 
-  // Initialize signal generator
-  await signalGenerator.initialize();
+  // Initialize signal generators based on config
+  if (appConfig.trading.enableEarlyStrategy) {
+    await signalGenerator.initialize();
+    logger.info('Early token strategy ENABLED');
+  } else {
+    logger.info('Early token strategy DISABLED');
+  }
 
-  // Initialize mature token scanner
-  await matureTokenScanner.initialize();
+  if (appConfig.trading.enableMatureStrategy) {
+    await matureTokenScanner.initialize();
+    logger.info('Mature token strategy ENABLED');
+  } else {
+    logger.info('Mature token strategy DISABLED');
+  }
 
   // Load saved thresholds from database
   await thresholdOptimizer.loadThresholds();
@@ -147,21 +167,29 @@ async function main(): Promise<void> {
   // Print comprehensive startup diagnostics
   printStartupDiagnostics();
 
-  // Start the main loop
-  signalGenerator.start();
+  // Start signal generators based on config
+  if (appConfig.trading.enableEarlyStrategy) {
+    signalGenerator.start();
+    logger.info('Early token signal generator started');
+  }
 
-  // Start mature token scanner
-  matureTokenScanner.start();
+  if (appConfig.trading.enableMatureStrategy) {
+    matureTokenScanner.start();
+    logger.info('Mature token scanner started - scanning for 21+ day survivor tokens');
+  }
 
   logger.info('Bot is running! Press Ctrl+C to stop.');
-  logger.info('Mature Token Scanner is active - scanning for 24h+ survivor tokens');
   
   // Handle graceful shutdown
   const shutdown = async (signal: string) => {
     logger.info({ signal }, 'Shutdown signal received');
 
-    signalGenerator.stop();
-    matureTokenScanner.stop();
+    if (appConfig.trading.enableEarlyStrategy) {
+      signalGenerator.stop();
+    }
+    if (appConfig.trading.enableMatureStrategy) {
+      matureTokenScanner.stop();
+    }
     dailyAutoOptimizer.stop();
     await telegramBot.stop();
     await pool.end();

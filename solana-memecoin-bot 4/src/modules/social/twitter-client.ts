@@ -500,23 +500,12 @@ export class TwitterClient {
       logger.info('Retrying Twitter API after billing error cooldown');
     }
 
-    // Check rate limits
+    // Check rate limits - NON-BLOCKING: return null instead of waiting
+    // This prevents social fetch from delaying signals when rate limited
     if (!this.canMakeRequest(limitKey)) {
       const resetTime = this.getResetTime(limitKey);
-      logger.warn({ limitKey, resetTime }, 'Rate limit would be exceeded, queueing request');
-
-      // Queue the request
-      return new Promise((resolve, reject) => {
-        this.requestQueue.push({
-          execute: async () => {
-            const response = await request();
-            return response.data;
-          },
-          resolve,
-          reject,
-        });
-        this.processQueue();
-      });
+      logger.info({ limitKey, resetTime }, 'Rate limit reached - skipping social fetch (non-blocking)');
+      return null;
     }
 
     this.incrementRequestCount(limitKey);
@@ -536,18 +525,9 @@ export class TwitterClient {
         return null;
       }
       if (error.response?.status === 429) {
-        // Rate limited - queue and retry
-        return new Promise((resolve, reject) => {
-          this.requestQueue.push({
-            execute: async () => {
-              const response = await request();
-              return response.data;
-            },
-            resolve,
-            reject,
-          });
-          this.processQueue();
-        });
+        // Rate limited by Twitter - return null (non-blocking)
+        logger.info({ limitKey }, 'Twitter API returned 429 - skipping social fetch (non-blocking)');
+        return null;
       }
       throw error;
     }

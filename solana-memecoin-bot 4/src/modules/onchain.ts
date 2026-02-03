@@ -1369,20 +1369,23 @@ export const dexScreenerClient = new DexScreenerClient();
 
 export async function getTokenMetrics(address: string): Promise<TokenMetrics | null> {
   try {
-    // COST OPTIMIZATION: Remove Birdeye API call - use DexScreener (FREE) + Helius (included in plan)
+    // COST OPTIMIZATION: Use DexScreener (FREE) + Helius (included) + Birdeye (for holder count)
     // DexScreener provides: price, volume, market cap, liquidity, token name/symbol, pair creation time
-    // Helius provides: holder count, holder distribution
-    const [dexResult, holderResult] = await Promise.allSettled([
+    // Helius provides: holder distribution (top 10 concentration)
+    // Birdeye provides: accurate total holder count (Helius pagination caps at 100)
+    const [dexResult, holderResult, birdeyeResult] = await Promise.allSettled([
       dexScreenerClient.getTokenPairs(address),
       heliusClient.getTokenHolders(address),
+      birdeyeClient.getTokenOverview(address),
     ]);
 
     const dexPairs = dexResult.status === 'fulfilled' ? dexResult.value : [];
     const holderData = holderResult.status === 'fulfilled' ? holderResult.value : { total: 0, topHolders: [] };
+    const birdeyeData = birdeyeResult.status === 'fulfilled' ? birdeyeResult.value : null;
 
     // For very new tokens, we may have no data from APIs yet
     // Use holder data from Helius as a fallback indicator that the token exists
-    const hasAnyData = dexPairs.length > 0 || holderData.total > 0;
+    const hasAnyData = dexPairs.length > 0 || holderData.total > 0 || birdeyeData;
 
     if (!hasAnyData) {
       // Only reject if we truly have nothing at all
@@ -1411,6 +1414,11 @@ export async function getTokenMetrics(address: string): Promise<TokenMetrics | n
     }
     // Note: Removed Birdeye fallback for creation time - DexScreener is sufficient
 
+    // HOLDER COUNT FIX: Use Birdeye's holder count (accurate) instead of Helius (capped at 100)
+    // Helius getTokenAccounts returns paginated results with limit=100, so holderData.total maxes at 100
+    // Birdeye's token_overview endpoint returns the actual total holder count
+    const accurateHolderCount = birdeyeData?.holder || holderData.total || 25;
+
     // For tokens with minimal data, use permissive defaults
     // This allows very new tokens to pass through to scoring
     return {
@@ -1421,7 +1429,7 @@ export async function getTokenMetrics(address: string): Promise<TokenMetrics | n
       marketCap: marketCap || 10000, // Default $10k mcap if unknown (meets min threshold)
       volume24h: volume24h || 1000, // Default $1k volume if unknown
       volumeMarketCapRatio: marketCap > 0 ? volume24h / marketCap : 0.1, // Default 10% ratio
-      holderCount: holderData.total || 25, // Default 25 holders (Helius provides this)
+      holderCount: accurateHolderCount,
       holderChange1h: 0,
       top10Concentration,
       liquidityPool: liquidity || 5000, // Default $5k liquidity

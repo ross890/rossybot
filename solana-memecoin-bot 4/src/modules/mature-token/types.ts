@@ -75,7 +75,7 @@ export const TIER_CONFIG: Record<TokenTier, TierConfig> = {
     minMarketCap: 1_000_000,     // $1M
     maxMarketCap: 5_000_000,     // $5M
     minVolume24h: 100_000,       // $100K volume
-    minHolderCount: 3_000,       // Strong holder base required
+    minHolderCount: 1_000,       // Strong holder base (lowered from 3000)
     minTokenAgeHours: 72,        // 3 days minimum
     stopLoss: { initial: 25, timeDecay: 18 },  // Wider stops for volatility
     signalAllocation: 0.20,      // 20% of signals
@@ -580,10 +580,10 @@ export const SIGNAL_THRESHOLDS = {
     minSafety: 70,
   },
   BUY: {
-    compositeScore: 60,
-    minAccumulation: 45,
-    minBreakout: 40,
-    minSafety: 60,
+    compositeScore: 50,   // Lowered from 60 for more signals
+    minAccumulation: 40,  // Lowered from 45
+    minBreakout: 35,      // Lowered from 40
+    minSafety: 55,        // Lowered from 60
   },
   WATCH: {
     compositeScore: 45,

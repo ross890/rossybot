@@ -14,7 +14,7 @@ import { dailyAutoOptimizer, thresholdOptimizer } from './modules/performance/in
 
 async function initializeDatabase(): Promise<void> {
   logger.info('Initializing database...');
-  
+
   try {
     const client = await pool.connect();
     await client.query(SCHEMA_SQL);
@@ -26,15 +26,107 @@ async function initializeDatabase(): Promise<void> {
   }
 }
 
+/**
+ * Print comprehensive startup diagnostic summary
+ * Shows all module states and configuration for debugging
+ */
+function printStartupDiagnostics(): void {
+  const divider = '='.repeat(55);
+
+  logger.info(divider);
+  logger.info('           ROSSYBOT STARTUP DIAGNOSTICS');
+  logger.info(divider);
+
+  // Environment & Mode
+  logger.info('');
+  logger.info('📋 ENVIRONMENT');
+  logger.info(`   Mode: ${appConfig.nodeEnv.toUpperCase()}`);
+  logger.info(`   Learning Mode: ${appConfig.trading.learningMode ? '✅ ENABLED (relaxed filters)' : '❌ DISABLED (strict filters)'}`);
+  logger.info(`   Log Level: ${appConfig.logLevel}`);
+
+  // API Connections
+  logger.info('');
+  logger.info('🔌 API CONNECTIONS');
+  logger.info(`   Helius (RPC): ${appConfig.heliusApiKey ? '✅ Configured' : '❌ MISSING - on-chain analysis disabled'}`);
+  logger.info(`   Birdeye: ${appConfig.birdeyeApiKey ? '✅ Configured' : '❌ MISSING - token metrics disabled'}`);
+  logger.info(`   Telegram: ${appConfig.telegramBotToken ? '✅ Configured' : '❌ MISSING - alerts disabled'}`);
+
+  // Twitter/X Status - Critical for social analysis
+  logger.info('');
+  logger.info('🐦 TWITTER/X INTEGRATION');
+  if (!appConfig.twitterEnabled) {
+    logger.info('   Status: ❌ DISABLED (TWITTER_ENABLED=false)');
+    logger.info('   Impact: Social metrics will return empty data');
+    logger.info('   Fix: Set TWITTER_ENABLED=true in .env');
+  } else {
+    const hasTwitterCreds = appConfig.twitterBearerToken ||
+      (appConfig.twitterConsumerKey && appConfig.twitterConsumerSecret);
+    if (hasTwitterCreds) {
+      logger.info('   Status: ✅ ENABLED');
+      logger.info(`   Auth: ${appConfig.twitterBearerToken ? 'Bearer Token' : 'Consumer Key/Secret'}`);
+    } else {
+      logger.info('   Status: ⚠️ ENABLED but NO CREDENTIALS');
+      logger.info('   Impact: Twitter API calls will fail');
+      logger.info('   Fix: Set TWITTER_BEARER_TOKEN in .env');
+    }
+  }
+
+  // Signal Generation Settings
+  logger.info('');
+  logger.info('📡 SIGNAL GENERATION');
+  logger.info(`   Scan Interval: 20 seconds`);
+  logger.info(`   Max Signals/Hour: ${appConfig.trading.maxSignalsPerHour}`);
+  logger.info(`   Max Signals/Day: ${appConfig.trading.maxSignalsPerDay}`);
+  logger.info(`   Min Score (Buy): ${appConfig.trading.minScoreBuySignal}`);
+  logger.info(`   Min Score (Watch): ${appConfig.trading.minScoreWatchSignal}`);
+
+  // Token Screening Thresholds
+  logger.info('');
+  logger.info('🔍 TOKEN SCREENING THRESHOLDS');
+  logger.info(`   Market Cap: $${appConfig.screening.minMarketCap.toLocaleString()} - $${appConfig.screening.maxMarketCap.toLocaleString()}`);
+  logger.info(`   Min 24h Volume: $${appConfig.screening.min24hVolume.toLocaleString()}`);
+  logger.info(`   Min Holders: ${appConfig.screening.minHolderCount}`);
+  logger.info(`   Max Top10 Concentration: ${appConfig.screening.maxTop10Concentration}%`);
+  logger.info(`   Min Liquidity: $${appConfig.screening.minLiquidityPool.toLocaleString()}`);
+  logger.info(`   Min Token Age: ${appConfig.screening.minTokenAgeMinutes} minutes`);
+
+  // Discovery Sources
+  logger.info('');
+  logger.info('🔎 TOKEN DISCOVERY SOURCES');
+  logger.info('   ✅ Birdeye New Listings');
+  logger.info('   ✅ DexScreener Trending');
+  logger.info('   ✅ Volume Anomaly Scanner');
+  logger.info('   ✅ Holder Growth Scanner');
+  logger.info('   ✅ Narrative Scanner');
+  logger.info('   ✅ KOL Wallet Tracker');
+
+  // Analysis Modules
+  logger.info('');
+  logger.info('📊 ANALYSIS MODULES');
+  logger.info('   ✅ On-Chain Scoring Engine');
+  logger.info('   ✅ Momentum Analyzer');
+  logger.info('   ✅ Bundle/Insider Detector');
+  logger.info('   ✅ Token Safety Checker');
+  logger.info('   ✅ Scam Filter');
+  logger.info('   ✅ ML Win Predictor');
+  logger.info(`   ${appConfig.twitterEnabled ? '✅' : '⚠️'} Social Analyzer (X/Twitter)`);
+
+  logger.info('');
+  logger.info(divider);
+  logger.info('              BOT READY - STARTING SCAN LOOP');
+  logger.info(divider);
+  logger.info('');
+}
+
 async function main(): Promise<void> {
   logger.info('='.repeat(50));
   logger.info('SOLANA MEMECOIN TRADING BOT');
   logger.info('='.repeat(50));
   logger.info({ env: appConfig.nodeEnv }, 'Starting up...');
-  
+
   // Initialize database
   await initializeDatabase();
-  
+
   // Initialize signal generator
   await signalGenerator.initialize();
 
@@ -51,6 +143,9 @@ async function main(): Promise<void> {
   logger.info({
     nextRun: dailyAutoOptimizer.getNextRunTime()?.toISOString(),
   }, 'Daily auto optimizer scheduled');
+
+  // Print comprehensive startup diagnostics
+  printStartupDiagnostics();
 
   // Start the main loop
   signalGenerator.start();

@@ -685,12 +685,21 @@ export class SignalGenerator {
       // SIGNAL VOLUME FIX: Lowered thresholds from 70/75/70/50/50 to 55/60/55/30/40
       // Previous thresholds were too strict - almost no early tokens could pass
       // without KOL validation, defeating the purpose of on-chain first detection.
+      //
+      // LEARNING MODE FIX: In learning mode, use much lower thresholds to collect
+      // more training data. The ML model needs diverse samples to learn patterns.
+      const earlyMomentumThreshold = isLearningMode ? 30 : 55;
+      const earlySafetyThreshold = isLearningMode ? 40 : 60;
+      const earlyBundleThreshold = isLearningMode ? 35 : 55;
+      const earlyHolderThreshold = isLearningMode ? 15 : 30;
+      const earlyMarketThreshold = isLearningMode ? 25 : 40;
+
       const hasSuperiorOnChain =
-        onChainScore.components.momentum >= 55 &&      // Good buy pressure
-        onChainScore.components.safety >= 60 &&        // Safe contract
-        onChainScore.components.bundleSafety >= 55 &&  // Reasonably clean launch
-        metrics.holderCount >= 30 &&                   // Some traction
-        onChainScore.components.marketStructure >= 40; // Decent market dynamics
+        onChainScore.components.momentum >= earlyMomentumThreshold &&      // Good buy pressure
+        onChainScore.components.safety >= earlySafetyThreshold &&        // Safe contract
+        onChainScore.components.bundleSafety >= earlyBundleThreshold &&  // Reasonably clean launch
+        metrics.holderCount >= earlyHolderThreshold &&                   // Some traction
+        onChainScore.components.marketStructure >= earlyMarketThreshold; // Decent market dynamics
 
       if (hasSuperiorOnChain) {
         // ON-CHAIN FIRST: Accept without KOL if metrics are exceptional
@@ -702,8 +711,11 @@ export class SignalGenerator {
           tokenAgeMinutes: metrics.tokenAge,
           track: 'EARLY_QUALITY',
           validationMethod: 'ON_CHAIN_FIRST',
+          learningMode: isLearningMode,
           momentumScore: onChainScore.components.momentum,
+          momentumThreshold: earlyMomentumThreshold,
           safetyScore: onChainScore.components.safety,
+          safetyThreshold: earlySafetyThreshold,
           marketStructure: onChainScore.components.marketStructure,
           holderCount: metrics.holderCount,
         }, 'EVAL: Routing to EARLY QUALITY track (ON-CHAIN VALIDATED - no KOL needed)');
@@ -882,9 +894,13 @@ export class SignalGenerator {
       // PROVEN RUNNER: Holder growth requirement
       // SIGNAL VOLUME FIX: Lowered from 0.1 to 0.03 (3 new holders per 100 minutes)
       // Many legitimate tokens have slow but steady growth, especially older ones
-      const MIN_HOLDER_GROWTH_RATE = 0.03;
+      //
+      // LEARNING MODE FIX: Skip holder growth requirement entirely in learning mode.
+      // This requirement was blocking stable tokens that might still be good trades.
+      // The ML model needs to learn from diverse outcomes, not pre-filtered data.
+      const MIN_HOLDER_GROWTH_RATE = isLearningMode ? 0 : 0.03;
 
-      if (holderGrowthRate < MIN_HOLDER_GROWTH_RATE) {
+      if (holderGrowthRate < MIN_HOLDER_GROWTH_RATE && !isLearningMode) {
         logger.info({
           tokenAddress: shortAddr,
           ticker: metrics.ticker,
@@ -893,6 +909,15 @@ export class SignalGenerator {
           track: 'PROVEN_RUNNER',
         }, 'EVAL: BLOCKED - Holder growth too low');
         return SignalGenerator.EVAL_RESULTS.DISCOVERY_FAILED;
+      }
+
+      if (isLearningMode) {
+        logger.debug({
+          tokenAddress: shortAddr,
+          ticker: metrics.ticker,
+          holderGrowthRate,
+          note: 'Learning mode: holder growth requirement skipped',
+        }, 'EVAL: PROVEN_RUNNER - holder growth check bypassed');
       }
     } else if (signalTrack === SignalTrack.EARLY_QUALITY) {
       // EARLY QUALITY: Simplified requirements (reduced from 4 to 2)
@@ -903,28 +928,33 @@ export class SignalGenerator {
       //
       // Key insight: Double-gating (component in score + separate hard check) was
       // blocking tokens that had good OVERALL scores but missed one specific threshold.
+      //
+      // LEARNING MODE FIX: Relax these requirements significantly in learning mode
+      // to collect more diverse training data for the ML model.
 
-      // 1. Safety score required (relaxed from 70 to 65)
-      const EARLY_QUALITY_MIN_SAFETY = 65;
+      // 1. Safety score required (relaxed from 70 to 65, or 45 in learning mode)
+      const EARLY_QUALITY_MIN_SAFETY = isLearningMode ? 45 : 65;
       if (safetyResult.safetyScore < EARLY_QUALITY_MIN_SAFETY) {
         logger.info({
           tokenAddress: shortAddr,
           ticker: metrics.ticker,
           safetyScore: safetyResult.safetyScore,
           minRequired: EARLY_QUALITY_MIN_SAFETY,
+          learningMode: isLearningMode,
           track: 'EARLY_QUALITY',
         }, 'EVAL: BLOCKED - Safety too low for early token');
         return SignalGenerator.EVAL_RESULTS.DISCOVERY_FAILED;
       }
 
-      // 2. Bundle risk required (relaxed from 35 to 40)
-      const EARLY_QUALITY_MAX_BUNDLE_RISK = 40;
+      // 2. Bundle risk required (relaxed from 35 to 40, or 60 in learning mode)
+      const EARLY_QUALITY_MAX_BUNDLE_RISK = isLearningMode ? 60 : 40;
       if (bundleAnalysis.riskScore > EARLY_QUALITY_MAX_BUNDLE_RISK) {
         logger.info({
           tokenAddress: shortAddr,
           ticker: metrics.ticker,
           bundleRiskScore: bundleAnalysis.riskScore,
           maxAllowed: EARLY_QUALITY_MAX_BUNDLE_RISK,
+          learningMode: isLearningMode,
           track: 'EARLY_QUALITY',
         }, 'EVAL: BLOCKED - Bundle risk too high for early token');
         return SignalGenerator.EVAL_RESULTS.BUNDLE_BLOCKED;
@@ -944,6 +974,7 @@ export class SignalGenerator {
         liquidity: metrics.liquidityPool,
         holderGrowth: holderGrowthRate,
         kolTier: kolReputationTier,
+        learningMode: isLearningMode,
         track: 'EARLY_QUALITY',
       }, 'EVAL: PASSED Early Quality requirements');
     }

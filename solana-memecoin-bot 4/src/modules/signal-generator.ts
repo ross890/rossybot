@@ -1185,10 +1185,11 @@ export class SignalGenerator {
 
     // Step 8: Warning count quality gate
     // Filter signals with too many red flags (excluding generic ones)
+    // In learning mode, skip this filter to collect ML training data
     const seriousWarnings = (onChainSignal.riskWarnings || []).filter((w: string) =>
       !w.includes('ON-CHAIN SIGNAL') && !w.includes('No KOL')
     );
-    const MAX_SERIOUS_WARNINGS = 4;
+    const MAX_SERIOUS_WARNINGS = isLearningMode ? 99 : 4;  // Skip in learning mode
 
     if (seriousWarnings.length >= MAX_SERIOUS_WARNINGS) {
       logger.info({
@@ -1197,8 +1198,18 @@ export class SignalGenerator {
         warningCount: seriousWarnings.length,
         warnings: seriousWarnings,
         threshold: MAX_SERIOUS_WARNINGS,
+        learningMode: isLearningMode,
       }, 'Signal filtered by warning count - too many red flags');
       return SignalGenerator.EVAL_RESULTS.DISCOVERY_FAILED;
+    }
+
+    if (isLearningMode && seriousWarnings.length >= 4) {
+      logger.info({
+        tokenAddress,
+        ticker: metrics.ticker,
+        warningCount: seriousWarnings.length,
+        warnings: seriousWarnings,
+      }, 'EVAL: Learning mode - bypassing warning count filter (would be blocked in production)');
     }
 
     // Send on-chain signal via Telegram

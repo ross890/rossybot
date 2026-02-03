@@ -190,7 +190,7 @@ export class PortfolioTracker {
       logger.info({ walletAddress, portfolioId: result.id }, 'Portfolio tracking already exists');
     }
 
-    return result;
+    return { portfolioId: result.id, isNew: result.isNew };
   }
 
   /**

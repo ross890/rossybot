@@ -104,8 +104,8 @@ export const TAKE_PROFIT_CONFIG = {
  * Position sizing configuration
  */
 export const POSITION_CONFIG = {
-  strong: { sizePercent: 25, maxRiskPercent: 5 },   // 80+ score
-  standard: { sizePercent: 15, maxRiskPercent: 3 }, // 65-79 score
+  strong: { sizePercent: 25, riskPercent: 5 },   // 80+ score
+  standard: { sizePercent: 15, riskPercent: 3 }, // 65-79 score
   maxConcurrentPositions: 3,
   dryPowderReserve: 50,  // Always keep 50% in reserve
 } as const;

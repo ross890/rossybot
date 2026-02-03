@@ -1358,7 +1358,7 @@ export class TelegramAlertBot {
           message += 'What this means:\n';
           message += '• Signal filtering is RELAXED to collect more data\n';
           message += '• Only STRONG AVOID recommendations are blocked\n';
-          message += '• ML probability threshold lowered to 15%\n';
+          message += '• ML probability threshold lowered to 15-20%\n';
           message += '• More signals will come through for training\n';
           message += '• Rate limits bypassed for data collection\n\n';
         } else {
@@ -1366,7 +1366,7 @@ export class TelegramAlertBot {
           message += 'What this means:\n';
           message += '• Signal filtering is STRICT for quality\n';
           message += '• Both AVOID and STRONG AVOID blocked\n';
-          message += '• ML probability threshold at 25%\n';
+          message += '• ML probability threshold at 50-55%\n';
           message += '• Fewer but higher quality signals\n\n';
         }
 
@@ -1374,7 +1374,7 @@ export class TelegramAlertBot {
         message += 'Current Signal Thresholds:\n';
         message += `• Min Momentum Score: ${thresholds.minMomentumScore}\n`;
         message += `• Min OnChain Score: ${thresholds.minOnChainScore}\n`;
-        message += `• ML Probability Threshold: ${isLearningMode ? '15%' : '25%'}\n\n`;
+        message += `• ML Probability Threshold: ${isLearningMode ? '15-20%' : '50-55%'}\n\n`;
 
         // Training data status
         message += 'Training Data:\n';

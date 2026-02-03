@@ -1012,13 +1012,15 @@ export class SignalGenerator {
 
     if (signalTrack === SignalTrack.PROVEN_RUNNER) {
       // PROVEN RUNNER: Token has survived 45+ minutes, require decent edge
-      mlProbabilityThreshold = isLearningMode ? 40 : 55;
+      // Learning mode: Very low threshold (20%) - ML model needs data to learn from
+      mlProbabilityThreshold = isLearningMode ? 20 : 55;
       confidenceOk = isLearningMode
         ? true  // Accept any confidence in learning mode
         : (prediction.confidence === 'HIGH' || prediction.confidence === 'MEDIUM');
     } else {
       // EARLY_QUALITY: Already validated by KOL or superior on-chain metrics
-      mlProbabilityThreshold = isLearningMode ? 35 : 50;
+      // Learning mode: Very low threshold (15%) - collect data for ML training
+      mlProbabilityThreshold = isLearningMode ? 15 : 50;
       confidenceOk = true;  // Trust the external validation, don't double-gate
     }
 

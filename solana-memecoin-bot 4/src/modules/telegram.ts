@@ -868,12 +868,12 @@ export class TelegramAlertBot {
 
         let message = '🎯 *AI-SUGGESTED TWEAKS*\n\n';
         for (const tweak of tweaks) {
-          message += `*${tweak.parameter}*\n`;
-          message += `Current: ${tweak.currentValue} → Suggested: ${tweak.suggestedValue}\n`;
-          message += `📝 _${tweak.reason}_\n`;
-          message += `📈 Expected: ${tweak.expectedImpact}\n\n`;
+          message += `*${this.escapeMarkdown(tweak.parameter)}*\n`;
+          message += `Current: ${this.escapeMarkdown(String(tweak.currentValue))} → Suggested: ${this.escapeMarkdown(String(tweak.suggestedValue))}\n`;
+          message += `📝 ${this.escapeMarkdown(tweak.reason)}\n`;
+          message += `📈 Expected: ${this.escapeMarkdown(tweak.expectedImpact)}\n\n`;
         }
-        message += '_Use /adjust\\_thresholds to apply changes manually_';
+        message += 'Use /adjust\\_thresholds to apply changes manually';
 
         await this.bot!.sendMessage(chatId, message, { parse_mode: 'Markdown' });
       } catch (error) {
@@ -897,7 +897,8 @@ export class TelegramAlertBot {
         await this.bot!.sendMessage(chatId, '🤔 Analyzing...', { parse_mode: 'Markdown' });
 
         const answer = await aiQueryInterface.answerQuestion(question);
-        await this.bot!.sendMessage(chatId, answer, { parse_mode: 'Markdown' });
+        // Escape markdown in AI-generated answer to prevent parsing errors
+        await this.bot!.sendMessage(chatId, this.escapeMarkdown(answer));
       } catch (error) {
         const errorMessage = error instanceof Error ? error.message : 'Unknown error';
         logger.error({ error, chatId }, 'Failed to answer question');
@@ -933,12 +934,12 @@ export class TelegramAlertBot {
             message += '*Recommended Changes:*\n';
             for (const rec of changes) {
               const arrow = rec.changeDirection === 'INCREASE' ? '↑' : '↓';
-              message += `${arrow} ${rec.factor}: ${rec.currentValue} → ${rec.recommendedValue}\n`;
-              message += `   _${rec.reason}_\n`;
+              message += `${arrow} ${this.escapeMarkdown(rec.factor)}: ${rec.currentValue} → ${rec.recommendedValue}\n`;
+              message += `   ${this.escapeMarkdown(rec.reason)}\n`;
             }
             message += '\nUse /apply\\_thresholds to apply recommendations';
           } else {
-            message += '✅ _All thresholds are optimally configured_\n';
+            message += '✅ All thresholds are optimally configured\n';
           }
         }
 

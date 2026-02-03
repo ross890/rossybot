@@ -435,21 +435,19 @@ export class TelegramAlertBot {
     if (!this.bot) return;
 
     // Set up Telegram command menu (appears in chat)
+    // Updated for Mature Token Strategy
     const SIGNAL_BOT_COMMANDS: TelegramBot.BotCommand[] = [
-      { command: 'status', description: 'Bot status & connection health' },
-      { command: 'performance', description: 'Signal performance & win rate report' },
+      { command: 'status', description: 'Bot status & strategy info' },
+      { command: 'funnel', description: 'View token filtering funnel stats' },
+      { command: 'tiers', description: 'View tier requirements (RISING/EMERGING/etc)' },
+      { command: 'performance', description: 'Signal performance & win rate' },
       { command: 'safety', description: 'Run safety check: /safety <token>' },
-      { command: 'conviction', description: 'High-conviction tokens (2+ KOLs)' },
-      { command: 'leaderboard', description: 'KOL performance rankings' },
-      { command: 'pumpfun', description: 'Tokens approaching migration' },
-      { command: 'addwallet', description: 'Add alpha wallet: /addwallet <address>' },
-      { command: 'wallets', description: 'List tracked alpha wallets' },
-      { command: 'removewallet', description: 'Remove alpha wallet: /removewallet <address>' },
-      { command: 'thresholds', description: 'View current signal thresholds' },
-      { command: 'adjust_thresholds', description: 'Manually adjust thresholds' },
-      { command: 'optimize', description: 'Run threshold optimization analysis' },
-      { command: 'reset_thresholds', description: 'Reset thresholds to defaults' },
-      { command: 'learning', description: 'ML prediction system info' },
+      { command: 'thresholds', description: 'View scoring thresholds' },
+      { command: 'adjust_thresholds', description: 'Adjust scoring thresholds' },
+      { command: 'optimize', description: 'Run threshold optimization' },
+      { command: 'addwallet', description: 'Track wallet: /addwallet <address>' },
+      { command: 'wallets', description: 'List tracked wallets' },
+      { command: 'learning', description: 'ML prediction info' },
       { command: 'test', description: 'Send a test signal' },
       { command: 'help', description: 'Show all commands' },
     ];
@@ -464,29 +462,24 @@ export class TelegramAlertBot {
     this.bot.onText(/\/start/, async (msg) => {
       const chatId = msg.chat.id;
       await this.bot!.sendMessage(chatId,
-        '*rossybot* initialized!\n\n' +
-        'You will receive memecoin buy signals here.\n\n' +
-        '*Signal Commands:*\n' +
-        '/status - Bot status & connection health\n' +
-        '/performance - Signal performance & win rate report\n' +
-        '/safety <token> - Run safety check on any token\n' +
-        '/conviction - Show high-conviction tokens (2+ KOLs)\n' +
-        '/leaderboard - KOL performance rankings\n' +
-        '/pumpfun - Tokens approaching migration\n' +
-        '/test - Send a test signal\n\n' +
-        '*Alpha Wallet Commands:*\n' +
-        '/addwallet <address> - Add wallet to track\n' +
-        '/wallets - List tracked alpha wallets\n' +
-        '/removewallet <address> - Remove wallet\n\n' +
-        '*Threshold Commands:*\n' +
-        '/thresholds - View current signal thresholds\n' +
-        '/adjust\\_thresholds - Manually adjust each threshold\n' +
-        '/optimize - Run threshold optimization analysis\n' +
-        '/apply\\_thresholds - Apply recommended changes\n' +
-        '/reset\\_thresholds - Reset to defaults\n\n' +
-        '*Learning & Predictions:*\n' +
-        '/learning - ML prediction system info\n' +
-        '/learningmode - Check learning mode status\n\n' +
+        '*🤖 rossybot - Mature Token Strategy*\n\n' +
+        'Scanning for established tokens with:\n' +
+        '• 🚀 RISING: $1-5M mcap, 1000+ holders, 3+ days\n' +
+        '• 🌱 EMERGING: $8-20M mcap, 21+ days\n' +
+        '• 🎓 GRADUATED: $20-50M mcap, 21+ days\n' +
+        '• 🏛️ ESTABLISHED: $50-150M mcap, 21+ days\n\n' +
+        '*Strategy Commands:*\n' +
+        '/status - Bot status & active strategy\n' +
+        '/funnel - Token filtering funnel stats\n' +
+        '/tiers - View tier requirements\n' +
+        '/performance - Signal performance report\n\n' +
+        '*Analysis Commands:*\n' +
+        '/safety <token> - Run safety check\n' +
+        '/thresholds - View scoring thresholds\n' +
+        '/optimize - Run optimization analysis\n\n' +
+        '*Wallet Tracking:*\n' +
+        '/addwallet <address> - Track a wallet\n' +
+        '/wallets - List tracked wallets\n\n' +
         '/help - Show all commands',
         { parse_mode: 'Markdown' }
       );
@@ -511,41 +504,121 @@ export class TelegramAlertBot {
     this.bot.onText(/\/help/, async (msg) => {
       const chatId = msg.chat.id;
       await this.bot!.sendMessage(chatId,
-        '*rossybot Help*\n\n' +
-        '*Signal Commands:*\n' +
-        '/status - Bot status, uptime & connection health\n' +
-        '/performance - Signal performance & win rate report\n' +
-        '/report - Full AI performance analysis with recommendations\n' +
-        '/tweaks - AI-suggested threshold adjustments\n' +
-        '/ask <question> - Ask about performance (e.g. /ask win rate)\n' +
-        '/safety <token> - Run safety check on any token\n' +
-        '/conviction - High-conviction tokens (2+ KOLs)\n' +
-        '/leaderboard - KOL performance rankings\n' +
-        '/pumpfun - Tokens approaching migration\n' +
+        '*🤖 rossybot Help - Mature Token Strategy*\n\n' +
+        '*Strategy Info:*\n' +
+        '/status - Bot status & active strategy config\n' +
+        '/funnel - Token filtering funnel breakdown\n' +
+        '/tiers - View tier requirements & allocations\n' +
         '/test - Send a test signal\n\n' +
-        '*Alpha Wallet Commands:*\n' +
-        '/addwallet <addr> [label] - Add wallet to track\n' +
-        '/wallets - List all tracked alpha wallets\n' +
-        '/wallets <addr> - View wallet details\n' +
-        '/removewallet <addr> - Remove wallet from tracking\n' +
-        '_Tip: Paste a wallet address to auto-detect_\n\n' +
-        '*Threshold Commands:*\n' +
-        '/thresholds - View current signal thresholds\n' +
-        '/adjust\\_thresholds - Manually adjust each threshold\n' +
+        '*Performance:*\n' +
+        '/performance - Signal performance & win rates\n' +
+        '/report - Full AI analysis with recommendations\n' +
+        '/ask <question> - Ask about performance\n\n' +
+        '*Analysis:*\n' +
+        '/safety <token> - Run safety check on token\n' +
+        '/thresholds - View scoring thresholds\n' +
+        '/adjust\\_thresholds - Manually adjust thresholds\n' +
         '/optimize - Run optimization analysis\n' +
-        '/apply\\_thresholds - Apply recommended changes\n' +
         '/reset\\_thresholds - Reset to defaults\n\n' +
-        '*Learning & Predictions:*\n' +
-        '/learning - How the ML prediction system works\n' +
-        '/learningmode - Check/configure learning mode\n\n' +
+        '*Wallet Tracking:*\n' +
+        '/addwallet <addr> [label] - Track a wallet\n' +
+        '/wallets - List tracked wallets\n' +
+        '/removewallet <addr> - Remove wallet\n\n' +
+        '*ML & Learning:*\n' +
+        '/learning - ML prediction system info\n' +
+        '/learningmode - Check learning mode status\n\n' +
         '*Signal Format:*\n' +
-        'Each buy signal includes:\n' +
-        '• Token details and metrics\n' +
-        '• Confirmed KOL/Alpha wallet activity\n' +
-        '• Entry/exit recommendations\n' +
-        '• ML win probability prediction\n' +
-        '• Risk assessment\n\n' +
+        'Mature token signals include:\n' +
+        '• Tier classification (🚀🌱🎓🏛️)\n' +
+        '• Composite score & breakdown\n' +
+        '• Accumulation/breakout patterns\n' +
+        '• Smart money activity\n' +
+        '• Risk level & stop loss\n\n' +
         'DYOR. Not financial advice.',
+        { parse_mode: 'Markdown' }
+      );
+    });
+
+    // /funnel command - Show token filtering funnel stats
+    this.bot.onText(/\/funnel/, async (msg) => {
+      const chatId = msg.chat.id;
+      try {
+        // Get funnel stats from mature token scanner
+        const { matureTokenScanner } = await import('./mature-token/index.js');
+        const stats = matureTokenScanner.getFunnelStats();
+
+        const message =
+          '*📊 Token Filtering Funnel*\n\n' +
+          '*Last Scan Results:*\n' +
+          `• Trending tokens fetched: ${stats.fetched}\n` +
+          `• Passed age filter: ${stats.passedAge}\n` +
+          `• Passed eligibility: ${stats.eligible}\n` +
+          `• Tokens evaluated: ${stats.evaluated}\n` +
+          `• Signals sent: ${stats.signalsSent}\n\n` +
+          '*Rejection Reasons:*\n' +
+          `• Too young (<3 days for RISING, <21 days others): ${stats.rejections.tooYoung}\n` +
+          `• Market cap out of range: ${stats.rejections.marketCap}\n` +
+          `• No tier match ($5-8M gap): ${stats.rejections.noTier}\n` +
+          `• Volume too low: ${stats.rejections.volume}\n` +
+          `• Holders too low: ${stats.rejections.holders}\n` +
+          `• Liquidity issues: ${stats.rejections.liquidity}\n` +
+          `• Score below threshold: ${stats.rejections.score}\n\n` +
+          '*Tier Distribution:*\n' +
+          `🚀 RISING: ${stats.tiers.RISING}\n` +
+          `🌱 EMERGING: ${stats.tiers.EMERGING}\n` +
+          `🎓 GRADUATED: ${stats.tiers.GRADUATED}\n` +
+          `🏛️ ESTABLISHED: ${stats.tiers.ESTABLISHED}\n\n` +
+          `_Last updated: ${stats.lastScanTime || 'No scan yet'}_`;
+
+        await this.bot!.sendMessage(chatId, message, { parse_mode: 'Markdown' });
+      } catch (error) {
+        await this.bot!.sendMessage(chatId,
+          '*📊 Token Filtering Funnel*\n\n' +
+          'No funnel data available yet.\n' +
+          'Wait for the next scan cycle (every 5 minutes).',
+          { parse_mode: 'Markdown' }
+        );
+      }
+    });
+
+    // /tiers command - Show tier configuration
+    this.bot.onText(/\/tiers/, async (msg) => {
+      const chatId = msg.chat.id;
+      await this.bot!.sendMessage(chatId,
+        '*📈 Mature Token Strategy Tiers*\n\n' +
+        '*🚀 RISING Tier*\n' +
+        '• Market Cap: $1M - $5M\n' +
+        '• Min Holders: 1,000\n' +
+        '• Min Age: 3 days (72h)\n' +
+        '• Min Volume: $100K/24h\n' +
+        '• Stop Loss: 25% initial\n' +
+        '• Allocation: 20% of signals\n' +
+        '• Risk Level: 5 (highest)\n\n' +
+        '*🌱 EMERGING Tier*\n' +
+        '• Market Cap: $8M - $20M\n' +
+        '• Min Holders: 100\n' +
+        '• Min Age: 21 days\n' +
+        '• Min Volume: $300K/24h\n' +
+        '• Stop Loss: 20% initial\n' +
+        '• Allocation: 30% of signals\n' +
+        '• Risk Level: 4\n\n' +
+        '*🎓 GRADUATED Tier*\n' +
+        '• Market Cap: $20M - $50M\n' +
+        '• Min Holders: 100\n' +
+        '• Min Age: 21 days\n' +
+        '• Min Volume: $500K/24h\n' +
+        '• Stop Loss: 18% initial\n' +
+        '• Allocation: 30% of signals\n' +
+        '• Risk Level: 3\n\n' +
+        '*🏛️ ESTABLISHED Tier*\n' +
+        '• Market Cap: $50M - $150M\n' +
+        '• Min Holders: 100\n' +
+        '• Min Age: 21 days\n' +
+        '• Min Volume: $1M/24h\n' +
+        '• Stop Loss: 15% initial\n' +
+        '• Allocation: 20% of signals\n' +
+        '• Risk Level: 2 (lowest)\n\n' +
+        '_Note: Gap between $5M-$8M is intentional_',
         { parse_mode: 'Markdown' }
       );
     });

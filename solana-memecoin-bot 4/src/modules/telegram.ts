@@ -3336,13 +3336,15 @@ export class TelegramAlertBot {
     // ML Prediction Section (NEW)
     const prediction = signal.prediction;
     if (prediction) {
-      const probEmoji = prediction.winProbability >= 50 ? '🎯' :
-                        prediction.winProbability >= 35 ? '📊' : '⚠️';
-      const confEmoji = prediction.confidence === 'HIGH' ? '🔥' :
-                        prediction.confidence === 'MEDIUM' ? '✨' : '❓';
+      // Label based on ACTUAL probability, not data confidence
+      // 65%+ is meaningful edge, 55-64% is moderate, below 55% is weak
+      const probLabel = prediction.winProbability >= 65 ? 'STRONG' :
+                        prediction.winProbability >= 55 ? 'MODERATE' : 'WEAK';
+      const probEmoji = prediction.winProbability >= 65 ? '🔥' :
+                        prediction.winProbability >= 55 ? '✨' : '⚠️';
 
-      msg += `${probEmoji} *ML Prediction*\n`;
-      msg += `Win Prob: *${prediction.winProbability}%* ${confEmoji} (${prediction.confidence})\n`;
+      msg += `🎯 *ML Prediction*\n`;
+      msg += `Win Prob: *${prediction.winProbability.toFixed(1)}%* ${probEmoji} (${probLabel})\n`;
 
       if (prediction.matchedPatterns && prediction.matchedPatterns.length > 0) {
         msg += `✅ Patterns: ${prediction.matchedPatterns.slice(0, 2).join(', ')}\n`;

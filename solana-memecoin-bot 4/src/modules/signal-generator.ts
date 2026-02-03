@@ -1000,25 +1000,25 @@ export class SignalGenerator {
 
     // Filter signals by ML win probability - TRACK-SPECIFIC THRESHOLDS
     //
-    // SIGNAL VOLUME FIX: Significantly lowered thresholds
-    // Previous thresholds (55%/75% and 45%/60%) were too strict and blocking
-    // almost all signals, preventing both trading AND ML data collection.
+    // QUALITY FIX: Raised thresholds to require meaningful edge
+    // A 50% win probability is a coin flip - we need better than that.
+    // Previous thresholds (30-50%) were letting through too many marginal signals.
     //
-    // New approach: In learning mode, accept most signals to collect data.
-    // The on-chain scoring already filters out truly bad signals.
+    // New approach: Require meaningful statistical edge before signaling.
+    // Learning mode still allows lower thresholds for data collection.
     //
     let mlProbabilityThreshold: number;
     let confidenceOk: boolean;
 
     if (signalTrack === SignalTrack.PROVEN_RUNNER) {
-      // PROVEN RUNNER: Token has survived 45+ minutes, lower bar for ML
-      mlProbabilityThreshold = isLearningMode ? 30 : 50;
+      // PROVEN RUNNER: Token has survived 45+ minutes, require decent edge
+      mlProbabilityThreshold = isLearningMode ? 40 : 55;
       confidenceOk = isLearningMode
         ? true  // Accept any confidence in learning mode
         : (prediction.confidence === 'HIGH' || prediction.confidence === 'MEDIUM');
     } else {
       // EARLY_QUALITY: Already validated by KOL or superior on-chain metrics
-      mlProbabilityThreshold = isLearningMode ? 25 : 40;
+      mlProbabilityThreshold = isLearningMode ? 35 : 50;
       confidenceOk = true;  // Trust the external validation, don't double-gate
     }
 
@@ -1095,6 +1095,24 @@ export class SignalGenerator {
 
     // Track for KOL follow-up (optional validation)
     this.discoverySignals.set(tokenAddress, onChainSignal);
+
+    // Step 8: Warning count quality gate
+    // Filter signals with too many red flags (excluding generic ones)
+    const seriousWarnings = (onChainSignal.riskWarnings || []).filter((w: string) =>
+      !w.includes('ON-CHAIN SIGNAL') && !w.includes('No KOL')
+    );
+    const MAX_SERIOUS_WARNINGS = 3;
+
+    if (seriousWarnings.length >= MAX_SERIOUS_WARNINGS) {
+      logger.info({
+        tokenAddress,
+        ticker: metrics.ticker,
+        warningCount: seriousWarnings.length,
+        warnings: seriousWarnings,
+        threshold: MAX_SERIOUS_WARNINGS,
+      }, 'Signal filtered by warning count - too many red flags');
+      return SignalGenerator.EVAL_RESULTS.DISCOVERY_FAILED;
+    }
 
     // Send on-chain signal via Telegram
     await telegramBot.sendOnChainSignal(onChainSignal);

@@ -12,6 +12,7 @@ import { holderDynamicsAnalyzer } from './holder-dynamics.js';
 import { volumeProfileAnalyzer } from './volume-profile.js';
 import { smartMoneyTracker } from './smart-money-tracker.js';
 import { kolReentryDetector } from './kol-reentry-detector.js';
+import { technicalAnalysis, TechnicalIndicators } from './technical-analysis.js';
 import {
   MatureTokenScore,
   AccumulationMetrics,
@@ -45,6 +46,7 @@ export class MatureTokenScorer {
     smartMoneyMetrics: SmartMoneyMetrics;
     kolReentryMetrics: KolReentryMetrics;
     safetyResult: TokenSafetyResult;
+    technicalIndicators: TechnicalIndicators;
   }> {
     // Gather all metrics in parallel
     const [
@@ -56,6 +58,7 @@ export class MatureTokenScorer {
       kolReentryMetrics,
       safetyResult,
       bundleAnalysis,
+      technicalIndicators,
     ] = await Promise.all([
       accumulationDetector.analyze(tokenAddress),
       breakoutAnalyzer.analyze(tokenAddress),
@@ -65,12 +68,27 @@ export class MatureTokenScorer {
       kolReentryDetector.analyze(tokenAddress, currentPrice),
       tokenSafetyChecker.checkTokenSafety(tokenAddress),
       bundleDetector.analyze(tokenAddress),
+      technicalAnalysis.analyze(tokenAddress),
     ]);
+
+    // Override breakout RSI with real RSI from technical analysis
+    const enhancedBreakoutMetrics: BreakoutMetrics = {
+      ...breakoutMetrics,
+      rsi14: technicalIndicators.rsi14,  // Use real RSI from OHLCV data
+      macdCrossover: technicalIndicators.macdCrossover === 'BULLISH',
+      ema9CrossEma21: technicalIndicators.emaCrossover === 'BULLISH',
+    };
+
+    // Recalculate breakout score with real technical data
+    const adjustedBreakoutScore = this.adjustBreakoutScoreWithTechnicals(
+      breakoutMetrics.breakoutScore,
+      technicalIndicators
+    );
 
     // Calculate component scores
     const components = {
       accumulationScore: accumulationMetrics.accumulationScore,
-      breakoutScore: breakoutMetrics.breakoutScore,
+      breakoutScore: adjustedBreakoutScore,
       holderDynamicsScore: holderDynamics.holderDynamicsScore,
       volumeAuthenticityScore: volumeProfile.volumeAuthenticityScore,
       smartMoneyScore: smartMoneyMetrics.smartMoneyScore,
@@ -100,13 +118,14 @@ export class MatureTokenScorer {
     // Collect signals and warnings
     const { bullishSignals, bearishSignals, warnings } = this.collectSignals(
       accumulationMetrics,
-      breakoutMetrics,
+      enhancedBreakoutMetrics,
       holderDynamics,
       volumeProfile,
       smartMoneyMetrics,
       kolReentryMetrics,
       safetyResult,
-      bundleAnalysis
+      bundleAnalysis,
+      technicalIndicators
     );
 
     const score: MatureTokenScore = {
@@ -125,18 +144,75 @@ export class MatureTokenScorer {
       confidence,
       recommendation,
       components,
+      technicalBias: technicalIndicators.bias,
+      rsi14: technicalIndicators.rsi14.toFixed(1),
     }, 'Mature token score calculated');
 
     return {
       score,
       accumulationMetrics,
-      breakoutMetrics,
+      breakoutMetrics: enhancedBreakoutMetrics,
       holderDynamics,
       volumeProfile,
       smartMoneyMetrics,
       kolReentryMetrics,
       safetyResult,
+      technicalIndicators,
     };
+  }
+
+  /**
+   * Adjust breakout score with real technical analysis data
+   */
+  private adjustBreakoutScoreWithTechnicals(
+    baseScore: number,
+    technicals: TechnicalIndicators
+  ): number {
+    let adjustment = 0;
+
+    // RSI adjustment (-15 to +15)
+    if (technicals.rsi14 >= 40 && technicals.rsi14 <= 60) {
+      adjustment += 10; // Neutral zone - good entry
+    } else if (technicals.rsi14 >= 30 && technicals.rsi14 <= 70) {
+      adjustment += 5; // Healthy range
+    } else if (technicals.rsi14 < 30) {
+      adjustment += 15; // Oversold - potential reversal
+    } else if (technicals.rsi14 > 70) {
+      adjustment -= 10; // Overbought - caution
+    }
+
+    // MACD adjustment (-10 to +15)
+    if (technicals.macdCrossover === 'BULLISH') {
+      adjustment += 15;
+    } else if (technicals.macdCrossover === 'BEARISH') {
+      adjustment -= 10;
+    } else if (technicals.macdHistogram > 0) {
+      adjustment += 5;
+    }
+
+    // EMA adjustment (-10 to +10)
+    if (technicals.emaCrossover === 'BULLISH') {
+      adjustment += 10;
+    } else if (technicals.emaCrossover === 'BEARISH') {
+      adjustment -= 10;
+    }
+
+    // Price vs EMA adjustment (-5 to +5)
+    if (technicals.priceVsEma === 'ABOVE_ALL') {
+      adjustment += 5;
+    } else if (technicals.priceVsEma === 'BELOW_ALL') {
+      adjustment -= 5;
+    }
+
+    // Technical bias multiplier
+    if (technicals.bias === 'BULLISH') {
+      adjustment += 5;
+    } else if (technicals.bias === 'BEARISH') {
+      adjustment -= 5;
+    }
+
+    const adjustedScore = baseScore + adjustment;
+    return Math.max(0, Math.min(100, adjustedScore));
   }
 
   /**
@@ -316,7 +392,8 @@ export class MatureTokenScorer {
     smartMoney: SmartMoneyMetrics,
     kolMetrics: KolReentryMetrics,
     safety: TokenSafetyResult,
-    bundle: any
+    bundle: any,
+    technicals: TechnicalIndicators
   ): {
     bullishSignals: string[];
     bearishSignals: string[];
@@ -325,6 +402,45 @@ export class MatureTokenScorer {
     const bullishSignals: string[] = [];
     const bearishSignals: string[] = [];
     const warnings: string[] = [];
+
+    // Technical analysis signals (NEW)
+    if (technicals.macdCrossover === 'BULLISH') {
+      bullishSignals.push('MACD_BULLISH_CROSS');
+    } else if (technicals.macdCrossover === 'BEARISH') {
+      bearishSignals.push('MACD_BEARISH_CROSS');
+    }
+
+    if (technicals.emaCrossover === 'BULLISH') {
+      bullishSignals.push('EMA_BULLISH_CROSS');
+    } else if (technicals.emaCrossover === 'BEARISH') {
+      bearishSignals.push('EMA_BEARISH_CROSS');
+    }
+
+    if (technicals.rsiTrend === 'OVERSOLD') {
+      bullishSignals.push(`RSI_OVERSOLD_${technicals.rsi14.toFixed(0)}`);
+    } else if (technicals.rsiTrend === 'OVERBOUGHT') {
+      warnings.push(`RSI_OVERBOUGHT_${technicals.rsi14.toFixed(0)}`);
+    }
+
+    if (technicals.priceVsEma === 'ABOVE_ALL') {
+      bullishSignals.push('PRICE_ABOVE_ALL_EMAS');
+    } else if (technicals.priceVsEma === 'BELOW_ALL') {
+      bearishSignals.push('PRICE_BELOW_ALL_EMAS');
+    }
+
+    if (technicals.bias === 'BULLISH' && technicals.technicalScore >= 65) {
+      bullishSignals.push(`TECH_BULLISH_${technicals.technicalScore}`);
+    } else if (technicals.bias === 'BEARISH' && technicals.technicalScore <= 35) {
+      bearishSignals.push(`TECH_BEARISH_${technicals.technicalScore}`);
+    }
+
+    // Distance to support/resistance
+    if (technicals.distanceToResistance < 5 && technicals.distanceToResistance > 0) {
+      bullishSignals.push('NEAR_BREAKOUT_LEVEL');
+    }
+    if (technicals.distanceToSupport < 5 && technicals.distanceToSupport > 0) {
+      warnings.push('NEAR_SUPPORT_LEVEL');
+    }
 
     // Accumulation signals
     if (accumulation.accumulationScore >= 70) {

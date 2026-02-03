@@ -28,6 +28,10 @@ export { kolReentryDetector, KolReentryDetector } from './kol-reentry-detector.j
 // Scorer
 export { matureTokenScorer, MatureTokenScorer } from './mature-token-scorer.js';
 
+// Technical Analysis (proper RSI, MACD, EMA from OHLCV data)
+export { technicalAnalysis, TechnicalAnalysis } from './technical-analysis.js';
+export type { TechnicalIndicators } from './technical-analysis.js';
+
 // Scanner
 export { matureTokenScanner, MatureTokenScanner } from './mature-token-scanner.js';
 

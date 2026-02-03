@@ -1612,7 +1612,7 @@ export class TelegramAlertBot {
 
       // Narrative summary - the key insight
       if (followUpContext.narrative) {
-        msg += `💡 *${followUpContext.narrative}*\n\n`;
+        msg += `💡 *${this.escapeMarkdown(followUpContext.narrative)}*\n\n`;
       }
 
       // Rich before/after comparison
@@ -1638,13 +1638,13 @@ export class TelegramAlertBot {
         msg += `${probEmoji} *ML Win Prob:* ${pc.previousWinProb}% → ${pc.currentWinProb}% (${probArrow}${pc.probChange >= 0 ? '+' : ''}${pc.probChange.toFixed(0)}%)\n`;
 
         if (pc.newRiskFactors && pc.newRiskFactors.length > 0) {
-          msg += `🚨 *New Risks:* ${pc.newRiskFactors.slice(0, 2).join(', ')}\n`;
+          msg += `🚨 *New Risks:* ${this.escapeMarkdown(pc.newRiskFactors.slice(0, 2).join(', '))}\n`;
         }
         if (pc.lostPatterns && pc.lostPatterns.length > 0) {
-          msg += `❌ *Lost Patterns:* ${pc.lostPatterns.slice(0, 2).join(', ')}\n`;
+          msg += `❌ *Lost Patterns:* ${this.escapeMarkdown(pc.lostPatterns.slice(0, 2).join(', '))}\n`;
         }
         if (pc.gainedPatterns && pc.gainedPatterns.length > 0) {
-          msg += `✅ *New Patterns:* ${pc.gainedPatterns.slice(0, 2).join(', ')}\n`;
+          msg += `✅ *New Patterns:* ${this.escapeMarkdown(pc.gainedPatterns.slice(0, 2).join(', '))}\n`;
         }
         msg += `\n`;
       }
@@ -3253,7 +3253,7 @@ export class TelegramAlertBot {
 
       // Narrative summary - the key insight
       if (followUpContext.narrative) {
-        msg += `💡 *${followUpContext.narrative}*\n\n`;
+        msg += `💡 *${this.escapeMarkdown(followUpContext.narrative)}*\n\n`;
       }
 
       // Rich before/after comparison
@@ -3279,13 +3279,13 @@ export class TelegramAlertBot {
         msg += `${probEmoji} *ML Win Prob:* ${pc.previousWinProb}% → ${pc.currentWinProb}% (${probArrow}${pc.probChange >= 0 ? '+' : ''}${pc.probChange.toFixed(0)}%)\n`;
 
         if (pc.newRiskFactors && pc.newRiskFactors.length > 0) {
-          msg += `🚨 *New Risks:* ${pc.newRiskFactors.slice(0, 2).join(', ')}\n`;
+          msg += `🚨 *New Risks:* ${this.escapeMarkdown(pc.newRiskFactors.slice(0, 2).join(', '))}\n`;
         }
         if (pc.lostPatterns && pc.lostPatterns.length > 0) {
-          msg += `❌ *Lost Patterns:* ${pc.lostPatterns.slice(0, 2).join(', ')}\n`;
+          msg += `❌ *Lost Patterns:* ${this.escapeMarkdown(pc.lostPatterns.slice(0, 2).join(', '))}\n`;
         }
         if (pc.gainedPatterns && pc.gainedPatterns.length > 0) {
-          msg += `✅ *New Patterns:* ${pc.gainedPatterns.slice(0, 2).join(', ')}\n`;
+          msg += `✅ *New Patterns:* ${this.escapeMarkdown(pc.gainedPatterns.slice(0, 2).join(', '))}\n`;
         }
         msg += `\n`;
       }
@@ -3295,15 +3295,15 @@ export class TelegramAlertBot {
       msg += `═══════════════════════════════\n\n`;
     }
 
-    // Token header with key info
-    msg += `*$${ticker}* — ${tokenName}\n`;
+    // Token header with key info - escape dynamic content to prevent markdown errors
+    msg += `*$${this.escapeMarkdown(ticker)}* — ${this.escapeMarkdown(tokenName)}\n`;
     msg += `\`${signal.tokenAddress || ''}\`\n`;
 
     // DexScreener & CTO Status (NEW)
     msg += this.formatDexScreenerCTOStatus(dexScreenerInfo, ctoAnalysis);
 
     // Narrative - one sentence about what this token is
-    msg += `_${this.generateNarrative(tokenName, ticker)}_\n\n`;
+    msg += `_${this.escapeMarkdown(this.generateNarrative(tokenName, ticker))}_\n\n`;
 
     msg += `───────────────────────────────\n`;
 
@@ -3348,7 +3348,7 @@ export class TelegramAlertBot {
       msg += `Win Prob: *${prediction.winProbability.toFixed(1)}%* ${probEmoji} (${probLabel})\n`;
 
       if (prediction.matchedPatterns && prediction.matchedPatterns.length > 0) {
-        msg += `✅ Patterns: ${prediction.matchedPatterns.slice(0, 2).join(', ')}\n`;
+        msg += `✅ Patterns: ${this.escapeMarkdown(prediction.matchedPatterns.slice(0, 2).join(', '))}\n`;
       }
 
       if (prediction.optimalHoldTime) {
@@ -3361,7 +3361,7 @@ export class TelegramAlertBot {
 
       if (prediction.riskFactors && prediction.riskFactors.length > 0) {
         const shortRisks = prediction.riskFactors.slice(0, 2).map((r: string) => r.split(':')[0]);
-        msg += `⚠️ Risks: ${shortRisks.join(', ')}\n`;
+        msg += `⚠️ Risks: ${this.escapeMarkdown(shortRisks.join(', '))}\n`;
       }
 
       msg += `\n`;
@@ -3387,7 +3387,7 @@ export class TelegramAlertBot {
         if (w.includes('HIGH_CONCENTRATION')) return 'Concentrated';
         return w.slice(0, 20);
       });
-      msg += shortWarnings.join(' · ') + '\n\n';
+      msg += this.escapeMarkdown(shortWarnings.join(' · ')) + '\n\n';
     }
 
     msg += `───────────────────────────────\n`;

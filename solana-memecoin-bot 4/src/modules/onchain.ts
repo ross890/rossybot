@@ -962,6 +962,11 @@ class DexScreenerClient {
   private readonly CACHE_TTL_EMPTY_MS = 10 * 1000; // 10 seconds for empty results
   private readonly MAX_CACHE_SIZE = 500; // Prevent memory bloat
 
+  // Rate limiting - DexScreener free tier allows ~300 req/min (~5/sec)
+  private lastRequestTime = 0;
+  private readonly MIN_REQUEST_INTERVAL_MS = 250; // Max 4 requests/second
+  private rateLimitBackoff = 0; // Additional backoff when rate limited
+
   constructor() {
     this.client = axios.create({
       baseURL: 'https://api.dexscreener.com',
@@ -970,6 +975,21 @@ class DexScreenerClient {
 
     // Clean up expired cache entries every 5 minutes
     setInterval(() => this.cleanupCache(), 5 * 60 * 1000);
+  }
+
+  /**
+   * Wait for rate limit before making request
+   */
+  private async waitForRateLimit(): Promise<void> {
+    const now = Date.now();
+    const timeSinceLastRequest = now - this.lastRequestTime;
+    const requiredWait = this.MIN_REQUEST_INTERVAL_MS + this.rateLimitBackoff - timeSinceLastRequest;
+
+    if (requiredWait > 0) {
+      await new Promise(resolve => setTimeout(resolve, requiredWait));
+    }
+
+    this.lastRequestTime = Date.now();
   }
 
   /**
@@ -1000,13 +1020,22 @@ class DexScreenerClient {
       return cached.data;
     }
 
+    // Wait for rate limit before making request
+    await this.waitForRateLimit();
+
     try {
       const response = await this.client.get(`/latest/dex/tokens/${address}`);
       const pairs = response.data.pairs?.filter((p: any) => p.chainId === 'solana') || [];
 
       // Cache the result
+      const requestTime = Date.now();
       const ttl = pairs.length > 0 ? this.CACHE_TTL_MS : this.CACHE_TTL_EMPTY_MS;
-      this.pairsCache.set(address, { data: pairs, expiry: now + ttl });
+      this.pairsCache.set(address, { data: pairs, expiry: requestTime + ttl });
+
+      // Successful request - reduce backoff
+      if (this.rateLimitBackoff > 0) {
+        this.rateLimitBackoff = Math.max(0, this.rateLimitBackoff - 100);
+      }
 
       // Prevent cache from growing too large
       if (this.pairsCache.size > this.MAX_CACHE_SIZE) {
@@ -1021,17 +1050,21 @@ class DexScreenerClient {
       const errorData = error?.response?.data;
       const message = errorData?.message || errorData?.error || error?.message;
 
-      // On rate limit, cache empty result briefly to prevent hammering
+      // On rate limit, add exponential backoff and cache empty result
       if (status === 429) {
-        this.pairsCache.set(address, { data: [], expiry: now + this.CACHE_TTL_EMPTY_MS });
+        this.rateLimitBackoff = Math.min(5000, (this.rateLimitBackoff || 500) * 2);
+        this.pairsCache.set(address, { data: [], expiry: Date.now() + this.rateLimitBackoff });
+        logger.warn({ backoffMs: this.rateLimitBackoff }, 'DexScreener rate limited, increasing backoff');
+      } else {
+        logger.info(`DexScreener getTokenPairs failed: status=${status} error=${message} address=${address.slice(0, 8)}...`);
       }
 
-      logger.info(`DexScreener getTokenPairs failed: status=${status} error=${message} address=${address.slice(0, 8)}...`);
       return [];
     }
   }
 
   async searchTokens(query: string): Promise<DexScreenerPair[]> {
+    await this.waitForRateLimit();
     try {
       const response = await this.client.get(`/latest/dex/search`, {
         params: { q: query },
@@ -1040,6 +1073,9 @@ class DexScreenerClient {
     } catch (error: any) {
       const status = error?.response?.status;
       const message = error?.response?.data?.message || error?.message;
+      if (status === 429) {
+        this.rateLimitBackoff = Math.min(5000, (this.rateLimitBackoff || 500) * 2);
+      }
       logger.error(`DexScreener searchTokens failed: status=${status} error=${message} query=${query}`);
       return [];
     }
@@ -1050,6 +1086,7 @@ class DexScreenerClient {
    * This is a free alternative to Birdeye's new_listing endpoint
    */
   async getNewSolanaPairs(limit = 50): Promise<any[]> {
+    await this.waitForRateLimit();
     try {
       // Get latest Solana pairs using the token-boosts endpoint
       const response = await this.client.get('/token-boosts/latest/v1');
@@ -1094,6 +1131,7 @@ class DexScreenerClient {
   async getTrendingSolanaTokens(limit = 50): Promise<string[]> {
     const addresses: string[] = [];
 
+    await this.waitForRateLimit();
     try {
       // Primary: Get boosted tokens (these are actively promoted/trending)
       const boostsResponse = await this.client.get('/token-boosts/latest/v1');
@@ -1113,10 +1151,14 @@ class DexScreenerClient {
         return addresses;
       }
     } catch (error: any) {
+      if (error?.response?.status === 429) {
+        this.rateLimitBackoff = Math.min(5000, (this.rateLimitBackoff || 500) * 2);
+      }
       logger.debug({ error: error?.message, status: error?.response?.status }, 'token-boosts endpoint failed for trending tokens');
     }
 
     // Fallback: Try token-profiles endpoint
+    await this.waitForRateLimit();
     try {
       const profilesResponse = await this.client.get('/token-profiles/latest/v1');
       const profiles = profilesResponse.data || [];

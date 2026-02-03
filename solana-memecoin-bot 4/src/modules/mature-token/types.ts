@@ -11,7 +11,7 @@
  * Each tier has different risk parameters
  */
 export enum TokenTier {
-  RISING = 'RISING',           // $1-5M - High risk, requires strong holder base (3000+)
+  RISING = 'RISING',           // $500K-8M - High risk, requires 500+ holders, 3+ days old
   EMERGING = 'EMERGING',       // $8-20M - Higher risk/reward
   GRADUATED = 'GRADUATED',     // $20-50M - Balanced
   ESTABLISHED = 'ESTABLISHED', // $50-150M - Lower risk
@@ -72,16 +72,16 @@ export interface TierConfig {
 
 export const TIER_CONFIG: Record<TokenTier, TierConfig> = {
   [TokenTier.RISING]: {
-    minMarketCap: 1_000_000,     // $1M
-    maxMarketCap: 5_000_000,     // $5M
-    minVolume24h: 100_000,       // $100K volume
-    minHolderCount: 1_000,       // Strong holder base (lowered from 3000)
+    minMarketCap: 500_000,       // $500K (lowered to capture more tokens)
+    maxMarketCap: 8_000_000,     // $8M (closes gap with EMERGING)
+    minVolume24h: 50_000,        // $50K volume (lowered for smaller tokens)
+    minHolderCount: 500,         // 500+ holders (lowered from 1000)
     minTokenAgeHours: 72,        // 3 days minimum
     stopLoss: { initial: 25, timeDecay: 18 },  // Wider stops for volatility
-    signalAllocation: 0.20,      // 20% of signals
+    signalAllocation: 0.25,      // 25% of signals
   },
   [TokenTier.EMERGING]: {
-    minMarketCap: 8_000_000,
+    minMarketCap: 8_000_000,     // Seamless transition from RISING
     maxMarketCap: 20_000_000,
     minVolume24h: 300_000,
     minHolderCount: 100,
@@ -665,20 +665,20 @@ export const DEFAULT_ELIGIBILITY: MatureTokenEligibility = {
   minTokenAgeHours: 72,       // 3 days for RISING tier (other tiers require 21 days via TIER_CONFIG)
   maxTokenAgeDays: 365,       // No practical upper limit
 
-  // Market cap range: $1M - $150M (across all tiers, RISING tier starts at $1M)
-  minMarketCap: 1_000_000,    // $1M for RISING tier (other tiers have higher minimums)
+  // Market cap range: $500K - $150M (RISING tier starts at $500K)
+  minMarketCap: 500_000,      // $500K for RISING tier
   maxMarketCap: 150_000_000,  // $150M
 
   // Liquidity requirements
-  minLiquidity: 50_000,       // $50K minimum
+  minLiquidity: 25_000,       // $25K minimum (lowered for smaller tokens)
   minLiquidityRatio: 0.02,    // 2% of mcap
 
   // Volume requirements (lowest tier minimum - RISING tier)
-  min24hVolume: 100_000,      // $100K for RISING tier
+  min24hVolume: 50_000,       // $50K for RISING tier
   minVolumeMarketCapRatio: 0.02,  // 2%
 
-  // Holder requirements (tier-specific via TIER_CONFIG, RISING requires 3000+)
-  minHolderCount: 100,        // Base requirement, RISING tier overrides to 3000
+  // Holder requirements (tier-specific via TIER_CONFIG)
+  minHolderCount: 100,        // Base requirement, RISING tier requires 500+
   maxTop10Concentration: 50,  // Max 50% in top 10
 
   // Safety requirements

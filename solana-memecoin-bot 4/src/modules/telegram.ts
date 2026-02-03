@@ -587,12 +587,12 @@ export class TelegramAlertBot {
       await this.bot!.sendMessage(chatId,
         '*📈 Mature Token Strategy Tiers*\n\n' +
         '*🚀 RISING Tier*\n' +
-        '• Market Cap: $1M - $5M\n' +
-        '• Min Holders: 1,000\n' +
+        '• Market Cap: $500K - $8M\n' +
+        '• Min Holders: 500\n' +
         '• Min Age: 3 days (72h)\n' +
-        '• Min Volume: $100K/24h\n' +
+        '• Min Volume: $50K/24h\n' +
         '• Stop Loss: 25% initial\n' +
-        '• Allocation: 20% of signals\n' +
+        '• Allocation: 25% of signals\n' +
         '• Risk Level: 5 (highest)\n\n' +
         '*🌱 EMERGING Tier*\n' +
         '• Market Cap: $8M - $20M\n' +
@@ -616,9 +616,9 @@ export class TelegramAlertBot {
         '• Min Age: 21 days\n' +
         '• Min Volume: $1M/24h\n' +
         '• Stop Loss: 15% initial\n' +
-        '• Allocation: 20% of signals\n' +
+        '• Allocation: 15% of signals\n' +
         '• Risk Level: 2 (lowest)\n\n' +
-        '_Note: Gap between $5M-$8M is intentional_',
+        '_Seamless coverage from $500K to $150M_',
         { parse_mode: 'Markdown' }
       );
     });

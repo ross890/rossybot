@@ -77,6 +77,8 @@ interface SignalSnapshot {
     matchedPatterns?: string[];
     riskFactors?: string[];
   };
+  // Track weakening signal count - limit to MAX_WEAKENING_SIGNALS per token
+  weakeningSignalCount: number;
 }
 
 // Resend classification based on momentum assessment
@@ -138,6 +140,7 @@ export class TelegramAlertBot {
   private signalHistory: Map<string, SignalSnapshot> = new Map();
   private readonly SIGNAL_HISTORY_TTL_MS = 4 * 60 * 60 * 1000; // 4 hours - track follow-ups within this window
   private readonly MIN_FOLLOWUP_INTERVAL_MS = 10 * 60 * 1000; // 10 min minimum between follow-ups
+  private readonly MAX_WEAKENING_SIGNALS = 3; // Maximum weakening signals before only allowing buy signals
 
   // RACE CONDITION PROTECTION: Synchronous lock to prevent parallel processes from sending duplicate signals
   // A token is added to this Set IMMEDIATELY when signal processing starts, before any async operations
@@ -2095,6 +2098,7 @@ export class TelegramAlertBot {
         matchedPatterns: prediction.matchedPatterns,
         riskFactors: prediction.riskFactors,
       } : undefined,
+      weakeningSignalCount: 0,
     };
   }
 
@@ -2503,10 +2507,20 @@ export class TelegramAlertBot {
 
   /**
    * Record on-chain signal in history
+   * @param classification - Optional classification to track weakening signals
    */
-  private recordOnChainSignalHistory(signal: any): void {
+  private recordOnChainSignalHistory(signal: any, classification?: ResendClassification): void {
     const existing = this.signalHistory.get(signal.tokenAddress);
     const prediction = signal.prediction;
+
+    // Increment weakening count if this was a DETERIORATING signal
+    let weakeningCount = existing?.weakeningSignalCount || 0;
+    if (classification === 'DETERIORATING') {
+      weakeningCount++;
+    } else if (classification === 'NEW_CATALYST' || classification === 'MOMENTUM_CONFIRMED') {
+      // Reset weakening count on positive signals
+      weakeningCount = 0;
+    }
 
     const snapshot: SignalSnapshot = {
       timestamp: existing?.timestamp || Date.now(),
@@ -2516,8 +2530,8 @@ export class TelegramAlertBot {
       volume24h: signal.metrics?.volume24h || signal.tokenMetrics?.volume24h || 0,
       holderCount: signal.metrics?.holderCount || signal.tokenMetrics?.holderCount || 0,
       compositeScore: signal.onChainScore?.total || 0,
-      socialMomentum: 0,
-      mentionVelocity: 0,
+      socialMomentum: signal.socialMetrics?.mentionVelocity1h || 0,
+      mentionVelocity: signal.socialMetrics?.mentionVelocity1h || 0,
       kolHandle: 'ONCHAIN',
       kolCount: 0,
       // Enhanced fields
@@ -2529,6 +2543,7 @@ export class TelegramAlertBot {
         matchedPatterns: prediction.matchedPatterns,
         riskFactors: prediction.riskFactors,
       } : existing?.prediction,
+      weakeningSignalCount: weakeningCount,
     };
 
     this.signalHistory.set(signal.tokenAddress, snapshot);
@@ -3087,7 +3102,25 @@ export class TelegramAlertBot {
         }, 'On-chain follow-up SUPPRESSED - momentum clearly negative');
 
         // Still record in history to track the decline, but don't send
-        this.recordOnChainSignalHistory(signal);
+        this.recordOnChainSignalHistory(signal, followUpContext.classification);
+        return false;
+      }
+
+      // WEAKENING SIGNAL LIMIT: After 3 weakening signals, only allow BUY signals (positive momentum)
+      const weakeningCount = previousSnapshot?.weakeningSignalCount || 0;
+      if (followUpContext.isFollowUp &&
+          followUpContext.classification === 'DETERIORATING' &&
+          weakeningCount >= this.MAX_WEAKENING_SIGNALS) {
+        logger.info({
+          tokenAddress: signal.tokenAddress,
+          ticker: signal.tokenTicker,
+          weakeningCount,
+          maxAllowed: this.MAX_WEAKENING_SIGNALS,
+          classification: followUpContext.classification,
+        }, 'Weakening signal SUPPRESSED - max weakening signals reached (only buy signals allowed now)');
+
+        // Record but don't send
+        this.recordOnChainSignalHistory(signal, followUpContext.classification);
         return false;
       }
 
@@ -3107,8 +3140,8 @@ export class TelegramAlertBot {
         'ONCHAIN_MOMENTUM'
       );
 
-      // Record in signal history for follow-up tracking
-      this.recordOnChainSignalHistory(signal);
+      // Record in signal history for follow-up tracking (with classification for weakening count)
+      this.recordOnChainSignalHistory(signal, followUpContext.classification);
 
       logger.info({
         tokenAddress: signal.tokenAddress,
@@ -3119,6 +3152,7 @@ export class TelegramAlertBot {
         classification: followUpContext.classification,
         narrative: followUpContext.narrative,
         followUpMomentumScore: followUpContext.momentumScore,
+        weakeningSignalCount: followUpContext.classification === 'DETERIORATING' ? (weakeningCount + 1) : weakeningCount,
       }, followUpContext.isFollowUp ? `On-chain follow-up sent (${followUpContext.classification})` : 'On-chain momentum signal sent');
 
       return true;
@@ -3330,6 +3364,43 @@ export class TelegramAlertBot {
     const uniqueBuyers = momentumScore.metrics?.uniqueBuyers5m || 0;
     if (buySellRatio > 0 || uniqueBuyers > 0) {
       msg += `📈 *Momentum:* ${buySellRatio.toFixed(1)}x buy/sell · ${uniqueBuyers} buyers (5m)\n\n`;
+    }
+
+    // Social/X Indicators Section
+    const socialMetrics = signal.socialMetrics;
+    if (socialMetrics) {
+      msg += `───────────────────────────────\n`;
+      msg += `𝕏 *SOCIAL SIGNALS*\n`;
+
+      // Mention velocity with visual indicator
+      const velocity = socialMetrics.mentionVelocity1h || 0;
+      const velocityEmoji = velocity >= 50 ? '🔥' : velocity >= 20 ? '📈' : velocity >= 5 ? '📊' : '📉';
+      const velocityLabel = velocity >= 50 ? 'VIRAL' : velocity >= 20 ? 'HIGH' : velocity >= 5 ? 'MODERATE' : 'LOW';
+      msg += `├─ Velocity: ${velocityEmoji} *${velocity}* mentions/hr (${velocityLabel})\n`;
+
+      // Engagement quality score
+      const engagementPercent = Math.round((socialMetrics.engagementQuality || 0) * 100);
+      const engagementEmoji = engagementPercent >= 70 ? '🟢' : engagementPercent >= 40 ? '🟡' : '🔴';
+      msg += `├─ Engagement: ${engagementEmoji} ${engagementPercent}/100\n`;
+
+      // Account authenticity
+      const authPercent = Math.round((socialMetrics.accountAuthenticity || 0) * 100);
+      const authEmoji = authPercent >= 70 ? '✅' : authPercent >= 40 ? '⚠️' : '🚨';
+      msg += `├─ Authenticity: ${authEmoji} ${authPercent}/100\n`;
+
+      // KOL mentions with tiers (if any)
+      if (socialMetrics.kolMentions && socialMetrics.kolMentions.length > 0) {
+        const kolDisplay = socialMetrics.kolMentions.slice(0, 3).map((k: any) => {
+          const tierBadge = k.tier ? `[${k.tier}]` : '';
+          return `@${k.handle}${tierBadge}`;
+        }).join(', ');
+        msg += `├─ KOL Mentions: 👑 ${kolDisplay}\n`;
+      }
+
+      // Sentiment
+      const sentiment = socialMetrics.sentimentPolarity || 0;
+      const sentimentLabel = sentiment > 0.3 ? '🟢 POSITIVE' : sentiment > -0.3 ? '🟡 NEUTRAL' : '🔴 NEGATIVE';
+      msg += `└─ Sentiment: ${sentimentLabel}\n\n`;
     }
 
     msg += `───────────────────────────────\n`;

@@ -537,6 +537,8 @@ export interface TradingConfig {
   minScoreBuySignal: number;
   minScoreWatchSignal: number;
   learningMode: boolean;
+  enableEarlyStrategy: boolean;   // Original strategy for new tokens (5min-90min old)
+  enableMatureStrategy: boolean;  // Established token strategy (21+ days old)
 }
 
 export interface ScreeningConfig {

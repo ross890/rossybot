@@ -51,6 +51,12 @@ const envSchema = z.object({
   // When enabled: relaxes signal filtering to collect more data for model training
   // Set to false once you have enough data and want stricter signal quality
   LEARNING_MODE: z.coerce.boolean().default(true),
+
+  // Strategy toggles - control which signal generation strategies are active
+  // EARLY_STRATEGY: Original strategy for new tokens (5min-90min old, high volume signals)
+  // MATURE_STRATEGY: New strategy for established tokens (21+ days old, high quality signals)
+  ENABLE_EARLY_STRATEGY: z.string().optional().transform(val => val?.toLowerCase() === 'true').default('false'),
+  ENABLE_MATURE_STRATEGY: z.string().optional().transform(val => val?.toLowerCase() !== 'false').default('true'),
   
   // Screening (with defaults) - Aggressively optimized for early entries
   MIN_MARKET_CAP: z.coerce.number().default(10000),      // Lowered from 25k - catch microcaps early
@@ -97,6 +103,8 @@ function loadConfig(): AppConfig {
       minScoreBuySignal: env.MIN_SCORE_BUY_SIGNAL,
       minScoreWatchSignal: env.MIN_SCORE_WATCH_SIGNAL,
       learningMode: env.LEARNING_MODE,
+      enableEarlyStrategy: env.ENABLE_EARLY_STRATEGY,
+      enableMatureStrategy: env.ENABLE_MATURE_STRATEGY,
     },
     
     screening: {

@@ -52,6 +52,30 @@ export class MatureTokenScanner {
   private lastHourReset = Date.now();
   private lastDayReset = Date.now();
 
+  // Funnel stats for /funnel command
+  private funnelStats = {
+    fetched: 0,
+    passedAge: 0,
+    eligible: 0,
+    evaluated: 0,
+    signalsSent: 0,
+    rejections: {
+      tooYoung: 0,
+      tooOld: 0,
+      marketCap: 0,
+      noTier: 0,
+      volume: 0,
+      holders: 0,
+      liquidity: 0,
+      concentration: 0,
+      cooldown: 0,
+      score: 0,
+      safety: 0,
+    },
+    tiers: { RISING: 0, EMERGING: 0, GRADUATED: 0, ESTABLISHED: 0 },
+    lastScanTime: '',
+  };
+
   /**
    * Initialize the scanner
    */
@@ -109,6 +133,13 @@ export class MatureTokenScanner {
   }
 
   /**
+   * Get funnel stats for /funnel command
+   */
+  getFunnelStats() {
+    return { ...this.funnelStats };
+  }
+
+  /**
    * Run a single scan cycle
    */
   private async runScanCycle(): Promise<void> {
@@ -116,29 +147,48 @@ export class MatureTokenScanner {
       // Reset rate limits if needed
       this.resetRateLimitsIfNeeded();
 
+      // Reset funnel stats for this cycle
+      this.funnelStats.rejections = {
+        tooYoung: 0, tooOld: 0, marketCap: 0, noTier: 0, volume: 0,
+        holders: 0, liquidity: 0, concentration: 0, cooldown: 0, score: 0, safety: 0,
+      };
+      this.funnelStats.tiers = { RISING: 0, EMERGING: 0, GRADUATED: 0, ESTABLISHED: 0 };
+
       // Step 1: Get candidate tokens (mature tokens)
       const candidates = await this.getCandidateTokens();
+      this.funnelStats.passedAge = candidates.length;
       logger.info({ count: candidates.length }, 'Mature token candidates found');
 
       // Step 2: Filter by eligibility
       const eligible = await this.filterEligibleTokens(candidates);
+      this.funnelStats.eligible = eligible.length;
       logger.info({ count: eligible.length }, 'Eligible mature tokens');
 
       // Step 3: Score and evaluate each token
       let signalsSent = 0;
       let watchlistAdded = 0;
       let blocked = 0;
+      const evaluated = Math.min(eligible.length, this.config.maxTokensPerScan);
+      this.funnelStats.evaluated = evaluated;
 
       for (const token of eligible.slice(0, this.config.maxTokensPerScan)) {
         try {
           const result = await this.evaluateToken(token);
           if (result === 'SIGNAL_SENT') signalsSent++;
           else if (result === 'WATCHLIST_ADDED') watchlistAdded++;
-          else if (result === 'BLOCKED') blocked++;
+          else if (result === 'BLOCKED') {
+            blocked++;
+            this.funnelStats.rejections.safety++;
+          } else if (result === 'SKIPPED') {
+            this.funnelStats.rejections.score++;
+          }
         } catch (error) {
           logger.error({ error, tokenAddress: token.address }, 'Error evaluating mature token');
         }
       }
+
+      this.funnelStats.signalsSent = signalsSent;
+      this.funnelStats.lastScanTime = new Date().toLocaleTimeString();
 
       // Step 4: Check for exit signals on active positions
       await this.checkExitSignals();
@@ -149,11 +199,11 @@ export class MatureTokenScanner {
       logger.info({
         candidates: candidates.length,
         eligible: eligible.length,
-        evaluated: Math.min(eligible.length, this.config.maxTokensPerScan),
+        evaluated,
         signalsSent,
         watchlistAdded,
         blocked,
-        skipped: Math.min(eligible.length, this.config.maxTokensPerScan) - signalsSent - watchlistAdded - blocked,
+        skipped: evaluated - signalsSent - watchlistAdded - blocked,
         activeSignals: this.activeSignals.size,
         watchlistSize: this.watchlist.size,
       }, '✅ Mature token scan cycle complete');
@@ -205,6 +255,11 @@ export class MatureTokenScanner {
           metricsFailedCount++;
         }
       }
+
+      // Update funnel stats
+      this.funnelStats.fetched = fetchedCount;
+      this.funnelStats.rejections.tooYoung = tooYoungCount;
+      this.funnelStats.rejections.tooOld = tooOldCount;
 
       logger.info({
         fetched: fetchedCount,
@@ -310,6 +365,16 @@ export class MatureTokenScanner {
       eligible.push(token);
     }
 
+    // Update funnel stats
+    this.funnelStats.rejections.marketCap = rejections.marketCapOutOfRange;
+    this.funnelStats.rejections.noTier = rejections.noTierMatch;
+    this.funnelStats.rejections.volume = rejections.volumeTooLow;
+    this.funnelStats.rejections.holders = rejections.holdersTooLow;
+    this.funnelStats.rejections.liquidity = rejections.liquidityTooLow + rejections.liquidityRatioTooLow;
+    this.funnelStats.rejections.concentration = rejections.concentrationTooHigh;
+    this.funnelStats.rejections.cooldown = rejections.onCooldown;
+    this.funnelStats.tiers = tierCounts as { RISING: number; EMERGING: number; GRADUATED: number; ESTABLISHED: number };
+
     logger.info({
       input: tokens.length,
       eligible: eligible.length,
@@ -364,7 +429,7 @@ export class MatureTokenScanner {
       confidence: score.confidence,
       accumulationScore: score.accumulationScore,
       breakoutScore: score.breakoutScore,
-      safetyScore: score.safetyScore,
+      safetyScore: score.contractSafetyScore,
       marketCap: `$${(metrics.marketCap / 1_000_000).toFixed(2)}M`,
       holders: metrics.holderCount,
     }, '📊 FUNNEL: Token scored');

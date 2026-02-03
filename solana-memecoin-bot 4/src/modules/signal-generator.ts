@@ -1101,7 +1101,7 @@ export class SignalGenerator {
     const seriousWarnings = (onChainSignal.riskWarnings || []).filter((w: string) =>
       !w.includes('ON-CHAIN SIGNAL') && !w.includes('No KOL')
     );
-    const MAX_SERIOUS_WARNINGS = 3;
+    const MAX_SERIOUS_WARNINGS = 4;
 
     if (seriousWarnings.length >= MAX_SERIOUS_WARNINGS) {
       logger.info({

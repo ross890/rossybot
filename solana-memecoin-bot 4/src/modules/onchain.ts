@@ -25,6 +25,36 @@ class HeliusClient {
   private rpcUrl: string;
   private apiKey: string;
 
+  // ============ RATE LIMITING ============
+  // Helius free tier: 10 requests/second, paid tiers vary
+  // We use a conservative 5 req/sec to avoid 429 errors
+  private readonly MAX_REQUESTS_PER_SECOND = 5;
+  private requestQueue: Array<{
+    resolve: (value: any) => void;
+    reject: (error: any) => void;
+    request: () => Promise<any>;
+  }> = [];
+  private isProcessingQueue = false;
+  private lastRequestTime = 0;
+  private requestCount = 0;
+  private rateLimitResetTime = 0;
+
+  // ============ CACHING ============
+  // Token holder data changes frequently but not instantly
+  // 60 second cache prevents hammering the API for the same token
+  private holderCache: Map<string, { data: any; expiry: number }> = new Map();
+  private readonly HOLDER_CACHE_TTL_MS = 60 * 1000; // 60 seconds
+
+  // Account info cache (mint/freeze authority) - rarely changes
+  private accountInfoCache: Map<string, { data: any; expiry: number }> = new Map();
+  private readonly ACCOUNT_INFO_CACHE_TTL_MS = 5 * 60 * 1000; // 5 minutes
+
+  // Request deduplication - prevents duplicate in-flight requests
+  private inflightRequests: Map<string, Promise<any>> = new Map();
+
+  // Cache statistics
+  private cacheStats = { hits: 0, misses: 0, rateLimited: 0 };
+
   constructor() {
     this.apiKey = appConfig.heliusApiKey;
 
@@ -53,15 +83,157 @@ class HeliusClient {
         'Content-Type': 'application/json',
       },
     });
+
+    // Log cache stats every 5 minutes
+    setInterval(() => this.logCacheStats(), 5 * 60 * 1000);
+
+    // Clean up expired cache entries every 2 minutes
+    setInterval(() => this.cleanupCaches(), 2 * 60 * 1000);
+  }
+
+  /**
+   * Rate-limited request execution
+   * Queues requests and processes them at a controlled rate
+   */
+  private async executeWithRateLimit<T>(request: () => Promise<T>): Promise<T> {
+    return new Promise((resolve, reject) => {
+      this.requestQueue.push({ resolve, reject, request });
+      this.processQueue();
+    });
+  }
+
+  /**
+   * Process the request queue respecting rate limits
+   */
+  private async processQueue(): Promise<void> {
+    if (this.isProcessingQueue) return;
+    this.isProcessingQueue = true;
+
+    while (this.requestQueue.length > 0) {
+      const now = Date.now();
+
+      // Check if we're in a rate limit cooldown period
+      if (now < this.rateLimitResetTime) {
+        const waitTime = this.rateLimitResetTime - now;
+        logger.debug({ waitTime }, 'Helius rate limit cooldown, waiting...');
+        await this.sleep(waitTime);
+        continue;
+      }
+
+      // Reset counter every second
+      if (now - this.lastRequestTime > 1000) {
+        this.requestCount = 0;
+        this.lastRequestTime = now;
+      }
+
+      // If we've hit the limit, wait for the next second
+      if (this.requestCount >= this.MAX_REQUESTS_PER_SECOND) {
+        const waitTime = 1000 - (now - this.lastRequestTime);
+        if (waitTime > 0) {
+          await this.sleep(waitTime);
+        }
+        this.requestCount = 0;
+        this.lastRequestTime = Date.now();
+      }
+
+      // Process the next request
+      const item = this.requestQueue.shift();
+      if (!item) break;
+
+      this.requestCount++;
+
+      try {
+        const result = await item.request();
+        item.resolve(result);
+      } catch (error: any) {
+        // Handle rate limiting specifically
+        if (error?.response?.status === 429) {
+          this.cacheStats.rateLimited++;
+          // Back off for 2 seconds on rate limit
+          this.rateLimitResetTime = Date.now() + 2000;
+          // Re-queue the request
+          this.requestQueue.unshift(item);
+          logger.warn('Helius 429 rate limit hit, backing off for 2 seconds');
+          await this.sleep(2000);
+        } else {
+          item.reject(error);
+        }
+      }
+    }
+
+    this.isProcessingQueue = false;
+  }
+
+  private sleep(ms: number): Promise<void> {
+    return new Promise(resolve => setTimeout(resolve, ms));
+  }
+
+  private cleanupCaches(): void {
+    const now = Date.now();
+    let cleaned = 0;
+
+    for (const [key, value] of this.holderCache) {
+      if (value.expiry < now) {
+        this.holderCache.delete(key);
+        cleaned++;
+      }
+    }
+
+    for (const [key, value] of this.accountInfoCache) {
+      if (value.expiry < now) {
+        this.accountInfoCache.delete(key);
+        cleaned++;
+      }
+    }
+
+    if (cleaned > 0) {
+      logger.debug({ cleaned, holderCache: this.holderCache.size, accountCache: this.accountInfoCache.size }, 'Helius cache cleanup');
+    }
+  }
+
+  private logCacheStats(): void {
+    const total = this.cacheStats.hits + this.cacheStats.misses;
+    const hitRate = total > 0 ? ((this.cacheStats.hits / total) * 100).toFixed(1) : '0';
+
+    logger.info({
+      hits: this.cacheStats.hits,
+      misses: this.cacheStats.misses,
+      rateLimited: this.cacheStats.rateLimited,
+      hitRate: `${hitRate}%`,
+      queueSize: this.requestQueue.length,
+      cacheSizes: {
+        holders: this.holderCache.size,
+        accountInfo: this.accountInfoCache.size,
+      },
+    }, '📊 Helius API cache statistics (5 min window)');
+
+    // Reset stats for next window
+    this.cacheStats = { hits: 0, misses: 0, rateLimited: 0 };
   }
 
   async getTokenHolders(mintAddress: string): Promise<{
     total: number;
     topHolders: { address: string; amount: number; percentage: number }[];
   }> {
-    try {
-      // Use Helius RPC endpoint with DAS API method
-      // The RPC URL should already include api-key from constructor
+    // Check cache first
+    const cached = this.holderCache.get(mintAddress);
+    if (cached && cached.expiry > Date.now()) {
+      this.cacheStats.hits++;
+      return cached.data;
+    }
+
+    // Check for in-flight request (deduplication)
+    const cacheKey = `holders:${mintAddress}`;
+    const inflight = this.inflightRequests.get(cacheKey);
+    if (inflight) {
+      this.cacheStats.hits++;
+      return inflight;
+    }
+
+    this.cacheStats.misses++;
+
+    // Create the request promise
+    const requestPromise = this.executeWithRateLimit(async () => {
       const response = await this.client.post('', {
         jsonrpc: '2.0',
         id: 'holders-request',
@@ -72,10 +244,10 @@ class HeliusClient {
           limit: 100,
         },
       });
-      
+
       const accounts = response.data.result?.token_accounts || [];
       const totalSupply = accounts.reduce((sum: number, acc: any) => sum + (acc.amount || 0), 0);
-      
+
       // Sort by amount and get top 10
       const sorted = accounts.sort((a: any, b: any) => (b.amount || 0) - (a.amount || 0));
       const top10 = sorted.slice(0, 10).map((acc: any) => ({
@@ -83,17 +255,35 @@ class HeliusClient {
         amount: acc.amount || 0,
         percentage: totalSupply > 0 ? ((acc.amount || 0) / totalSupply) * 100 : 0,
       }));
-      
+
       return {
         total: accounts.length,
         topHolders: top10,
       };
+    });
+
+    // Track in-flight request
+    this.inflightRequests.set(cacheKey, requestPromise);
+
+    try {
+      const result = await requestPromise;
+
+      // Cache the result
+      this.holderCache.set(mintAddress, {
+        data: result,
+        expiry: Date.now() + this.HOLDER_CACHE_TTL_MS,
+      });
+
+      return result;
     } catch (error: any) {
       const status = error?.response?.status;
       const errorData = error?.response?.data;
       const message = errorData?.error?.message || errorData?.error || error?.message;
       logger.error(`Failed to get token holders from Helius: status=${status} error=${message} url=${this.rpcUrl.replace(/api-key=([^&]+)/, 'api-key=***')}`);
       throw error;
+    } finally {
+      // Clear in-flight tracking
+      this.inflightRequests.delete(cacheKey);
     }
   }
   
@@ -130,7 +320,25 @@ class HeliusClient {
   }
   
   async getAccountInfo(address: string): Promise<any> {
-    try {
+    // Check cache first
+    const cached = this.accountInfoCache.get(address);
+    if (cached && cached.expiry > Date.now()) {
+      this.cacheStats.hits++;
+      return cached.data;
+    }
+
+    // Check for in-flight request (deduplication)
+    const cacheKey = `account:${address}`;
+    const inflight = this.inflightRequests.get(cacheKey);
+    if (inflight) {
+      this.cacheStats.hits++;
+      return inflight;
+    }
+
+    this.cacheStats.misses++;
+
+    // Create the request promise with rate limiting
+    const requestPromise = this.executeWithRateLimit(async () => {
       const response = await this.client.post('', {
         jsonrpc: '2.0',
         id: 'account-info',
@@ -139,9 +347,27 @@ class HeliusClient {
       });
 
       return response.data.result?.value;
+    });
+
+    // Track in-flight request
+    this.inflightRequests.set(cacheKey, requestPromise);
+
+    try {
+      const result = await requestPromise;
+
+      // Cache the result (even null results to avoid repeated lookups)
+      this.accountInfoCache.set(address, {
+        data: result,
+        expiry: Date.now() + this.ACCOUNT_INFO_CACHE_TTL_MS,
+      });
+
+      return result;
     } catch (error) {
       logger.error({ error, address }, 'Failed to get account info');
       return null;
+    } finally {
+      // Clear in-flight tracking
+      this.inflightRequests.delete(cacheKey);
     }
   }
 

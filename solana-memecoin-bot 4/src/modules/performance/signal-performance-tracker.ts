@@ -458,6 +458,50 @@ export class SignalPerformanceTracker {
   }
 
   /**
+   * Get recent signals with their current performance
+   */
+  async getRecentSignals(limit: number = 5): Promise<SignalPerformance[]> {
+    try {
+      const result = await pool.query(`
+        SELECT
+          signal_id, token_address, token_ticker, signal_type,
+          entry_price, momentum_score, onchain_score, signal_strength,
+          return_1h, return_4h, return_24h, max_return, min_return,
+          hit_stop_loss, hit_take_profit, final_return, final_outcome,
+          signal_time, last_update
+        FROM signal_performance
+        ORDER BY signal_time DESC
+        LIMIT $1
+      `, [limit]);
+
+      return result.rows.map((row: any) => ({
+        signalId: row.signal_id,
+        tokenAddress: row.token_address,
+        tokenTicker: row.token_ticker,
+        signalType: row.signal_type,
+        entryPrice: parseFloat(row.entry_price) || 0,
+        momentumScore: parseFloat(row.momentum_score) || 0,
+        onChainScore: parseFloat(row.onchain_score) || 0,
+        signalStrength: row.signal_strength,
+        return1h: row.return_1h ? parseFloat(row.return_1h) : null,
+        return4h: row.return_4h ? parseFloat(row.return_4h) : null,
+        return24h: row.return_24h ? parseFloat(row.return_24h) : null,
+        maxReturn: parseFloat(row.max_return) || 0,
+        minReturn: parseFloat(row.min_return) || 0,
+        hitStopLoss: row.hit_stop_loss || false,
+        hitTakeProfit: row.hit_take_profit || false,
+        finalReturn: parseFloat(row.final_return) || 0,
+        outcome: row.final_outcome || 'PENDING',
+        signalTime: new Date(row.signal_time),
+        lastUpdate: new Date(row.last_update),
+      }));
+    } catch (error) {
+      logger.error({ error }, 'Failed to get recent signals');
+      return [];
+    }
+  }
+
+  /**
    * Get performance statistics for a time period
    */
   async getPerformanceStats(hours: number = 168): Promise<PerformanceStats> {

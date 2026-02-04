@@ -10,6 +10,7 @@ import { getTokenMetrics, dexScreenerClient, birdeyeClient, jupiterClient } from
 import { tokenSafetyChecker } from '../safety/token-safety-checker.js';
 import { matureTokenScorer } from './mature-token-scorer.js';
 import { matureTokenTelegram } from './telegram-formatter.js';
+import { signalPerformanceTracker } from '../performance/index.js';
 import {
   MatureTokenSignal,
   MatureTokenExitSignal,
@@ -73,6 +74,13 @@ export class MatureTokenScanner {
       safety: 0,
     },
     tiers: { RISING: 0, EMERGING: 0, GRADUATED: 0, ESTABLISHED: 0 },
+    sourceStats: {
+      birdeyeMcap: 0,
+      jupiter: 0,
+      birdeyeTrending: 0,
+      birdeyeMeme: 0,
+      dexscreener: 0,
+    },
     lastScanTime: '',
   };
 
@@ -267,6 +275,15 @@ export class MatureTokenScanner {
 
       const allAddresses = Array.from(seenAddresses);
       fetchedCount = allAddresses.length;
+
+      // Track source stats for /sources command
+      this.funnelStats.sourceStats = {
+        birdeyeMcap: birdeyeMcapTokens.length,
+        jupiter: jupiterVerified.length,
+        birdeyeTrending: birdeyeTrending.length,
+        birdeyeMeme: birdeyeMeme.length,
+        dexscreener: dexTrending.length,
+      };
 
       logger.info(`📊 FUNNEL: Discovery sources - Birdeye mcap: ${birdeyeMcapTokens.length}, Jupiter: ${jupiterVerified.length}, Birdeye trend: ${birdeyeTrending.length}, Birdeye meme: ${birdeyeMeme.length}, DexScreener: ${dexTrending.length}, Total: ${fetchedCount}`);
 
@@ -515,6 +532,32 @@ export class MatureTokenScanner {
 
     // Log to database
     await this.logSignal(signal);
+
+    // Record in performance tracker for outcome tracking (use ONCHAIN type for mature tokens)
+    try {
+      await signalPerformanceTracker.recordSignal(
+        signal.id,
+        signal.tokenAddress,
+        signal.tokenTicker,
+        'ONCHAIN', // Mature tokens are discovered via on-chain analysis
+        signal.currentPrice,
+        signal.marketCap,
+        signal.score.accumulationScore || 0,
+        signal.score.compositeScore || 0,
+        signal.score.contractSafetyScore || 0,
+        0, // bundleRiskScore not applicable for mature tokens
+        signal.confidence === 'HIGH' ? 'STRONG' : signal.confidence === 'MEDIUM' ? 'MODERATE' : 'WEAK',
+        {
+          liquidity: signal.liquidity || 0,
+          tokenAge: (signal.tokenAgeHours || 0) * 60,
+          holderCount: signal.holderCount || 0,
+          top10Concentration: signal.top10Concentration || 0,
+          signalTrack: 'PROVEN_RUNNER',
+        }
+      );
+    } catch (perfError) {
+      logger.error({ error: perfError }, 'Failed to record signal in performance tracker');
+    }
 
     logger.info({
       tokenAddress: metrics.address,

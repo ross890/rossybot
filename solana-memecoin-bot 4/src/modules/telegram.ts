@@ -443,20 +443,20 @@ export class TelegramAlertBot {
     if (!this.bot) return;
 
     // Set up Telegram command menu (appears in chat)
-    // Updated for Mature Token Strategy
+    // Updated for Mature Token Strategy V2
     const SIGNAL_BOT_COMMANDS: TelegramBot.BotCommand[] = [
       { command: 'status', description: 'Bot status & strategy info' },
-      { command: 'funnel', description: 'View token filtering funnel stats' },
-      { command: 'tiers', description: 'View tier requirements (RISING/EMERGING/etc)' },
+      { command: 'funnel', description: 'Token filtering funnel stats' },
+      { command: 'sources', description: 'Discovery source health' },
+      { command: 'recent', description: 'Recent signals & performance' },
+      { command: 'tiers', description: 'Tier requirements (RISING/EMERGING/etc)' },
       { command: 'performance', description: 'Signal performance & win rate' },
-      { command: 'safety', description: 'Run safety check: /safety <token>' },
+      { command: 'report', description: 'Full AI performance analysis' },
+      { command: 'safety', description: 'Safety check: /safety <token>' },
       { command: 'thresholds', description: 'View scoring thresholds' },
-      { command: 'adjust_thresholds', description: 'Adjust scoring thresholds' },
-      { command: 'optimize', description: 'Run threshold optimization' },
       { command: 'addwallet', description: 'Track wallet: /addwallet <address>' },
       { command: 'wallets', description: 'List tracked wallets' },
       { command: 'learning', description: 'ML prediction info' },
-      { command: 'test', description: 'Send a test signal' },
       { command: 'help', description: 'Show all commands' },
     ];
 
@@ -470,24 +470,17 @@ export class TelegramAlertBot {
     this.bot.onText(/\/start/, async (msg) => {
       const chatId = msg.chat.id;
       await this.bot!.sendMessage(chatId,
-        '*🤖 rossybot - Mature Token Strategy*\n\n' +
-        'Scanning for established tokens with:\n' +
-        '• 🚀 RISING: $1-5M mcap, 1000+ holders, 3+ days\n' +
-        '• 🌱 EMERGING: $8-20M mcap, 21+ days\n' +
-        '• 🎓 GRADUATED: $20-50M mcap, 21+ days\n' +
-        '• 🏛️ ESTABLISHED: $50-150M mcap, 21+ days\n\n' +
-        '*Strategy Commands:*\n' +
-        '/status - Bot status & active strategy\n' +
-        '/funnel - Token filtering funnel stats\n' +
-        '/tiers - View tier requirements\n' +
-        '/performance - Signal performance report\n\n' +
-        '*Analysis Commands:*\n' +
-        '/safety <token> - Run safety check\n' +
-        '/thresholds - View scoring thresholds\n' +
-        '/optimize - Run optimization analysis\n\n' +
-        '*Wallet Tracking:*\n' +
-        '/addwallet <address> - Track a wallet\n' +
-        '/wallets - List tracked wallets\n\n' +
+        '*🤖 rossybot V2 - Mature Token Strategy*\n\n' +
+        'Scanning for established tokens:\n' +
+        '• 🚀 RISING: $500K-$8M, 500+ holders, 3+ days\n' +
+        '• 🌱 EMERGING: $8-20M, 21+ days\n' +
+        '• 🎓 GRADUATED: $20-50M, 21+ days\n' +
+        '• 🏛️ ESTABLISHED: $50-150M, 21+ days\n\n' +
+        '*Quick Commands:*\n' +
+        '/status - Bot status\n' +
+        '/funnel - Filtering funnel\n' +
+        '/sources - API health\n' +
+        '/performance - Win rates\n\n' +
         '/help - Show all commands',
         { parse_mode: 'Markdown' }
       );
@@ -512,36 +505,30 @@ export class TelegramAlertBot {
     this.bot.onText(/\/help/, async (msg) => {
       const chatId = msg.chat.id;
       await this.bot!.sendMessage(chatId,
-        '*🤖 rossybot Help - Mature Token Strategy*\n\n' +
+        '*🤖 rossybot Help - V2 Mature Token Strategy*\n\n' +
         '*Strategy Info:*\n' +
-        '/status - Bot status & active strategy config\n' +
-        '/funnel - Token filtering funnel breakdown\n' +
-        '/tiers - View tier requirements & allocations\n' +
-        '/test - Send a test signal\n\n' +
+        '/status - Bot status & active strategy\n' +
+        '/funnel - Token filtering funnel stats\n' +
+        '/sources - Discovery source health\n' +
+        '/tiers - Tier requirements\n\n' +
         '*Performance:*\n' +
-        '/performance - Signal performance & win rates\n' +
-        '/report - Full AI analysis with recommendations\n' +
+        '/recent - Recent signals & returns\n' +
+        '/performance - Signal win rates\n' +
+        '/report - Full AI analysis\n' +
         '/ask <question> - Ask about performance\n\n' +
         '*Analysis:*\n' +
-        '/safety <token> - Run safety check on token\n' +
-        '/thresholds - View scoring thresholds\n' +
-        '/adjust\\_thresholds - Manually adjust thresholds\n' +
-        '/optimize - Run optimization analysis\n' +
-        '/reset\\_thresholds - Reset to defaults\n\n' +
+        '/safety <token> - Safety check on token\n' +
+        '/thresholds - View thresholds\n' +
+        '/adjust\\_thresholds - Adjust thresholds\n' +
+        '/optimize - Run optimization\n' +
+        '/reset\\_thresholds - Reset defaults\n\n' +
         '*Wallet Tracking:*\n' +
-        '/addwallet <addr> [label] - Track a wallet\n' +
-        '/wallets - List tracked wallets\n' +
+        '/addwallet <addr> [label] - Track wallet\n' +
+        '/wallets - List wallets\n' +
         '/removewallet <addr> - Remove wallet\n\n' +
         '*ML & Learning:*\n' +
-        '/learning - ML prediction system info\n' +
-        '/learningmode - Check learning mode status\n\n' +
-        '*Signal Format:*\n' +
-        'Mature token signals include:\n' +
-        '• Tier classification (🚀🌱🎓🏛️)\n' +
-        '• Composite score & breakdown\n' +
-        '• Accumulation/breakout patterns\n' +
-        '• Smart money activity\n' +
-        '• Risk level & stop loss\n\n' +
+        '/learning - ML prediction info\n' +
+        '/learningmode - Learning mode status\n\n' +
         'DYOR. Not financial advice.',
         { parse_mode: 'Markdown' }
       );
@@ -583,6 +570,67 @@ export class TelegramAlertBot {
         await this.bot!.sendMessage(chatId,
           '*📊 Token Filtering Funnel*\n\n' +
           'No funnel data available yet.\n' +
+          'Wait for the next scan cycle (every 5 minutes).',
+          { parse_mode: 'Markdown' }
+        );
+      }
+    });
+
+    // /sources command - Show discovery source health status
+    this.bot.onText(/\/sources/, async (msg) => {
+      const chatId = msg.chat.id;
+      try {
+        // Get funnel stats which includes source counts
+        const { matureTokenScanner } = await import('./mature-token/index.js');
+        const stats = matureTokenScanner.getFunnelStats();
+        const sourceStats = stats.sourceStats as Record<string, number> || {};
+
+        let message = '*🔌 Discovery Source Health*\n\n';
+
+        // Source status with counts
+        const sources = [
+          { name: 'Jupiter Verified', key: 'jupiter', expected: 100 },
+          { name: 'Birdeye Trending', key: 'birdeyeTrending', expected: 20 },
+          { name: 'Birdeye Meme', key: 'birdeyeMeme', expected: 100 },
+          { name: 'DexScreener', key: 'dexscreener', expected: 40 },
+          { name: 'Birdeye Mcap', key: 'birdeyeMcap', expected: 50 },
+        ];
+
+        let totalTokens = 0;
+        let workingSources = 0;
+
+        for (const source of sources) {
+          const count = sourceStats[source.key] || 0;
+          totalTokens += count;
+          const status = count > 0 ? '✅' : '❌';
+          if (count > 0) workingSources++;
+          const pct = source.expected > 0 ? Math.round((count / source.expected) * 100) : 0;
+          message += `${status} *${source.name}*: ${count} tokens`;
+          if (count > 0 && count < source.expected) {
+            message += ` (${pct}% of expected)`;
+          }
+          message += '\n';
+        }
+
+        message += `\n*Summary:*\n`;
+        message += `• Working sources: ${workingSources}/${sources.length}\n`;
+        message += `• Total tokens discovered: ${totalTokens}\n`;
+        message += `• Last scan: ${stats.lastScanTime || 'Not yet'}\n\n`;
+
+        // Health assessment
+        if (workingSources >= 4) {
+          message += '✅ Discovery health: GOOD';
+        } else if (workingSources >= 2) {
+          message += '⚠️ Discovery health: DEGRADED';
+        } else {
+          message += '❌ Discovery health: CRITICAL';
+        }
+
+        await this.bot!.sendMessage(chatId, message, { parse_mode: 'Markdown' });
+      } catch (error) {
+        await this.bot!.sendMessage(chatId,
+          '*🔌 Discovery Source Health*\n\n' +
+          'No source data available yet.\n' +
           'Wait for the next scan cycle (every 5 minutes).',
           { parse_mode: 'Markdown' }
         );
@@ -933,6 +981,53 @@ export class TelegramAlertBot {
         const errorMessage = error instanceof Error ? error.message : 'Unknown error';
         logger.error({ error, chatId }, 'Failed to generate AI report');
         await this.bot!.sendMessage(chatId, `Failed to generate report: ${errorMessage}`);
+      }
+    });
+
+    // /recent command - Show recent signals with current performance
+    this.bot.onText(/\/recent(?:\s+(\d+))?/, async (msg, match) => {
+      const chatId = msg.chat.id;
+      const limit = match?.[1] ? Math.min(parseInt(match[1]), 10) : 5;
+
+      try {
+        const recentSignals = await signalPerformanceTracker.getRecentSignals(limit);
+
+        if (recentSignals.length === 0) {
+          await this.bot!.sendMessage(chatId,
+            '*📊 Recent Signals*\n\nNo signals recorded yet.',
+            { parse_mode: 'Markdown' }
+          );
+          return;
+        }
+
+        let message = '*📊 Recent Signals*\n\n';
+
+        for (const signal of recentSignals) {
+          const timeSince = Math.round((Date.now() - new Date(signal.signalTime).getTime()) / (1000 * 60 * 60));
+          const timeStr = timeSince < 24 ? `${timeSince}h ago` : `${Math.round(timeSince / 24)}d ago`;
+
+          // Outcome indicator
+          let outcomeEmoji = '⏳'; // Pending
+          if (signal.outcome === 'WIN') outcomeEmoji = '✅';
+          else if (signal.outcome === 'LOSS') outcomeEmoji = '❌';
+
+          // Return indicator
+          const returnPct = signal.finalReturn || 0;
+          const returnStr = returnPct >= 0 ? `+${returnPct.toFixed(0)}%` : `${returnPct.toFixed(0)}%`;
+          const returnEmoji = returnPct >= 100 ? '🚀' : returnPct >= 50 ? '📈' : returnPct >= 0 ? '➡️' : returnPct > -20 ? '📉' : '💀';
+
+          message += `${outcomeEmoji} *$${this.escapeMarkdown(signal.tokenTicker)}*\n`;
+          message += `   ${returnEmoji} ${returnStr} | ${timeStr}\n`;
+          message += `   Score: ${signal.momentumScore}/${signal.onChainScore}\n\n`;
+        }
+
+        message += `_Use /recent 10 to see more_`;
+
+        await this.bot!.sendMessage(chatId, message, { parse_mode: 'Markdown' });
+      } catch (error) {
+        const errorMessage = error instanceof Error ? error.message : 'Unknown error';
+        logger.error({ error, chatId }, 'Failed to get recent signals');
+        await this.bot!.sendMessage(chatId, `Failed to get recent signals: ${errorMessage}`);
       }
     });
 

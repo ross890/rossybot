@@ -153,7 +153,15 @@ export class TelegramAlertBot {
   constructor() {
     this.chatId = appConfig.telegramChatId;
   }
-  
+
+  /**
+   * Get the underlying Telegram bot instance
+   * Used to share bot with other modules like mature token formatter
+   */
+  getBot(): TelegramBot | null {
+    return this.bot;
+  }
+
   /**
    * Initialize the bot
    */

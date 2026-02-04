@@ -7,7 +7,7 @@ import { logger } from './utils/logger.js';
 import { pool, SCHEMA_SQL } from './utils/database.js';
 import { signalGenerator } from './modules/signal-generator.js';
 import { telegramBot } from './modules/telegram.js';
-import { matureTokenScanner } from './modules/mature-token/index.js';
+import { matureTokenScanner, matureTokenTelegram } from './modules/mature-token/index.js';
 import { dailyAutoOptimizer, thresholdOptimizer } from './modules/performance/index.js';
 
 // ============ STARTUP ============
@@ -140,6 +140,13 @@ async function main(): Promise<void> {
 
   // Initialize Telegram bot (must be done early for commands to work)
   await telegramBot.initialize();
+
+  // Share bot instance with mature token telegram formatter
+  const botInstance = telegramBot.getBot();
+  if (botInstance) {
+    matureTokenTelegram.initialize(botInstance);
+    logger.info('Mature token telegram formatter initialized');
+  }
 
   // Initialize signal generators based on config
   if (appConfig.trading.enableEarlyStrategy) {

@@ -6,7 +6,7 @@
 
 import { logger } from '../../utils/logger.js';
 import { Database, pool } from '../../utils/database.js';
-import { getTokenMetrics, dexScreenerClient, birdeyeClient } from '../onchain.js';
+import { getTokenMetrics, dexScreenerClient, birdeyeClient, jupiterClient } from '../onchain.js';
 import { tokenSafetyChecker } from '../safety/token-safety-checker.js';
 import { matureTokenScorer } from './mature-token-scorer.js';
 import { matureTokenTelegram } from './telegram-formatter.js';
@@ -237,13 +237,23 @@ export class MatureTokenScanner {
         seenAddresses.add(addr);
       }
 
-      // Source 2: Birdeye trending tokens (may include larger caps we can filter)
+      // Source 2: Jupiter verified tokens (high quality, vetted tokens)
+      const jupiterVerified = await jupiterClient.getVerifiedTokens(
+        this.eligibility.minMarketCap,
+        this.eligibility.maxMarketCap,
+        100
+      );
+      for (const addr of jupiterVerified) {
+        seenAddresses.add(addr);
+      }
+
+      // Source 3: Birdeye trending tokens (may include larger caps we can filter)
       const birdeyeTrending = await birdeyeClient.getTrendingTokens(50);
       for (const addr of birdeyeTrending) {
         seenAddresses.add(addr);
       }
 
-      // Source 3: DexScreener trending (fallback, includes boosts)
+      // Source 4: DexScreener trending (fallback, includes boosts)
       const dexTrending = await dexScreenerClient.getTrendingSolanaTokens(50);
       for (const addr of dexTrending) {
         seenAddresses.add(addr);
@@ -252,7 +262,7 @@ export class MatureTokenScanner {
       const allAddresses = Array.from(seenAddresses);
       fetchedCount = allAddresses.length;
 
-      logger.info(`📊 FUNNEL: Discovery sources - Birdeye mcap: ${birdeyeMcapTokens.length}, Birdeye trending: ${birdeyeTrending.length}, DexScreener: ${dexTrending.length}, Total unique: ${fetchedCount}`);
+      logger.info(`📊 FUNNEL: Discovery sources - Birdeye mcap: ${birdeyeMcapTokens.length}, Jupiter verified: ${jupiterVerified.length}, Birdeye trending: ${birdeyeTrending.length}, DexScreener: ${dexTrending.length}, Total unique: ${fetchedCount}`);
 
       // Get metrics for each and filter by age
       const minAgeMinutes = this.eligibility.minTokenAgeHours * 60;
@@ -321,6 +331,8 @@ export class MatureTokenScanner {
 
     // Track rejected market caps for logging
     const rejectedMcaps: string[] = [];
+    // Track rejected concentrations for logging
+    const rejectedConcentrations: string[] = [];
 
     for (const token of tokens) {
       // Market cap check (must be in one of our tiers)
@@ -374,6 +386,7 @@ export class MatureTokenScanner {
       // Concentration check
       if (token.top10Concentration > this.eligibility.maxTop10Concentration) {
         rejections.concentrationTooHigh++;
+        rejectedConcentrations.push(`${token.ticker}=${token.top10Concentration.toFixed(0)}%`);
         continue;
       }
 
@@ -402,6 +415,11 @@ export class MatureTokenScanner {
     // Log rejected market caps if any (to debug why tokens aren't matching tiers)
     if (rejectedMcaps.length > 0) {
       logger.info(`📊 FUNNEL: Rejected mcaps (range $0.5M-$150M): ${rejectedMcaps.join(', ')}`);
+    }
+
+    // Log rejected concentrations if any (to debug top 10 holder filter)
+    if (rejectedConcentrations.length > 0) {
+      logger.info(`📊 FUNNEL: Rejected concentrations (max ${this.eligibility.maxTop10Concentration}%): ${rejectedConcentrations.join(', ')}`);
     }
 
     return eligible;

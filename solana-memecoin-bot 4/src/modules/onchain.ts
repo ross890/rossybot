@@ -963,9 +963,9 @@ class BirdeyeClient {
     limit = 100
   ): Promise<string[]> {
     try {
-      // Birdeye's tokenlist endpoint supports sorting and filtering
-      // Sort by volume to get active tokens in the market cap range
-      const response = await this.client.get('/defi/tokenlist', {
+      // Use Birdeye v3 token list endpoint with sorting and filtering
+      // Sort by volume to get the most active tokens
+      const response = await this.client.get('/defi/v3/token/list', {
         params: {
           sort_by: 'v24hUSD',      // Sort by 24h volume (most active)
           sort_type: 'desc',
@@ -975,12 +975,13 @@ class BirdeyeClient {
         },
       });
 
-      const tokens = response.data?.data?.tokens || [];
+      // V3 API may have different response structure - try multiple paths
+      const tokens = response.data?.data?.items || response.data?.data?.tokens || response.data?.data || [];
       const addresses: string[] = [];
 
       // Filter by market cap range
       for (const token of tokens) {
-        const mcap = token.mc || token.marketCap || 0;
+        const mcap = token.mc || token.marketCap || token.fdv || 0;
         if (mcap >= minMarketCap && mcap <= maxMarketCap && token.address) {
           addresses.push(token.address);
         }
@@ -995,7 +996,13 @@ class BirdeyeClient {
 
       return addresses;
     } catch (error: any) {
-      logger.error({ error: error?.message }, 'Failed to get tokens by market cap from Birdeye');
+      const status = error?.response?.status;
+      const responseData = error?.response?.data;
+      logger.error({
+        error: error?.message,
+        status,
+        responseData: JSON.stringify(responseData)?.slice(0, 200),
+      }, 'Failed to get tokens by market cap from Birdeye');
       return [];
     }
   }
@@ -1006,7 +1013,8 @@ class BirdeyeClient {
    */
   async getTrendingTokens(limit = 50): Promise<string[]> {
     try {
-      const response = await this.client.get('/defi/token_trending', {
+      // Use Birdeye v3 trending endpoint
+      const response = await this.client.get('/defi/v3/token/trending', {
         params: {
           sort_by: 'rank',
           sort_type: 'asc',
@@ -1015,7 +1023,8 @@ class BirdeyeClient {
         },
       });
 
-      const tokens = response.data?.data?.tokens || response.data?.data || [];
+      // V3 API may have different response structure
+      const tokens = response.data?.data?.items || response.data?.data?.tokens || response.data?.data || [];
       const addresses = tokens
         .filter((t: any) => t.address)
         .map((t: any) => t.address);
@@ -1023,7 +1032,13 @@ class BirdeyeClient {
       logger.info({ count: addresses.length }, 'Fetched trending tokens from Birdeye');
       return addresses;
     } catch (error: any) {
-      logger.debug({ error: error?.message }, 'Failed to get trending tokens from Birdeye');
+      const status = error?.response?.status;
+      const responseData = error?.response?.data;
+      logger.warn({
+        error: error?.message,
+        status,
+        responseData: JSON.stringify(responseData)?.slice(0, 200),
+      }, 'Failed to get trending tokens from Birdeye');
       return [];
     }
   }

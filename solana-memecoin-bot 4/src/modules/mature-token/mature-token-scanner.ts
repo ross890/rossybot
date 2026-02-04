@@ -331,6 +331,8 @@ export class MatureTokenScanner {
 
     // Track rejected market caps for logging
     const rejectedMcaps: string[] = [];
+    // Track rejected concentrations for logging
+    const rejectedConcentrations: string[] = [];
 
     for (const token of tokens) {
       // Market cap check (must be in one of our tiers)
@@ -384,6 +386,7 @@ export class MatureTokenScanner {
       // Concentration check
       if (token.top10Concentration > this.eligibility.maxTop10Concentration) {
         rejections.concentrationTooHigh++;
+        rejectedConcentrations.push(`${token.ticker}=${token.top10Concentration.toFixed(0)}%`);
         continue;
       }
 
@@ -412,6 +415,11 @@ export class MatureTokenScanner {
     // Log rejected market caps if any (to debug why tokens aren't matching tiers)
     if (rejectedMcaps.length > 0) {
       logger.info(`📊 FUNNEL: Rejected mcaps (range $0.5M-$150M): ${rejectedMcaps.join(', ')}`);
+    }
+
+    // Log rejected concentrations if any (to debug top 10 holder filter)
+    if (rejectedConcentrations.length > 0) {
+      logger.info(`📊 FUNNEL: Rejected concentrations (max ${this.eligibility.maxTop10Concentration}%): ${rejectedConcentrations.join(', ')}`);
     }
 
     return eligible;

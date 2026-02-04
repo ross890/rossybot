@@ -17,6 +17,7 @@ import { alphaWalletManager } from './alpha/index.js';
 import { bondingCurveMonitor } from './pumpfun/bonding-monitor.js';
 import { dailyDigestGenerator } from './telegram/daily-digest.js';
 import { dailyReportGenerator, signalPerformanceTracker, thresholdOptimizer, winPredictor, aiQueryInterface } from './performance/index.js';
+import { volumeAnomalyScanner } from './discovery/index.js';
 import {
   BuySignal,
   KolWalletActivity,
@@ -202,6 +203,13 @@ export class TelegramAlertBot {
     try {
       await signalPerformanceTracker.initialize();
       await thresholdOptimizer.loadThresholds();
+
+      // Set up milestone notification callback (2x, stop-loss alerts)
+      signalPerformanceTracker.setNotifyCallback(async (message: string) => {
+        if (this.bot && this.chatId) {
+          await this.bot.sendMessage(this.chatId, message, { parse_mode: 'Markdown' });
+        }
+      });
 
       // Set up daily report generator with callback to send messages
       dailyReportGenerator.initialize(async (message: string) => {
@@ -443,20 +451,20 @@ export class TelegramAlertBot {
     if (!this.bot) return;
 
     // Set up Telegram command menu (appears in chat)
-    // Updated for Mature Token Strategy V2
+    // Updated for Mature Token Strategy V2 with new features
     const SIGNAL_BOT_COMMANDS: TelegramBot.BotCommand[] = [
       { command: 'status', description: 'Bot status & strategy info' },
+      { command: 'stats', description: 'Historical performance dashboard' },
+      { command: 'recent', description: 'Recent signals & performance' },
+      { command: 'tierperf', description: 'Win rate by tier' },
       { command: 'funnel', description: 'Token filtering funnel stats' },
       { command: 'sources', description: 'Discovery source health' },
-      { command: 'recent', description: 'Recent signals & performance' },
-      { command: 'tiers', description: 'Tier requirements (RISING/EMERGING/etc)' },
-      { command: 'performance', description: 'Signal performance & win rate' },
-      { command: 'report', description: 'Full AI performance analysis' },
+      { command: 'volumespikes', description: 'Volume anomaly scanner' },
+      { command: 'tiers', description: 'Tier requirements' },
       { command: 'safety', description: 'Safety check: /safety <token>' },
       { command: 'thresholds', description: 'View scoring thresholds' },
       { command: 'addwallet', description: 'Track wallet: /addwallet <address>' },
       { command: 'wallets', description: 'List tracked wallets' },
-      { command: 'learning', description: 'ML prediction info' },
       { command: 'help', description: 'Show all commands' },
     ];
 
@@ -505,30 +513,29 @@ export class TelegramAlertBot {
     this.bot.onText(/\/help/, async (msg) => {
       const chatId = msg.chat.id;
       await this.bot!.sendMessage(chatId,
-        '*🤖 rossybot Help - V2 Mature Token Strategy*\n\n' +
-        '*Strategy Info:*\n' +
-        '/status - Bot status & active strategy\n' +
-        '/funnel - Token filtering funnel stats\n' +
-        '/sources - Discovery source health\n' +
-        '/tiers - Tier requirements\n\n' +
+        '*🤖 rossybot V2 Help*\n\n' +
         '*Performance:*\n' +
-        '/recent - Recent signals & returns\n' +
-        '/performance - Signal win rates\n' +
-        '/report - Full AI analysis\n' +
-        '/ask <question> - Ask about performance\n\n' +
+        '/stats - Historical dashboard\n' +
+        '/recent - Recent signals\n' +
+        '/tierperf - Win rate by tier\n' +
+        '/performance - Signal stats\n' +
+        '/report - AI analysis\n\n' +
+        '*Discovery:*\n' +
+        '/funnel - Filtering funnel\n' +
+        '/sources - API health\n' +
+        '/volumespikes - Volume anomalies\n' +
+        '/tiers - Tier requirements\n\n' +
         '*Analysis:*\n' +
-        '/safety <token> - Safety check on token\n' +
+        '/safety <token> - Safety check\n' +
         '/thresholds - View thresholds\n' +
-        '/adjust\\_thresholds - Adjust thresholds\n' +
-        '/optimize - Run optimization\n' +
-        '/reset\\_thresholds - Reset defaults\n\n' +
-        '*Wallet Tracking:*\n' +
-        '/addwallet <addr> [label] - Track wallet\n' +
+        '/optimize - Run optimization\n\n' +
+        '*Wallets:*\n' +
+        '/addwallet <addr> - Track wallet\n' +
         '/wallets - List wallets\n' +
-        '/removewallet <addr> - Remove wallet\n\n' +
-        '*ML & Learning:*\n' +
-        '/learning - ML prediction info\n' +
-        '/learningmode - Learning mode status\n\n' +
+        '/removewallet <addr> - Remove\n\n' +
+        '*ML:*\n' +
+        '/learning - Prediction info\n\n' +
+        '_Auto-alerts: 2x, 3x, stop-loss_\n' +
         'DYOR. Not financial advice.',
         { parse_mode: 'Markdown' }
       );
@@ -1028,6 +1035,173 @@ export class TelegramAlertBot {
         const errorMessage = error instanceof Error ? error.message : 'Unknown error';
         logger.error({ error, chatId }, 'Failed to get recent signals');
         await this.bot!.sendMessage(chatId, `Failed to get recent signals: ${errorMessage}`);
+      }
+    });
+
+    // /tierperf command - Show performance breakdown by tier
+    this.bot.onText(/\/tierperf(?:\s+(\d+))?/, async (msg, match) => {
+      const chatId = msg.chat.id;
+      const days = match?.[1] ? parseInt(match[1]) : 7;
+      const hours = days * 24;
+
+      try {
+        const tierStats = await signalPerformanceTracker.getTierPerformance(hours);
+
+        let message = `*📊 Performance by Tier (${days}d)*\n\n`;
+
+        const tiers = [
+          { key: 'RISING', emoji: '🚀', range: '$500K-$8M' },
+          { key: 'EMERGING', emoji: '🌱', range: '$8M-$20M' },
+          { key: 'GRADUATED', emoji: '🎓', range: '$20M-$50M' },
+          { key: 'ESTABLISHED', emoji: '🏛️', range: '$50M-$150M' },
+        ];
+
+        let totalSignals = 0;
+        let totalWins = 0;
+
+        for (const tier of tiers) {
+          const stats = tierStats[tier.key as keyof typeof tierStats];
+          totalSignals += stats.count;
+          totalWins += stats.wins;
+
+          if (stats.count > 0) {
+            const winRateEmoji = stats.winRate >= 60 ? '✅' : stats.winRate >= 40 ? '⚠️' : '❌';
+            message += `${tier.emoji} *${tier.key}* (${tier.range})\n`;
+            message += `   ${winRateEmoji} Win Rate: ${stats.winRate.toFixed(0)}% (${stats.wins}W/${stats.losses}L)\n`;
+            message += `   Avg Return: ${stats.avgReturn >= 0 ? '+' : ''}${stats.avgReturn.toFixed(0)}%\n`;
+            message += `   Signals: ${stats.count}\n\n`;
+          } else {
+            message += `${tier.emoji} *${tier.key}* (${tier.range})\n`;
+            message += `   _No completed signals_\n\n`;
+          }
+        }
+
+        // Summary
+        const overallWinRate = totalSignals > 0 ? (totalWins / totalSignals) * 100 : 0;
+        message += `*Overall:* ${totalSignals} signals, ${overallWinRate.toFixed(0)}% win rate\n\n`;
+        message += `_Use /tierperf 30 for 30-day stats_`;
+
+        await this.bot!.sendMessage(chatId, message, { parse_mode: 'Markdown' });
+      } catch (error) {
+        const errorMessage = error instanceof Error ? error.message : 'Unknown error';
+        logger.error({ error, chatId }, 'Failed to get tier performance');
+        await this.bot!.sendMessage(chatId, `Failed to get tier performance: ${errorMessage}`);
+      }
+    });
+
+    // /volumespikes command - Show tokens with unusual volume activity
+    this.bot.onText(/\/volumespikes/, async (msg) => {
+      const chatId = msg.chat.id;
+
+      try {
+        await this.bot!.sendMessage(chatId, 'Scanning for volume anomalies...', { parse_mode: 'Markdown' });
+
+        const anomalies = await volumeAnomalyScanner.getAnomalies();
+
+        if (anomalies.length === 0) {
+          await this.bot!.sendMessage(chatId,
+            '*📊 Volume Spike Scanner*\n\n' +
+            'No significant volume anomalies detected.\n' +
+            '_Tokens need 5x+ normal volume to trigger._',
+            { parse_mode: 'Markdown' }
+          );
+          return;
+        }
+
+        let message = '*📊 Volume Spike Alerts*\n\n';
+        message += `Found ${anomalies.length} tokens with unusual volume:\n\n`;
+
+        for (const anomaly of anomalies.slice(0, 8)) {
+          const multiplierEmoji = anomaly.volumeMultiplier >= 10 ? '🔥' :
+            anomaly.volumeMultiplier >= 7 ? '🚨' : '📈';
+
+          const washWarning = anomaly.washTradingAnalysis?.isLikelySpoofed ? ' ⚠️' : '';
+
+          message += `${multiplierEmoji} *$${this.escapeMarkdown(anomaly.ticker)}*${washWarning}\n`;
+          message += `   Vol: ${anomaly.volumeMultiplier.toFixed(1)}x normal ($${(anomaly.currentVolume24h / 1000).toFixed(0)}K)\n`;
+          message += `   MCap: $${(anomaly.marketCap / 1_000_000).toFixed(1)}M | Liq: $${(anomaly.liquidity / 1000).toFixed(0)}K\n`;
+
+          if (anomaly.washTradingAnalysis && anomaly.washTradingAnalysis.suspicionScore > 30) {
+            message += `   ⚠️ Wash score: ${anomaly.washTradingAnalysis.suspicionScore}/100\n`;
+          }
+          message += '\n';
+        }
+
+        if (anomalies.length > 8) {
+          message += `_+${anomalies.length - 8} more tokens with volume spikes_\n`;
+        }
+
+        message += '\n_⚠️ = potential wash trading_';
+
+        await this.bot!.sendMessage(chatId, message, { parse_mode: 'Markdown' });
+      } catch (error) {
+        const errorMessage = error instanceof Error ? error.message : 'Unknown error';
+        logger.error({ error, chatId }, 'Failed to get volume spikes');
+        await this.bot!.sendMessage(chatId, `Failed to scan volume: ${errorMessage}`);
+      }
+    });
+
+    // /stats command - Historical performance dashboard
+    this.bot.onText(/\/stats/, async (msg) => {
+      const chatId = msg.chat.id;
+
+      try {
+        // Get all-time stats (use a large hour value)
+        const allTimeStats = await signalPerformanceTracker.getPerformanceStats(8760); // 1 year
+        const weekStats = await signalPerformanceTracker.getPerformanceStats(168);     // 7 days
+        const dayStats = await signalPerformanceTracker.getPerformanceStats(24);       // 24 hours
+
+        let message = '*📈 Historical Performance Dashboard*\n\n';
+
+        // Today's stats
+        message += '*Last 24 Hours:*\n';
+        if (dayStats.totalSignals > 0) {
+          message += `• Signals: ${dayStats.totalSignals} (${dayStats.pendingSignals} pending)\n`;
+          message += `• Win Rate: ${dayStats.winRate.toFixed(0)}% (${dayStats.wins}W/${dayStats.losses}L)\n`;
+          message += `• Avg Return: ${dayStats.avgReturn >= 0 ? '+' : ''}${dayStats.avgReturn.toFixed(0)}%\n\n`;
+        } else {
+          message += `• _No signals in last 24h_\n\n`;
+        }
+
+        // Week stats
+        message += '*Last 7 Days:*\n';
+        if (weekStats.totalSignals > 0) {
+          message += `• Signals: ${weekStats.totalSignals} (${weekStats.pendingSignals} pending)\n`;
+          message += `• Win Rate: ${weekStats.winRate.toFixed(0)}% (${weekStats.wins}W/${weekStats.losses}L)\n`;
+          message += `• Avg Return: ${weekStats.avgReturn >= 0 ? '+' : ''}${weekStats.avgReturn.toFixed(0)}%\n`;
+          message += `• Best: +${weekStats.bestReturn.toFixed(0)}% | Worst: ${weekStats.worstReturn.toFixed(0)}%\n\n`;
+        } else {
+          message += `• _No signals in last 7d_\n\n`;
+        }
+
+        // All-time stats
+        message += '*All-Time:*\n';
+        if (allTimeStats.totalSignals > 0) {
+          message += `• Total Signals: ${allTimeStats.totalSignals}\n`;
+          message += `• Completed: ${allTimeStats.completedSignals} | Pending: ${allTimeStats.pendingSignals}\n`;
+          message += `• Win Rate: ${allTimeStats.winRate.toFixed(0)}% (${allTimeStats.wins}W/${allTimeStats.losses}L)\n`;
+          message += `• Avg Win: +${allTimeStats.avgWinReturn.toFixed(0)}% | Avg Loss: ${allTimeStats.avgLossReturn.toFixed(0)}%\n`;
+          message += `• Best: +${allTimeStats.bestReturn.toFixed(0)}% | Worst: ${allTimeStats.worstReturn.toFixed(0)}%\n\n`;
+        } else {
+          message += `• _No signal history_\n\n`;
+        }
+
+        // Performance by score
+        if (allTimeStats.completedSignals > 5) {
+          message += '*By Score Quality:*\n';
+          const { high, medium, low } = allTimeStats.byScoreRange;
+          if (high.count > 0) message += `• High (70+): ${high.winRate.toFixed(0)}% WR (${high.count} signals)\n`;
+          if (medium.count > 0) message += `• Med (50-69): ${medium.winRate.toFixed(0)}% WR (${medium.count} signals)\n`;
+          if (low.count > 0) message += `• Low (<50): ${low.winRate.toFixed(0)}% WR (${low.count} signals)\n`;
+        }
+
+        message += '\n_Use /tierperf for tier breakdown_';
+
+        await this.bot!.sendMessage(chatId, message, { parse_mode: 'Markdown' });
+      } catch (error) {
+        const errorMessage = error instanceof Error ? error.message : 'Unknown error';
+        logger.error({ error, chatId }, 'Failed to get stats');
+        await this.bot!.sendMessage(chatId, `Failed to get stats: ${errorMessage}`);
       }
     });
 

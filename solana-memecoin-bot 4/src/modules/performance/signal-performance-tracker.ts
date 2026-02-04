@@ -147,11 +147,26 @@ const STOP_LOSS_PERCENT = -40;
 const TAKE_PROFIT_PERCENT = 100;
 const MAX_TRACKING_HOURS = 48;  // Stop tracking after 48 hours
 
+// Milestone thresholds for notifications
+const MILESTONE_THRESHOLDS = [
+  { percent: 50, emoji: '📈', label: '+50%' },
+  { percent: 100, emoji: '🚀', label: '2X' },
+  { percent: 200, emoji: '🔥', label: '3X' },
+  { percent: -20, emoji: '⚠️', label: '-20%' },
+  { percent: -40, emoji: '🛑', label: 'STOP LOSS' },
+];
+
 // ============ SIGNAL PERFORMANCE TRACKER CLASS ============
 
 export class SignalPerformanceTracker {
   private trackingTimer: NodeJS.Timeout | null = null;
   private readonly TRACKING_INTERVAL_MS = 15 * 60 * 1000; // Check every 15 minutes
+
+  // Milestone notification callback
+  private notifyCallback: ((message: string) => Promise<void>) | null = null;
+
+  // Track which milestones have been notified per signal to avoid duplicates
+  private notifiedMilestones: Map<string, Set<number>> = new Map();
 
   /**
    * Initialize the tracker and start background tracking
@@ -164,6 +179,71 @@ export class SignalPerformanceTracker {
     this.startTracking();
 
     logger.info('Signal Performance Tracker initialized');
+  }
+
+  /**
+   * Set the notification callback for milestone alerts
+   */
+  setNotifyCallback(callback: (message: string) => Promise<void>): void {
+    this.notifyCallback = callback;
+    logger.info('Milestone notification callback registered');
+  }
+
+  /**
+   * Check and send milestone notifications
+   */
+  private async checkMilestoneNotifications(
+    signalId: string,
+    tokenTicker: string,
+    priceChange: number,
+    entryPrice: number,
+    currentPrice: number,
+    hoursElapsed: number
+  ): Promise<void> {
+    if (!this.notifyCallback) return;
+
+    // Get or create milestone set for this signal
+    if (!this.notifiedMilestones.has(signalId)) {
+      this.notifiedMilestones.set(signalId, new Set());
+    }
+    const notified = this.notifiedMilestones.get(signalId)!;
+
+    for (const milestone of MILESTONE_THRESHOLDS) {
+      // Check if milestone was hit and not yet notified
+      const milestoneHit = milestone.percent > 0
+        ? priceChange >= milestone.percent
+        : priceChange <= milestone.percent;
+
+      if (milestoneHit && !notified.has(milestone.percent)) {
+        notified.add(milestone.percent);
+
+        const timeStr = hoursElapsed < 1
+          ? `${Math.round(hoursElapsed * 60)}m`
+          : `${hoursElapsed.toFixed(1)}h`;
+
+        const message = milestone.percent > 0
+          ? `${milestone.emoji} *MILESTONE: $${tokenTicker}* hit *${milestone.label}*!\n` +
+            `Entry: $${entryPrice.toFixed(6)} → Now: $${currentPrice.toFixed(6)}\n` +
+            `Time: ${timeStr} since signal`
+          : `${milestone.emoji} *ALERT: $${tokenTicker}* hit *${milestone.label}*\n` +
+            `Entry: $${entryPrice.toFixed(6)} → Now: $${currentPrice.toFixed(6)}\n` +
+            `Current: ${priceChange.toFixed(1)}% | Time: ${timeStr}`;
+
+        try {
+          await this.notifyCallback(message);
+          logger.info({ signalId, tokenTicker, milestone: milestone.label }, 'Milestone notification sent');
+        } catch (error) {
+          logger.error({ error, signalId }, 'Failed to send milestone notification');
+        }
+      }
+    }
+  }
+
+  /**
+   * Clean up milestone tracking for finalized signals
+   */
+  private cleanupMilestoneTracking(signalId: string): void {
+    this.notifiedMilestones.delete(signalId);
   }
 
   /**
@@ -319,6 +399,16 @@ export class SignalPerformanceTracker {
         hoursElapsed
       );
 
+      // Check for milestone notifications
+      await this.checkMilestoneNotifications(
+        signal.signal_id,
+        signal.token_ticker,
+        priceChange,
+        entryPrice,
+        currentPrice,
+        hoursElapsed
+      );
+
       // Check if outcome is determined
       const hitStopLoss = priceChange <= STOP_LOSS_PERCENT;
       const hitTakeProfit = priceChange >= TAKE_PROFIT_PERCENT;
@@ -330,6 +420,8 @@ export class SignalPerformanceTracker {
           hitTakeProfit ? 'WIN' : 'LOSS',
           priceChange
         );
+        // Clean up milestone tracking for finalized signal
+        this.cleanupMilestoneTracking(signal.signal_id);
       }
 
       // Update interval returns
@@ -498,6 +590,91 @@ export class SignalPerformanceTracker {
     } catch (error) {
       logger.error({ error }, 'Failed to get recent signals');
       return [];
+    }
+  }
+
+  /**
+   * Get performance statistics by tier (based on entry market cap)
+   */
+  async getTierPerformance(hours: number = 168): Promise<{
+    RISING: { count: number; wins: number; losses: number; winRate: number; avgReturn: number };
+    EMERGING: { count: number; wins: number; losses: number; winRate: number; avgReturn: number };
+    GRADUATED: { count: number; wins: number; losses: number; winRate: number; avgReturn: number };
+    ESTABLISHED: { count: number; wins: number; losses: number; winRate: number; avgReturn: number };
+    UNKNOWN: { count: number; wins: number; losses: number; winRate: number; avgReturn: number };
+  }> {
+    try {
+      const result = await pool.query(`
+        SELECT entry_mcap, final_outcome, final_return
+        FROM signal_performance
+        WHERE signal_time > NOW() - INTERVAL '${hours} hours'
+        AND final_outcome IN ('WIN', 'LOSS')
+      `);
+
+      // Tier boundaries (in USD)
+      const tierBoundaries = {
+        RISING: { min: 500_000, max: 8_000_000 },
+        EMERGING: { min: 8_000_000, max: 20_000_000 },
+        GRADUATED: { min: 20_000_000, max: 50_000_000 },
+        ESTABLISHED: { min: 50_000_000, max: 150_000_000 },
+      };
+
+      const tierStats: any = {
+        RISING: { count: 0, wins: 0, losses: 0, returns: [] },
+        EMERGING: { count: 0, wins: 0, losses: 0, returns: [] },
+        GRADUATED: { count: 0, wins: 0, losses: 0, returns: [] },
+        ESTABLISHED: { count: 0, wins: 0, losses: 0, returns: [] },
+        UNKNOWN: { count: 0, wins: 0, losses: 0, returns: [] },
+      };
+
+      for (const row of result.rows) {
+        const mcap = parseFloat(row.entry_mcap) || 0;
+        const outcome = row.final_outcome;
+        const returnPct = parseFloat(row.final_return) || 0;
+
+        // Determine tier based on entry market cap
+        let tier = 'UNKNOWN';
+        for (const [tierName, bounds] of Object.entries(tierBoundaries)) {
+          if (mcap >= bounds.min && mcap < bounds.max) {
+            tier = tierName;
+            break;
+          }
+        }
+
+        tierStats[tier].count++;
+        tierStats[tier].returns.push(returnPct);
+        if (outcome === 'WIN') {
+          tierStats[tier].wins++;
+        } else {
+          tierStats[tier].losses++;
+        }
+      }
+
+      // Calculate win rates and average returns
+      const result2: any = {};
+      for (const [tier, stats] of Object.entries(tierStats)) {
+        const s = stats as any;
+        result2[tier] = {
+          count: s.count,
+          wins: s.wins,
+          losses: s.losses,
+          winRate: s.count > 0 ? (s.wins / s.count) * 100 : 0,
+          avgReturn: s.returns.length > 0
+            ? s.returns.reduce((a: number, b: number) => a + b, 0) / s.returns.length
+            : 0,
+        };
+      }
+
+      return result2;
+    } catch (error) {
+      logger.error({ error }, 'Failed to get tier performance');
+      return {
+        RISING: { count: 0, wins: 0, losses: 0, winRate: 0, avgReturn: 0 },
+        EMERGING: { count: 0, wins: 0, losses: 0, winRate: 0, avgReturn: 0 },
+        GRADUATED: { count: 0, wins: 0, losses: 0, winRate: 0, avgReturn: 0 },
+        ESTABLISHED: { count: 0, wins: 0, losses: 0, winRate: 0, avgReturn: 0 },
+        UNKNOWN: { count: 0, wins: 0, losses: 0, winRate: 0, avgReturn: 0 },
+      };
     }
   }
 

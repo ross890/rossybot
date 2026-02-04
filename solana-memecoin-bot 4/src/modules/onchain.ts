@@ -963,9 +963,9 @@ class BirdeyeClient {
     limit = 100
   ): Promise<string[]> {
     try {
-      // Use Birdeye v3 token list endpoint with sorting and filtering
+      // Use original Birdeye tokenlist endpoint (NOT v3)
       // Sort by volume to get the most active tokens
-      const response = await this.client.get('/defi/v3/token/list', {
+      const response = await this.client.get('/defi/tokenlist', {
         params: {
           sort_by: 'v24hUSD',      // Sort by 24h volume (most active)
           sort_type: 'desc',
@@ -975,13 +975,12 @@ class BirdeyeClient {
         },
       });
 
-      // V3 API may have different response structure - try multiple paths
-      const tokens = response.data?.data?.items || response.data?.data?.tokens || response.data?.data || [];
+      const tokens = response.data?.data?.tokens || response.data?.data || [];
       const addresses: string[] = [];
 
       // Filter by market cap range
       for (const token of tokens) {
-        const mcap = token.mc || token.marketCap || token.fdv || 0;
+        const mcap = token.mc || token.marketCap || 0;
         if (mcap >= minMarketCap && mcap <= maxMarketCap && token.address) {
           addresses.push(token.address);
         }
@@ -1011,20 +1010,20 @@ class BirdeyeClient {
    * Get trending/gainers tokens from Birdeye
    * Alternative source for token discovery
    */
-  async getTrendingTokens(limit = 50): Promise<string[]> {
+  async getTrendingTokens(limit = 20): Promise<string[]> {
     try {
-      // Use Birdeye v3 trending endpoint
-      const response = await this.client.get('/defi/v3/token/trending', {
+      // Use correct Birdeye trending endpoint (NOT v3)
+      // Max limit is 20 per Birdeye docs
+      const response = await this.client.get('/defi/token_trending', {
         params: {
           sort_by: 'rank',
           sort_type: 'asc',
           offset: 0,
-          limit: limit,
+          limit: Math.min(limit, 20),
         },
       });
 
-      // V3 API may have different response structure
-      const tokens = response.data?.data?.items || response.data?.data?.tokens || response.data?.data || [];
+      const tokens = response.data?.data?.tokens || response.data?.data || [];
       const addresses = tokens
         .filter((t: any) => t.address)
         .map((t: any) => t.address);
@@ -1039,6 +1038,36 @@ class BirdeyeClient {
         status,
         responseData: JSON.stringify(responseData)?.slice(0, 200),
       }, 'Failed to get trending tokens from Birdeye');
+      return [];
+    }
+  }
+
+  /**
+   * Get meme tokens from Birdeye v3 meme list
+   * Better source for memecoin discovery
+   */
+  async getMemeTokens(limit = 100): Promise<string[]> {
+    try {
+      const response = await this.client.get('/defi/v3/token/meme/list', {
+        params: {
+          offset: 0,
+          limit: limit,
+        },
+      });
+
+      const tokens = response.data?.data?.items || response.data?.data?.tokens || response.data?.data || [];
+      const addresses = tokens
+        .filter((t: any) => t.address)
+        .map((t: any) => t.address);
+
+      logger.info({ count: addresses.length }, 'Fetched meme tokens from Birdeye');
+      return addresses;
+    } catch (error: any) {
+      const status = error?.response?.status;
+      logger.warn({
+        error: error?.message,
+        status,
+      }, 'Failed to get meme tokens from Birdeye');
       return [];
     }
   }

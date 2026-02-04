@@ -248,12 +248,18 @@ export class MatureTokenScanner {
       }
 
       // Source 3: Birdeye trending tokens (may include larger caps we can filter)
-      const birdeyeTrending = await birdeyeClient.getTrendingTokens(50);
+      const birdeyeTrending = await birdeyeClient.getTrendingTokens(20);
       for (const addr of birdeyeTrending) {
         seenAddresses.add(addr);
       }
 
-      // Source 4: DexScreener trending (fallback, includes boosts)
+      // Source 4: Birdeye meme tokens (better for memecoin discovery)
+      const birdeyeMeme = await birdeyeClient.getMemeTokens(100);
+      for (const addr of birdeyeMeme) {
+        seenAddresses.add(addr);
+      }
+
+      // Source 5: DexScreener trending (fallback, includes boosts)
       const dexTrending = await dexScreenerClient.getTrendingSolanaTokens(50);
       for (const addr of dexTrending) {
         seenAddresses.add(addr);
@@ -262,7 +268,7 @@ export class MatureTokenScanner {
       const allAddresses = Array.from(seenAddresses);
       fetchedCount = allAddresses.length;
 
-      logger.info(`📊 FUNNEL: Discovery sources - Birdeye mcap: ${birdeyeMcapTokens.length}, Jupiter verified: ${jupiterVerified.length}, Birdeye trending: ${birdeyeTrending.length}, DexScreener: ${dexTrending.length}, Total unique: ${fetchedCount}`);
+      logger.info(`📊 FUNNEL: Discovery sources - Birdeye mcap: ${birdeyeMcapTokens.length}, Jupiter: ${jupiterVerified.length}, Birdeye trend: ${birdeyeTrending.length}, Birdeye meme: ${birdeyeMeme.length}, DexScreener: ${dexTrending.length}, Total: ${fetchedCount}`);
 
       // Get metrics for each and filter by age
       const minAgeMinutes = this.eligibility.minTokenAgeHours * 60;

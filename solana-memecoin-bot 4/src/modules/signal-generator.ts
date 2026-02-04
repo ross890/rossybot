@@ -63,10 +63,11 @@ import {
 
 // ============ CONFIGURATION ============
 
-// HIT RATE IMPROVEMENT: Reduced from 60s to 20s
+// HIT RATE IMPROVEMENT: Reduced from 60s to 10s
 // Analysis shows we're getting front-run by ~35-45 seconds
-// 20s scan cycle gives 2-3 opportunities before momentum fades
-const SCAN_INTERVAL_MS = 20 * 1000; // 20 seconds (was 60s)
+// 10s scan cycle maximizes early entry opportunities
+// NOTE: Ensure API rate limits can handle this frequency
+const SCAN_INTERVAL_MS = 10 * 1000; // 10 seconds (was 20s, originally 60s)
 const KOL_ACTIVITY_WINDOW_MS = 2 * 60 * 60 * 1000; // 2 hours
 const DISCOVERY_SIGNAL_EXPIRY_MS = 24 * 60 * 60 * 1000; // Track discovery for 24 hours
 

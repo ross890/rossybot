@@ -10,13 +10,20 @@ import { heliusClient, birdeyeClient, dexScreenerClient } from './onchain.js';
 // ============ TYPES ============
 
 export interface MomentumMetrics {
-  // Buy/Sell Analysis
+  // Buy/Sell Analysis (5-minute window)
   buyCount5m: number;
   sellCount5m: number;
   buyVolume5m: number;
   sellVolume5m: number;
   buySellRatio: number;           // >1.2 is healthy
   netBuyPressure: number;         // Positive = buying pressure
+
+  // NEW: 1-minute micro-momentum (for early pump detection)
+  buyCount1m: number;
+  sellCount1m: number;
+  volume1m: number;
+  buySellRatio1m: number;         // 1-minute ratio for early signals
+  volumeSpike1m: number;          // 1m vol vs avg 1m (spike multiplier)
 
   // Volume Velocity
   volume5m: number;
@@ -40,10 +47,26 @@ export interface MomentumMetrics {
   // Price Action
   priceChange5m: number;
   priceChange1h: number;
+  priceChange1m: number;          // NEW: 1-minute price change for early signals
   priceVolatility: number;        // Standard deviation of price moves
 
   // Timestamp
   analyzedAt: Date;
+}
+
+// NEW: Surge detection for ultra-early pump signals
+export interface SurgeSignal {
+  detected: boolean;
+  type: 'VOLUME_SURGE' | 'BUY_SURGE' | 'PRICE_SURGE' | 'MULTI_SURGE' | 'NONE';
+  multiplier: number;             // How many X above normal
+  confidence: 'HIGH' | 'MEDIUM' | 'LOW';
+  timeDetected: Date;
+  metrics: {
+    volume1mSpike: number;        // e.g., 5x = 500% above normal
+    buyRatio1m: number;           // Buy/sell in last minute
+    priceChange1m: number;        // % price move in 1 min
+    uniqueBuyers1m: number;       // Unique wallets buying
+  };
 }
 
 export interface MomentumScore {
@@ -92,7 +115,9 @@ const THRESHOLDS = {
 
 export class MomentumAnalyzer {
   private metricsCache: Map<string, { metrics: MomentumMetrics; timestamp: number }> = new Map();
-  private readonly CACHE_TTL_MS = 30 * 1000; // 30 seconds cache
+  // Reduced from 30s to 15s for faster signal updates
+  // This allows detecting surges within 15-25 seconds of occurrence
+  private readonly CACHE_TTL_MS = 15 * 1000; // 15 seconds cache
 
   /**
    * Analyze momentum for a token
@@ -118,8 +143,13 @@ export class MomentumAnalyzer {
         return null;
       }
 
+      // Calculate 1-minute metrics for early detection
+      const avgVolume1m = tradeData.volume1h > 0 ? tradeData.volume1h / 60 : 0;
+      const volume1m = tradeData.volume1m || tradeData.volume5m / 5; // Estimate if not available
+      const volumeSpike1m = avgVolume1m > 0 ? volume1m / avgVolume1m : 1;
+
       const metrics: MomentumMetrics = {
-        // Buy/Sell Analysis
+        // Buy/Sell Analysis (5-minute window)
         buyCount5m: tradeData.buyCount5m,
         sellCount5m: tradeData.sellCount5m,
         buyVolume5m: tradeData.buyVolume5m,
@@ -128,6 +158,15 @@ export class MomentumAnalyzer {
           ? tradeData.buyCount5m / tradeData.sellCount5m
           : tradeData.buyCount5m > 0 ? 10 : 1,
         netBuyPressure: tradeData.buyVolume5m - tradeData.sellVolume5m,
+
+        // NEW: 1-minute micro-momentum
+        buyCount1m: tradeData.buyCount1m || Math.ceil(tradeData.buyCount5m / 5),
+        sellCount1m: tradeData.sellCount1m || Math.ceil(tradeData.sellCount5m / 5),
+        volume1m,
+        buySellRatio1m: (tradeData.sellCount1m || tradeData.sellCount5m / 5) > 0
+          ? (tradeData.buyCount1m || tradeData.buyCount5m / 5) / (tradeData.sellCount1m || tradeData.sellCount5m / 5)
+          : (tradeData.buyCount1m || tradeData.buyCount5m / 5) > 0 ? 10 : 1,
+        volumeSpike1m,
 
         // Volume Velocity
         volume5m: tradeData.volume5m,
@@ -153,6 +192,7 @@ export class MomentumAnalyzer {
         // Price Action
         priceChange5m: priceData?.priceChange5m || 0,
         priceChange1h: priceData?.priceChange1h || 0,
+        priceChange1m: priceData?.priceChange1m || priceData?.priceChange5m / 5 || 0,
         priceVolatility: priceData?.priceVolatility || 0,
 
         analyzedAt: new Date(),
@@ -225,6 +265,112 @@ export class MomentumAnalyzer {
     return true;
   }
 
+  /**
+   * NEW: Detect surge signals for ultra-early pump detection
+   * A surge is a sudden spike in activity that precedes most pumps
+   *
+   * Surge types:
+   * - VOLUME_SURGE: 3x+ volume in 1 minute vs average
+   * - BUY_SURGE: 5+ buys in 1 minute with 3:1+ buy/sell ratio
+   * - PRICE_SURGE: 5%+ price increase in 1 minute
+   * - MULTI_SURGE: Multiple surge types simultaneously (highest confidence)
+   */
+  async detectSurge(tokenAddress: string): Promise<SurgeSignal> {
+    const metrics = await this.analyze(tokenAddress);
+
+    const noSurge: SurgeSignal = {
+      detected: false,
+      type: 'NONE',
+      multiplier: 1,
+      confidence: 'LOW',
+      timeDetected: new Date(),
+      metrics: {
+        volume1mSpike: 1,
+        buyRatio1m: 1,
+        priceChange1m: 0,
+        uniqueBuyers1m: 0,
+      },
+    };
+
+    if (!metrics) return noSurge;
+
+    const surgeMetrics = {
+      volume1mSpike: metrics.volumeSpike1m,
+      buyRatio1m: metrics.buySellRatio1m,
+      priceChange1m: metrics.priceChange1m,
+      uniqueBuyers1m: Math.ceil(metrics.uniqueBuyers5m / 5), // Estimate 1m
+    };
+
+    // Thresholds for surge detection
+    const VOLUME_SURGE_THRESHOLD = 3.0;   // 3x normal volume
+    const BUY_SURGE_RATIO = 3.0;          // 3:1 buy/sell ratio
+    const BUY_SURGE_MIN_BUYS = 5;         // At least 5 buys in 1 min
+    const PRICE_SURGE_THRESHOLD = 5.0;    // 5% price increase
+
+    const hasVolumeSurge = surgeMetrics.volume1mSpike >= VOLUME_SURGE_THRESHOLD;
+    const hasBuySurge = surgeMetrics.buyRatio1m >= BUY_SURGE_RATIO &&
+                        metrics.buyCount1m >= BUY_SURGE_MIN_BUYS;
+    const hasPriceSurge = surgeMetrics.priceChange1m >= PRICE_SURGE_THRESHOLD;
+
+    // Count surge types
+    const surgeCount = [hasVolumeSurge, hasBuySurge, hasPriceSurge].filter(Boolean).length;
+
+    if (surgeCount === 0) return noSurge;
+
+    // Determine surge type and confidence
+    let type: SurgeSignal['type'] = 'NONE';
+    let confidence: SurgeSignal['confidence'] = 'LOW';
+    let multiplier = 1;
+
+    if (surgeCount >= 2) {
+      type = 'MULTI_SURGE';
+      confidence = 'HIGH';
+      multiplier = Math.max(surgeMetrics.volume1mSpike, surgeMetrics.buyRatio1m);
+    } else if (hasVolumeSurge) {
+      type = 'VOLUME_SURGE';
+      confidence = surgeMetrics.volume1mSpike >= 5.0 ? 'HIGH' : 'MEDIUM';
+      multiplier = surgeMetrics.volume1mSpike;
+    } else if (hasBuySurge) {
+      type = 'BUY_SURGE';
+      confidence = surgeMetrics.buyRatio1m >= 5.0 ? 'HIGH' : 'MEDIUM';
+      multiplier = surgeMetrics.buyRatio1m;
+    } else if (hasPriceSurge) {
+      type = 'PRICE_SURGE';
+      confidence = surgeMetrics.priceChange1m >= 10.0 ? 'HIGH' : 'MEDIUM';
+      multiplier = surgeMetrics.priceChange1m / PRICE_SURGE_THRESHOLD;
+    }
+
+    const surge: SurgeSignal = {
+      detected: true,
+      type,
+      multiplier,
+      confidence,
+      timeDetected: new Date(),
+      metrics: surgeMetrics,
+    };
+
+    logger.info({
+      tokenAddress: tokenAddress.slice(0, 8),
+      surgeType: type,
+      multiplier: multiplier.toFixed(1),
+      confidence,
+      volumeSpike: surgeMetrics.volume1mSpike.toFixed(1),
+      buyRatio1m: surgeMetrics.buyRatio1m.toFixed(1),
+      priceChange1m: surgeMetrics.priceChange1m.toFixed(1),
+    }, '🚨 SURGE DETECTED - Early pump signal');
+
+    return surge;
+  }
+
+  /**
+   * Fast surge check for use in scan loop
+   * Returns true if any surge type is detected
+   */
+  async hasSurge(tokenAddress: string): Promise<boolean> {
+    const surge = await this.detectSurge(tokenAddress);
+    return surge.detected;
+  }
+
   // ============ DATA FETCHING ============
 
   private async getTradeMetrics(tokenAddress: string): Promise<{
@@ -234,6 +380,9 @@ export class MomentumAnalyzer {
     sellVolume5m: number;
     volume5m: number;
     volume1h: number;
+    volume1m: number;         // NEW: 1-minute volume
+    buyCount1m: number;       // NEW: 1-minute buy count
+    sellCount1m: number;      // NEW: 1-minute sell count
     volumeAcceleration: number;
     avgTradeSize: number;
     medianTradeSize: number;
@@ -258,8 +407,11 @@ export class MomentumAnalyzer {
         const vol24h = pair.volume?.h24 || 0;
         const vol5m = pair.volume?.m5 || vol24h / 288; // Estimate 5m from 24h
         const vol1h = pair.volume?.h1 || vol24h / 24;
+        const vol1m = pair.volume?.m1 || vol5m / 5;   // NEW: 1-minute volume
         const buys5m = pair.txns?.m5?.buys || 0;
         const sells5m = pair.txns?.m5?.sells || 0;
+        const buys1m = pair.txns?.m1?.buys || Math.ceil(buys5m / 5);  // NEW: Estimate 1m
+        const sells1m = pair.txns?.m1?.sells || Math.ceil(sells5m / 5);
 
         return {
           buyCount5m: buys5m,
@@ -268,6 +420,9 @@ export class MomentumAnalyzer {
           sellVolume5m: vol5m * 0.4,
           volume5m: vol5m,
           volume1h: vol1h,
+          volume1m: vol1m,            // NEW
+          buyCount1m: buys1m,         // NEW
+          sellCount1m: sells1m,       // NEW
           volumeAcceleration: this.calculateVolumeAcceleration(pair),
           avgTradeSize: (buys5m + sells5m) > 0 ? vol5m / (buys5m + sells5m) : 0,
           medianTradeSize: 0, // Not available from DexScreener
@@ -286,6 +441,11 @@ export class MomentumAnalyzer {
       const vol5m = buyVol5m + sellVol5m;
       const vol1h = tradeData.volume1h || tradeData.v1h || vol5m * 12;
 
+      // NEW: 1-minute data from Birdeye (or estimate)
+      const buy1m = tradeData.buy1m || Math.ceil(buy5m / 5);
+      const sell1m = tradeData.sell1m || Math.ceil(sell5m / 5);
+      const vol1m = tradeData.volume1m || tradeData.v1m || vol5m / 5;
+
       // Calculate volume acceleration (is volume increasing?)
       const vol15m = tradeData.volume15m || tradeData.v15m || vol5m * 3;
       const avgVolPer5m = vol15m / 3;
@@ -303,6 +463,9 @@ export class MomentumAnalyzer {
         sellVolume5m: sellVol5m,
         volume5m: vol5m,
         volume1h: vol1h,
+        volume1m: vol1m,          // NEW
+        buyCount1m: buy1m,        // NEW
+        sellCount1m: sell1m,      // NEW
         volumeAcceleration: Math.max(-1, Math.min(1, volumeAcceleration)),
         avgTradeSize: avgSize,
         medianTradeSize: avgSize * 0.7, // Estimate median as 70% of avg
@@ -347,6 +510,7 @@ export class MomentumAnalyzer {
   private async getPriceMetrics(tokenAddress: string): Promise<{
     priceChange5m: number;
     priceChange1h: number;
+    priceChange1m: number;    // NEW: 1-minute price change
     priceVolatility: number;
   } | null> {
     try {
@@ -359,10 +523,13 @@ export class MomentumAnalyzer {
       // DexScreener may have priceChange data - default to 0 if not available
       const priceChange5m = pair.priceChange?.m5 || 0;
       const priceChange1h = pair.priceChange?.h1 || pair.priceChange?.h24 / 24 || 0;
+      // NEW: 1-minute price change (estimate from 5m if not available)
+      const priceChange1m = pair.priceChange?.m1 || priceChange5m / 5 || 0;
 
       return {
         priceChange5m,
         priceChange1h,
+        priceChange1m,        // NEW
         priceVolatility: Math.abs(priceChange5m) / 100, // Normalize
       };
     } catch (error) {
@@ -604,3 +771,6 @@ export default {
   momentumAnalyzer,
   THRESHOLDS,
 };
+
+// Export types for use in other modules
+export type { SurgeSignal };

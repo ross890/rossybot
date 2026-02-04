@@ -192,7 +192,7 @@ export class MomentumAnalyzer {
         // Price Action
         priceChange5m: priceData?.priceChange5m || 0,
         priceChange1h: priceData?.priceChange1h || 0,
-        priceChange1m: priceData?.priceChange1m || priceData?.priceChange5m / 5 || 0,
+        priceChange1m: priceData?.priceChange1m || (priceData?.priceChange5m ?? 0) / 5 || 0,
         priceVolatility: priceData?.priceVolatility || 0,
 
         analyzedAt: new Date(),
@@ -772,5 +772,4 @@ export default {
   THRESHOLDS,
 };
 
-// Export types for use in other modules
-export type { SurgeSignal };
+// SurgeSignal is already exported at its interface definition above

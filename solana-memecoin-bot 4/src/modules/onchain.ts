@@ -951,6 +951,82 @@ class BirdeyeClient {
     logger.debug('No listings in buffer, WebSocket may still be connecting');
     return [];
   }
+
+  /**
+   * Get tokens by market cap range from Birdeye
+   * This is the primary source for mature token discovery
+   * Uses the /defi/tokenlist endpoint with market cap filters
+   */
+  async getTokensByMarketCapRange(
+    minMarketCap: number,
+    maxMarketCap: number,
+    limit = 100
+  ): Promise<string[]> {
+    try {
+      // Birdeye's tokenlist endpoint supports sorting and filtering
+      // Sort by volume to get active tokens in the market cap range
+      const response = await this.client.get('/defi/tokenlist', {
+        params: {
+          sort_by: 'v24hUSD',      // Sort by 24h volume (most active)
+          sort_type: 'desc',
+          offset: 0,
+          limit: limit,
+          min_liquidity: 25000,   // $25K minimum liquidity
+        },
+      });
+
+      const tokens = response.data?.data?.tokens || [];
+      const addresses: string[] = [];
+
+      // Filter by market cap range
+      for (const token of tokens) {
+        const mcap = token.mc || token.marketCap || 0;
+        if (mcap >= minMarketCap && mcap <= maxMarketCap && token.address) {
+          addresses.push(token.address);
+        }
+      }
+
+      logger.info({
+        total: tokens.length,
+        inRange: addresses.length,
+        minMcap: `$${(minMarketCap / 1_000_000).toFixed(1)}M`,
+        maxMcap: `$${(maxMarketCap / 1_000_000).toFixed(1)}M`,
+      }, 'Fetched tokens by market cap range from Birdeye');
+
+      return addresses;
+    } catch (error: any) {
+      logger.error({ error: error?.message }, 'Failed to get tokens by market cap from Birdeye');
+      return [];
+    }
+  }
+
+  /**
+   * Get trending/gainers tokens from Birdeye
+   * Alternative source for token discovery
+   */
+  async getTrendingTokens(limit = 50): Promise<string[]> {
+    try {
+      const response = await this.client.get('/defi/token_trending', {
+        params: {
+          sort_by: 'rank',
+          sort_type: 'asc',
+          offset: 0,
+          limit: limit,
+        },
+      });
+
+      const tokens = response.data?.data?.tokens || response.data?.data || [];
+      const addresses = tokens
+        .filter((t: any) => t.address)
+        .map((t: any) => t.address);
+
+      logger.info({ count: addresses.length }, 'Fetched trending tokens from Birdeye');
+      return addresses;
+    } catch (error: any) {
+      logger.debug({ error: error?.message }, 'Failed to get trending tokens from Birdeye');
+      return [];
+    }
+  }
 }
 
 class DexScreenerClient {

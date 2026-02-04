@@ -191,16 +191,36 @@ export class SignalPerformanceTracker {
 
   /**
    * Check and send milestone notifications
+   * IMPORTANT: Only notifies for tokens actually held in open positions
    */
   private async checkMilestoneNotifications(
     signalId: string,
     tokenTicker: string,
+    tokenAddress: string,
     priceChange: number,
     entryPrice: number,
     currentPrice: number,
     hoursElapsed: number
   ): Promise<void> {
     if (!this.notifyCallback) return;
+
+    // CRITICAL: Only send notifications for tokens actually held in wallet
+    // Query the positions table to check if we have an open position for this token
+    try {
+      const positionCheck = await pool.query(
+        `SELECT id FROM positions WHERE token_address = $1 AND status = 'OPEN' LIMIT 1`,
+        [tokenAddress]
+      );
+
+      if (positionCheck.rows.length === 0) {
+        // Token is not held - skip milestone notifications
+        return;
+      }
+    } catch (error) {
+      // If positions table doesn't exist or query fails, skip notifications to be safe
+      logger.debug({ error, tokenAddress }, 'Could not verify position for milestone notification');
+      return;
+    }
 
     // Get or create milestone set for this signal
     if (!this.notifiedMilestones.has(signalId)) {
@@ -231,7 +251,7 @@ export class SignalPerformanceTracker {
 
         try {
           await this.notifyCallback(message);
-          logger.info({ signalId, tokenTicker, milestone: milestone.label }, 'Milestone notification sent');
+          logger.info({ signalId, tokenTicker, milestone: milestone.label }, 'Milestone notification sent for held position');
         } catch (error) {
           logger.error({ error, signalId }, 'Failed to send milestone notification');
         }
@@ -399,10 +419,11 @@ export class SignalPerformanceTracker {
         hoursElapsed
       );
 
-      // Check for milestone notifications
+      // Check for milestone notifications (only for held positions)
       await this.checkMilestoneNotifications(
         signal.signal_id,
         signal.token_ticker,
+        signal.token_address,
         priceChange,
         entryPrice,
         currentPrice,

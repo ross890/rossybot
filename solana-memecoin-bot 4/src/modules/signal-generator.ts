@@ -70,6 +70,90 @@ const SCAN_INTERVAL_MS = 20 * 1000; // 20 seconds (was 60s)
 const KOL_ACTIVITY_WINDOW_MS = 2 * 60 * 60 * 1000; // 2 hours
 const DISCOVERY_SIGNAL_EXPIRY_MS = 24 * 60 * 60 * 1000; // Track discovery for 24 hours
 
+// ============ TIER-AWARE FILTERING ============
+// Based on performance data: EMERGING tier ($8M-$20M) has 11% win rate vs 47% for RISING
+// This indicates tokens in the $8M-$20M range are poor risk/reward
+//
+// TIER BOUNDARIES (based on entry market cap):
+// - RISING:      $500K - $8M   (best performance: 47% win rate)
+// - EMERGING:    $8M - $20M    (worst performance: 11% win rate, -72% avg return)
+// - GRADUATED:   $20M - $50M   (insufficient data)
+// - ESTABLISHED: $50M - $150M  (insufficient data)
+//
+// STRATEGY: Skip or heavily penalize EMERGING tier signals
+
+type MarketCapTier = 'MICRO' | 'RISING' | 'EMERGING' | 'GRADUATED' | 'ESTABLISHED' | 'UNKNOWN';
+
+interface TierConfig {
+  minMcap: number;
+  maxMcap: number;
+  enabled: boolean;  // Whether to generate signals for this tier
+  minLiquidity: number;  // Tier-specific liquidity requirement
+  minSafetyScore: number;  // Tier-specific safety requirement
+  positionSizeMultiplier: number;  // Scale position size for tier
+}
+
+// Tier configuration based on performance analysis
+const TIER_CONFIGS: Record<MarketCapTier, TierConfig> = {
+  MICRO: {
+    minMcap: 0,
+    maxMcap: 500_000,
+    enabled: true,
+    minLiquidity: 5000,
+    minSafetyScore: 50,
+    positionSizeMultiplier: 0.5,  // Half size for micro caps
+  },
+  RISING: {
+    minMcap: 500_000,
+    maxMcap: 8_000_000,
+    enabled: true,  // Best performing tier - 47% win rate
+    minLiquidity: 10000,
+    minSafetyScore: 50,
+    positionSizeMultiplier: 1.0,  // Full position size
+  },
+  EMERGING: {
+    minMcap: 8_000_000,
+    maxMcap: 20_000_000,
+    enabled: false,  // DISABLED: 11% win rate, -72% avg return
+    minLiquidity: 25000,  // Higher liquidity required
+    minSafetyScore: 70,  // Much stricter safety
+    positionSizeMultiplier: 0.25,  // Quarter size if enabled
+  },
+  GRADUATED: {
+    minMcap: 20_000_000,
+    maxMcap: 50_000_000,
+    enabled: true,  // Keep enabled but with caution
+    minLiquidity: 50000,
+    minSafetyScore: 60,
+    positionSizeMultiplier: 0.75,
+  },
+  ESTABLISHED: {
+    minMcap: 50_000_000,
+    maxMcap: 150_000_000,
+    enabled: true,  // Lower volatility, more predictable
+    minLiquidity: 100000,
+    minSafetyScore: 55,
+    positionSizeMultiplier: 0.5,
+  },
+  UNKNOWN: {
+    minMcap: 0,
+    maxMcap: Infinity,
+    enabled: false,  // Block tokens outside known ranges
+    minLiquidity: 50000,
+    minSafetyScore: 70,
+    positionSizeMultiplier: 0.25,
+  },
+};
+
+function getMarketCapTier(marketCap: number): MarketCapTier {
+  if (marketCap < 500_000) return 'MICRO';
+  if (marketCap < 8_000_000) return 'RISING';
+  if (marketCap < 20_000_000) return 'EMERGING';
+  if (marketCap < 50_000_000) return 'GRADUATED';
+  if (marketCap < 150_000_000) return 'ESTABLISHED';
+  return 'UNKNOWN';
+}
+
 // ============ SIGNAL GENERATOR CLASS ============
 
 export class SignalGenerator {
@@ -285,6 +369,7 @@ export class SignalGenerator {
       let onchainSignals = 0;
       let momentumFailed = 0;
       let bundleBlocked = 0;
+      let tierBlocked = 0;
 
       for (const tokenAddress of preFiltered) {
         try {
@@ -302,6 +387,7 @@ export class SignalGenerator {
             case 'ONCHAIN_SIGNAL_SENT': onchainSignals++; break;
             case 'MOMENTUM_FAILED': momentumFailed++; break;
             case 'BUNDLE_BLOCKED': bundleBlocked++; break;
+            case 'TIER_BLOCKED': tierBlocked++; break;
             case 'SKIPPED': break; // Already have position
           }
         } catch (error) {
@@ -322,6 +408,7 @@ export class SignalGenerator {
         scoringFailed,
         momentumFailed,
         bundleBlocked,
+        tierBlocked,
         discoveryFailed,
         buySignals: signalsGenerated,
         onchainSignals,
@@ -444,6 +531,7 @@ export class SignalGenerator {
     MOMENTUM_FAILED: 'MOMENTUM_FAILED',      // New: Didn't pass momentum checks
     BUNDLE_BLOCKED: 'BUNDLE_BLOCKED',        // New: High bundle/insider risk
     TOO_EARLY: 'TOO_EARLY',                  // New: Token too young (< 30 min)
+    TIER_BLOCKED: 'TIER_BLOCKED',            // New: Token in disabled tier (e.g., EMERGING)
   } as const;
 
   /**
@@ -475,15 +563,45 @@ export class SignalGenerator {
       return SignalGenerator.EVAL_RESULTS.NO_METRICS;
     }
 
+    // TIER-AWARE FILTERING: Check market cap tier before proceeding
+    const tier = getMarketCapTier(metrics.marketCap);
+    const tierConfig = TIER_CONFIGS[tier];
+
     logger.info({
       tokenAddress: shortAddr,
       ticker: metrics.ticker,
       mcap: metrics.marketCap,
+      tier,
+      tierEnabled: tierConfig.enabled,
       vol24h: metrics.volume24h,
       holders: metrics.holderCount,
       liq: metrics.liquidityPool,
       age: metrics.tokenAge,
-    }, 'EVAL: Got metrics, checking screening criteria');
+    }, 'EVAL: Got metrics, checking tier and screening criteria');
+
+    // Block signals from disabled tiers (e.g., EMERGING with 11% win rate)
+    if (!tierConfig.enabled) {
+      logger.info({
+        tokenAddress: shortAddr,
+        ticker: metrics.ticker,
+        tier,
+        marketCap: metrics.marketCap,
+        reason: `${tier} tier disabled due to poor historical performance`,
+      }, 'EVAL: BLOCKED - Tier disabled');
+      return SignalGenerator.EVAL_RESULTS.TIER_BLOCKED;
+    }
+
+    // Apply tier-specific liquidity requirements
+    if (metrics.liquidityPool < tierConfig.minLiquidity) {
+      logger.info({
+        tokenAddress: shortAddr,
+        ticker: metrics.ticker,
+        tier,
+        liquidity: metrics.liquidityPool,
+        required: tierConfig.minLiquidity,
+      }, 'EVAL: BLOCKED - Below tier liquidity requirement');
+      return SignalGenerator.EVAL_RESULTS.TIER_BLOCKED;
+    }
 
     // Check if token meets minimum screening criteria
     if (!this.meetsScreeningCriteria(metrics)) {

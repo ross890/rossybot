@@ -23,12 +23,22 @@ interface FactorStats {
   newValue?: number;
 }
 
+interface TierPerformance {
+  tier: string;
+  count: number;
+  wins: number;
+  losses: number;
+  winRate: number;
+  avgReturn: number;
+}
+
 interface OptimizationReport {
   timestamp: Date;
   dataPoints: number;
   winRate: number;
   previousWinRate: number | null;
   factorAnalysis: FactorStats[];
+  tierPerformance: TierPerformance[];  // NEW: Performance by market cap tier
   previousThresholds: ThresholdSet;
   newThresholds: ThresholdSet;
   changesApplied: string[];
@@ -45,8 +55,10 @@ const CRON_SCHEDULE = '0 6 * * *'; // 6:00 AM daily
 // Optimization constraints
 const MIN_DATA_POINTS = 50;    // Need 50+ completed signals before adjusting (was 10)
 const MAX_CHANGE_PERCENT = 5;  // Max 5% change per optimization cycle (was 15%)
+const MAX_LIQUIDITY_CHANGE_PERCENT = 10;  // NEW: Allow 10% change for liquidity (strong signal)
 const TARGET_WIN_RATE = 30;
 const ADJUSTMENT_FACTOR = 0.1; // Apply 10% of factor diff (was 0.3)
+const LIQUIDITY_ADJUSTMENT_FACTOR = 0.15; // NEW: More aggressive for liquidity
 
 // ============ DAILY AUTO OPTIMIZER CLASS ============
 
@@ -133,6 +145,17 @@ export class DailyAutoOptimizer {
       // Step 2: Analyze factors
       const factorAnalysis = await this.analyzeFactors();
 
+      // Step 2.5: Get tier performance data
+      const tierStats = await signalPerformanceTracker.getTierPerformance(168); // 7 days
+      const tierPerformance: TierPerformance[] = Object.entries(tierStats).map(([tier, data]) => ({
+        tier,
+        count: data.count,
+        wins: data.wins,
+        losses: data.losses,
+        winRate: data.winRate,
+        avgReturn: data.avgReturn,
+      })).filter(t => t.count > 0); // Only include tiers with data
+
       // Step 3: Get current thresholds
       const previousThresholds = thresholdOptimizer.getCurrentThresholds();
 
@@ -159,6 +182,7 @@ export class DailyAutoOptimizer {
         winRate: stats.winRate,
         previousWinRate: this.lastWinRate,
         factorAnalysis,
+        tierPerformance,  // NEW: Include tier performance
         previousThresholds,
         newThresholds,
         changesApplied,
@@ -281,6 +305,11 @@ export class DailyAutoOptimizer {
       const isMaxThreshold = thresholdKey.startsWith('max');
 
       // Calculate adjustment based on win/loss difference
+      // Use more aggressive adjustment for liquidity (strongest differentiator)
+      const isLiquidityFactor = factor.name === 'Liquidity';
+      const maxChangePercent = isLiquidityFactor ? MAX_LIQUIDITY_CHANGE_PERCENT : MAX_CHANGE_PERCENT;
+      const adjustmentFactor = isLiquidityFactor ? LIQUIDITY_ADJUSTMENT_FACTOR : ADJUSTMENT_FACTOR;
+
       let adjustment = 0;
       let reason = '';
 
@@ -288,13 +317,13 @@ export class DailyAutoOptimizer {
         if (isMaxThreshold) {
           // For max thresholds, lower the max to be stricter
           if (factor.diff < 0) {
-            adjustment = Math.max(-currentValue * (MAX_CHANGE_PERCENT / 100), factor.diff * ADJUSTMENT_FACTOR);
+            adjustment = Math.max(-currentValue * (maxChangePercent / 100), factor.diff * adjustmentFactor);
             reason = `Wins have lower ${factor.name} - lowering max`;
           }
         } else {
           // For min thresholds, raise the min to be stricter
           if (factor.diff > 0) {
-            adjustment = Math.min(currentValue * (MAX_CHANGE_PERCENT / 100), factor.diff * ADJUSTMENT_FACTOR);
+            adjustment = Math.min(currentValue * (maxChangePercent / 100), factor.diff * adjustmentFactor);
             reason = `Wins have higher ${factor.name} - raising min`;
           }
         }
@@ -400,6 +429,26 @@ export class DailyAutoOptimizer {
     }
     lines.push('```');
     lines.push('');
+
+    // Tier Performance (NEW)
+    if (report.tierPerformance.length > 0) {
+      lines.push('📊 *TIER PERFORMANCE (7d)*');
+      const tierEmojis: Record<string, string> = {
+        RISING: '🚀',
+        EMERGING: '🌱',
+        GRADUATED: '🎓',
+        ESTABLISHED: '🏛️',
+        MICRO: '🔬',
+        UNKNOWN: '❓',
+      };
+      for (const tier of report.tierPerformance) {
+        const emoji = tierEmojis[tier.tier] || '📈';
+        const winRateEmoji = tier.winRate >= 40 ? '✅' : tier.winRate >= 25 ? '⚠️' : '❌';
+        const returnStr = tier.avgReturn >= 0 ? `+${tier.avgReturn.toFixed(0)}%` : `${tier.avgReturn.toFixed(0)}%`;
+        lines.push(`${emoji} *${tier.tier}*: ${winRateEmoji} ${tier.winRate.toFixed(0)}% (${tier.wins}W/${tier.losses}L) | ${returnStr}`);
+      }
+      lines.push('');
+    }
 
     // Reasoning
     lines.push('🧠 *ANALYSIS*');

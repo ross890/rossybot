@@ -1558,8 +1558,9 @@ class JupiterClient {
         params: { query: 'verified' },
       });
 
-      // Response structure: { mints: [...], mintInfoMap: {...} }
-      const mints = response.data?.mints || [];
+      // Response is a direct array of token objects with 'id' as the mint address
+      const tokens = Array.isArray(response.data) ? response.data : [];
+      const mints = tokens.map((t: any) => t.id).filter((id: any) => id);
 
       // Cache the token addresses
       this.tokenListCache = {
@@ -1587,7 +1588,9 @@ class JupiterClient {
   async getRecentTokens(limit = 50): Promise<string[]> {
     try {
       const response = await this.client.get('/tokens/v2/recent');
-      const mints = response.data?.mints || [];
+      // Response is a direct array of token objects with 'id' as the mint address
+      const tokens = Array.isArray(response.data) ? response.data : [];
+      const mints = tokens.map((t: any) => t.id).filter((id: any) => id);
 
       logger.info({ count: mints.length }, 'Fetched Jupiter recent tokens');
       return mints.slice(0, limit);
@@ -1612,7 +1615,9 @@ class JupiterClient {
       const response = await this.client.get('/tokens/v2/tag', {
         params: { query: 'verified' },
       });
-      const mints = response.data?.mints || [];
+      // Response is a direct array of token objects with 'id' as the mint address
+      const tokens = Array.isArray(response.data) ? response.data : [];
+      const mints = tokens.map((t: any) => t.id).filter((id: any) => id);
 
       this.tokenListCache = {
         tokens: mints,

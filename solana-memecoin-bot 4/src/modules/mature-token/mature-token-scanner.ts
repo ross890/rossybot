@@ -84,6 +84,38 @@ export class MatureTokenScanner {
     lastScanTime: '',
   };
 
+  // Track micro-cap tokens ($200K-$500K) that are rejected - for opportunity analysis
+  private microCapTracker: {
+    total: number;
+    passedSafety: number;
+    passedConcentration: number;
+    passedHolders: number;
+    passedLiquidity: number;
+    avgConcentration: number;
+    avgHolderCount: number;
+    avgLiquidity: number;
+    samples: Array<{
+      ticker: string;
+      mcap: number;
+      concentration: number;
+      holders: number;
+      liquidity: number;
+      volume24h: number;
+      age: number; // hours
+      timestamp: Date;
+    }>;
+  } = {
+    total: 0,
+    passedSafety: 0,
+    passedConcentration: 0,
+    passedHolders: 0,
+    passedLiquidity: 0,
+    avgConcentration: 0,
+    avgHolderCount: 0,
+    avgLiquidity: 0,
+    samples: [],
+  };
+
   /**
    * Initialize the scanner
    */
@@ -357,7 +389,16 @@ export class MatureTokenScanner {
     // Track rejected concentrations for logging
     const rejectedConcentrations: string[] = [];
 
+    // Track micro-cap tokens ($200K-$500K) for opportunity analysis
+    const MICRO_CAP_MIN = 200_000;
+    const MICRO_CAP_MAX = 500_000;
+
     for (const token of tokens) {
+      // Check if token is in micro-cap range ($200K-$500K) - track for opportunity analysis
+      if (token.marketCap >= MICRO_CAP_MIN && token.marketCap < MICRO_CAP_MAX) {
+        this.trackMicroCapToken(token);
+      }
+
       // Market cap check (must be in one of our tiers)
       if (token.marketCap < this.eligibility.minMarketCap ||
           token.marketCap > this.eligibility.maxMarketCap) {
@@ -1013,6 +1054,149 @@ export class MatureTokenScanner {
       signalsThisHour: this.signalsThisHour,
       signalsToday: this.signalsToday,
     };
+  }
+
+  /**
+   * Track a micro-cap token ($200K-$500K) for opportunity analysis
+   * Evaluates if it would pass our safety filters
+   */
+  private trackMicroCapToken(token: TokenMetrics): void {
+    this.microCapTracker.total++;
+
+    // Check if it would pass our filters
+    const passesConcentration = token.top10Concentration <= this.eligibility.maxTop10Concentration;
+    const passesHolders = token.holderCount >= 250; // Stricter for micro-caps
+    const passesLiquidity = token.liquidityPool >= 10_000; // Lower threshold for smaller caps
+
+    if (passesConcentration) this.microCapTracker.passedConcentration++;
+    if (passesHolders) this.microCapTracker.passedHolders++;
+    if (passesLiquidity) this.microCapTracker.passedLiquidity++;
+
+    // Track if passes all safety checks (could be opportunity)
+    if (passesConcentration && passesHolders && passesLiquidity) {
+      this.microCapTracker.passedSafety++;
+    }
+
+    // Update rolling averages
+    const n = this.microCapTracker.total;
+    this.microCapTracker.avgConcentration =
+      ((this.microCapTracker.avgConcentration * (n - 1)) + token.top10Concentration) / n;
+    this.microCapTracker.avgHolderCount =
+      ((this.microCapTracker.avgHolderCount * (n - 1)) + token.holderCount) / n;
+    this.microCapTracker.avgLiquidity =
+      ((this.microCapTracker.avgLiquidity * (n - 1)) + token.liquidityPool) / n;
+
+    // Store sample (keep last 20)
+    this.microCapTracker.samples.push({
+      ticker: token.ticker,
+      mcap: token.marketCap,
+      concentration: token.top10Concentration,
+      holders: token.holderCount,
+      liquidity: token.liquidityPool,
+      volume24h: token.volume24h,
+      age: token.tokenAge / 60, // Convert to hours
+      timestamp: new Date(),
+    });
+
+    // Keep only last 20 samples
+    if (this.microCapTracker.samples.length > 20) {
+      this.microCapTracker.samples.shift();
+    }
+
+    logger.debug({
+      ticker: token.ticker,
+      mcap: token.marketCap,
+      concentration: token.top10Concentration,
+      holders: token.holderCount,
+      passedSafety: passesConcentration && passesHolders && passesLiquidity,
+    }, 'Tracked micro-cap token for opportunity analysis');
+  }
+
+  /**
+   * Get micro-cap opportunity analysis
+   * Returns stats on tokens in the $200K-$500K range that are currently being skipped
+   */
+  getMicroCapAnalysis(): {
+    total: number;
+    passedSafety: number;
+    passedSafetyPct: number;
+    passedConcentration: number;
+    passedConcentrationPct: number;
+    passedHolders: number;
+    passedHoldersPct: number;
+    passedLiquidity: number;
+    passedLiquidityPct: number;
+    avgConcentration: number;
+    avgHolderCount: number;
+    avgLiquidity: number;
+    recentSamples: Array<{
+      ticker: string;
+      mcap: number;
+      concentration: number;
+      holders: number;
+      liquidity: number;
+      volume24h: number;
+      age: number;
+      timestamp: Date;
+    }>;
+    recommendation: string;
+  } {
+    const total = this.microCapTracker.total;
+
+    // Calculate percentages
+    const passedSafetyPct = total > 0 ? (this.microCapTracker.passedSafety / total) * 100 : 0;
+    const passedConcentrationPct = total > 0 ? (this.microCapTracker.passedConcentration / total) * 100 : 0;
+    const passedHoldersPct = total > 0 ? (this.microCapTracker.passedHolders / total) * 100 : 0;
+    const passedLiquidityPct = total > 0 ? (this.microCapTracker.passedLiquidity / total) * 100 : 0;
+
+    // Generate recommendation based on data
+    let recommendation: string;
+    if (total < 10) {
+      recommendation = 'Insufficient data - need more scan cycles to analyze';
+    } else if (passedSafetyPct >= 30) {
+      recommendation = `✅ OPPORTUNITY: ${passedSafetyPct.toFixed(0)}% pass all safety checks. Consider adding MICRO tier ($200K-$500K) with 250+ holders, 75% max concentration`;
+    } else if (passedSafetyPct >= 15) {
+      recommendation = `⚠️ MODERATE OPPORTUNITY: ${passedSafetyPct.toFixed(0)}% pass safety. Could work with stricter filters (300+ holders, 60% max concentration)`;
+    } else if (this.microCapTracker.avgConcentration > 80) {
+      recommendation = `❌ HIGH RISK: Avg concentration ${this.microCapTracker.avgConcentration.toFixed(0)}% - most tokens heavily controlled by whales/snipers`;
+    } else {
+      recommendation = `❌ LIMITED OPPORTUNITY: Only ${passedSafetyPct.toFixed(0)}% pass safety. Likely dominated by bundles/snipers`;
+    }
+
+    return {
+      total,
+      passedSafety: this.microCapTracker.passedSafety,
+      passedSafetyPct,
+      passedConcentration: this.microCapTracker.passedConcentration,
+      passedConcentrationPct,
+      passedHolders: this.microCapTracker.passedHolders,
+      passedHoldersPct,
+      passedLiquidity: this.microCapTracker.passedLiquidity,
+      passedLiquidityPct,
+      avgConcentration: this.microCapTracker.avgConcentration,
+      avgHolderCount: this.microCapTracker.avgHolderCount,
+      avgLiquidity: this.microCapTracker.avgLiquidity,
+      recentSamples: [...this.microCapTracker.samples].reverse(), // Most recent first
+      recommendation,
+    };
+  }
+
+  /**
+   * Reset micro-cap tracker (call at start of day or when needed)
+   */
+  resetMicroCapTracker(): void {
+    this.microCapTracker = {
+      total: 0,
+      passedSafety: 0,
+      passedConcentration: 0,
+      passedHolders: 0,
+      passedLiquidity: 0,
+      avgConcentration: 0,
+      avgHolderCount: 0,
+      avgLiquidity: 0,
+      samples: [],
+    };
+    logger.info('Micro-cap tracker reset');
   }
 }
 

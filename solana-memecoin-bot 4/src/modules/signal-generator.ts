@@ -37,6 +37,9 @@ import { smallCapitalManager, SignalQuality } from './small-capital-manager.js';
 // Performance tracking and prediction
 import { signalPerformanceTracker, thresholdOptimizer, winPredictor, WinPrediction, performanceLogger } from './performance/index.js';
 
+// MEV bot detection for early pump signals
+import { mevDetector, MEVSignal } from './mev-detector.js';
+
 // Social/X integration
 import { socialAnalyzer } from './social/index.js';
 
@@ -1001,9 +1004,25 @@ export class SignalGenerator {
     }, 'Token PASSED on-chain + social score check - proceeding to evaluation');
 
     // Step 4: Get additional data for position sizing and display
-    const bundleAnalysis = await bundleDetector.analyze(tokenAddress);
-    const momentumData = await momentumAnalyzer.analyze(tokenAddress);
+    // Run bundle, momentum, and MEV analysis in parallel for speed
+    const [bundleAnalysis, momentumData, mevSignal] = await Promise.all([
+      bundleDetector.analyze(tokenAddress),
+      momentumAnalyzer.analyze(tokenAddress),
+      mevDetector.analyzeToken(tokenAddress),
+    ]);
     const momentumScore = momentumData ? momentumAnalyzer.calculateScore(momentumData) : null;
+
+    // Log MEV activity if detected (early pump signal)
+    if (mevSignal.isEarlyPumpSignal) {
+      logger.info({
+        tokenAddress: shortAddr,
+        ticker: metrics.ticker,
+        mevActivity: mevSignal.activityLevel,
+        botsActive: mevSignal.botWalletsActive,
+        recommendation: mevSignal.recommendation,
+        reasoning: mevSignal.reasoning,
+      }, '🤖 MEV EARLY PUMP SIGNAL - Bot activity suggests potential pump');
+    }
 
     // Step 4.5: TRACK-SPECIFIC REQUIREMENTS
     // Different requirements for PROVEN_RUNNER vs EARLY_QUALITY
@@ -1255,7 +1274,8 @@ export class SignalGenerator {
       ctoAnalysis,
       prediction,
       signalTrack!,      // Track type (PROVEN_RUNNER or EARLY_QUALITY)
-      kolReputationTier  // KOL tier (for EARLY_QUALITY track)
+      kolReputationTier, // KOL tier (for EARLY_QUALITY track)
+      mevSignal          // MEV bot activity signal
     );
 
     // Track for KOL follow-up (optional validation)
@@ -1358,7 +1378,8 @@ export class SignalGenerator {
     ctoAnalysis?: CTOAnalysis,
     prediction?: WinPrediction,
     signalTrack: SignalTrack = SignalTrack.PROVEN_RUNNER,
-    kolReputation?: KolReputationTier
+    kolReputation?: KolReputationTier,
+    mevSignal?: MEVSignal
   ): DiscoverySignal {
     // Build risk warnings
     const riskWarnings: string[] = [];
@@ -1376,6 +1397,13 @@ export class SignalGenerator {
       riskWarnings.push(`Bundle risk: ${bundleAnalysis.riskScore}% (${bundleAnalysis.riskLevel})`);
     }
     riskWarnings.push(...onChainScore.warnings);
+
+    // MEV activity warnings/info
+    if (mevSignal?.isEarlyPumpSignal) {
+      riskWarnings.push(`🤖 MEV PUMP SIGNAL: ${mevSignal.botWalletsActive} bots active - potential early pump`);
+    } else if (mevSignal?.activityLevel === 'HIGH') {
+      riskWarnings.push(`⚠️ High MEV activity: ${mevSignal.recentMEVCount} events - watch for slippage`);
+    }
 
     // AUDIT FIX: Calculate social momentum score from collected metrics
     // Previously set to 0, wasting valuable social signals that were already collected
@@ -1413,6 +1441,9 @@ export class SignalGenerator {
         `MOMENTUM_${onChainScore.components.momentum}`,
         ...(socialMomentumScore > 30 ? ['SOCIAL_TRACTION'] : []),
         ...onChainScore.bullishSignals.slice(0, 3),
+        // NEW: Add MEV flags if bot activity detected
+        ...(mevSignal?.isEarlyPumpSignal ? ['MEV_PUMP_SIGNAL'] : []),
+        ...(mevSignal?.activityLevel === 'HIGH' ? ['HIGH_MEV_ACTIVITY'] : []),
       ],
       riskLevel: onChainScore.riskLevel === 'HIGH' || onChainScore.riskLevel === 'CRITICAL' ? 'HIGH' :
                  onChainScore.riskLevel === 'MEDIUM' ? 'MEDIUM' : 'LOW',

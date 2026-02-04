@@ -214,25 +214,51 @@ export class MatureTokenScanner {
   }
 
   /**
-   * Get candidate tokens (24hrs - 14 days old)
+   * Get candidate tokens from multiple sources
+   * Primary: Birdeye token list filtered by market cap range
+   * Secondary: Birdeye trending, DexScreener trending
    */
   private async getCandidateTokens(): Promise<TokenMetrics[]> {
     const candidates: TokenMetrics[] = [];
+    const seenAddresses = new Set<string>();
     let fetchedCount = 0;
     let metricsFailedCount = 0;
     let tooYoungCount = 0;
     let tooOldCount = 0;
 
     try {
-      // Get trending tokens from DexScreener
-      const trendingAddresses = await dexScreenerClient.getTrendingSolanaTokens(200);
-      fetchedCount = trendingAddresses.length;
+      // Source 1: Birdeye tokens in our target market cap range ($500K - $150M)
+      const birdeyeMcapTokens = await birdeyeClient.getTokensByMarketCapRange(
+        this.eligibility.minMarketCap,
+        this.eligibility.maxMarketCap,
+        100
+      );
+      for (const addr of birdeyeMcapTokens) {
+        seenAddresses.add(addr);
+      }
+
+      // Source 2: Birdeye trending tokens (may include larger caps we can filter)
+      const birdeyeTrending = await birdeyeClient.getTrendingTokens(50);
+      for (const addr of birdeyeTrending) {
+        seenAddresses.add(addr);
+      }
+
+      // Source 3: DexScreener trending (fallback, includes boosts)
+      const dexTrending = await dexScreenerClient.getTrendingSolanaTokens(50);
+      for (const addr of dexTrending) {
+        seenAddresses.add(addr);
+      }
+
+      const allAddresses = Array.from(seenAddresses);
+      fetchedCount = allAddresses.length;
+
+      logger.info(`📊 FUNNEL: Discovery sources - Birdeye mcap: ${birdeyeMcapTokens.length}, Birdeye trending: ${birdeyeTrending.length}, DexScreener: ${dexTrending.length}, Total unique: ${fetchedCount}`);
 
       // Get metrics for each and filter by age
       const minAgeMinutes = this.eligibility.minTokenAgeHours * 60;
       const maxAgeMinutes = this.eligibility.maxTokenAgeDays * 24 * 60;
 
-      for (const address of trendingAddresses) {
+      for (const address of allAddresses) {
         try {
           const metrics = await getTokenMetrics(address);
           if (!metrics) {

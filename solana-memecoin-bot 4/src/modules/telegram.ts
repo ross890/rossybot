@@ -457,6 +457,7 @@ export class TelegramAlertBot {
       { command: 'stats', description: 'Historical performance dashboard' },
       { command: 'recent', description: 'Recent signals & performance' },
       { command: 'tierperf', description: 'Win rate by tier' },
+      { command: 'microcap', description: '$200K-$500K opportunity analysis' },
       { command: 'funnel', description: 'Token filtering funnel stats' },
       { command: 'sources', description: 'Discovery source health' },
       { command: 'volumespikes', description: 'Volume anomaly scanner' },
@@ -524,6 +525,7 @@ export class TelegramAlertBot {
         '/funnel - Filtering funnel\n' +
         '/sources - API health\n' +
         '/volumespikes - Volume anomalies\n' +
+        '/microcap - $200K-$500K analysis\n' +
         '/tiers - Tier requirements\n\n' +
         '*Analysis:*\n' +
         '/safety <token> - Safety check\n' +
@@ -1086,6 +1088,63 @@ export class TelegramAlertBot {
         const errorMessage = error instanceof Error ? error.message : 'Unknown error';
         logger.error({ error, chatId }, 'Failed to get tier performance');
         await this.bot!.sendMessage(chatId, `Failed to get tier performance: ${errorMessage}`);
+      }
+    });
+
+    // /microcap command - Analyze $200K-$500K opportunity
+    this.bot.onText(/\/microcap/, async (msg) => {
+      const chatId = msg.chat.id;
+
+      try {
+        const { matureTokenScanner } = await import('./mature-token/index.js');
+        const analysis = matureTokenScanner.getMicroCapAnalysis();
+
+        let message = '*🔬 Micro-Cap Opportunity Analysis*\n';
+        message += '*Range: $200K - $500K*\n\n';
+
+        if (analysis.total < 5) {
+          message += '⏳ _Collecting data... Need more scan cycles._\n\n';
+          message += `Tokens tracked so far: ${analysis.total}\n`;
+          message += '_Check back after a few scans._';
+          await this.bot!.sendMessage(chatId, message, { parse_mode: 'Markdown' });
+          return;
+        }
+
+        // Safety stats
+        message += `*📊 Sample Size:* ${analysis.total} tokens\n\n`;
+
+        message += '*Safety Filter Results:*\n';
+        const safetyEmoji = analysis.passedSafetyPct >= 30 ? '✅' :
+          analysis.passedSafetyPct >= 15 ? '⚠️' : '❌';
+        message += `${safetyEmoji} Pass ALL filters: ${analysis.passedSafetyPct.toFixed(0)}% (${analysis.passedSafety}/${analysis.total})\n`;
+        message += `   • Concentration ≤75%: ${analysis.passedConcentrationPct.toFixed(0)}% (${analysis.passedConcentration})\n`;
+        message += `   • Holders ≥250: ${analysis.passedHoldersPct.toFixed(0)}% (${analysis.passedHolders})\n`;
+        message += `   • Liquidity ≥$10K: ${analysis.passedLiquidityPct.toFixed(0)}% (${analysis.passedLiquidity})\n\n`;
+
+        message += '*Averages in this range:*\n';
+        message += `   • Avg Concentration: ${analysis.avgConcentration.toFixed(0)}%\n`;
+        message += `   • Avg Holders: ${analysis.avgHolderCount.toFixed(0)}\n`;
+        message += `   • Avg Liquidity: $${(analysis.avgLiquidity / 1000).toFixed(0)}K\n\n`;
+
+        // Recent samples
+        if (analysis.recentSamples.length > 0) {
+          message += '*Recent Tokens in Range:*\n';
+          for (const sample of analysis.recentSamples.slice(0, 5)) {
+            const safeEmoji = sample.concentration <= 75 && sample.holders >= 250 ? '✅' : '❌';
+            message += `${safeEmoji} $${this.escapeMarkdown(sample.ticker)} - $${(sample.mcap / 1000).toFixed(0)}K | ${sample.holders} holders | ${sample.concentration.toFixed(0)}% conc\n`;
+          }
+          message += '\n';
+        }
+
+        // Recommendation
+        message += '*🎯 Analysis:*\n';
+        message += analysis.recommendation;
+
+        await this.bot!.sendMessage(chatId, message, { parse_mode: 'Markdown' });
+      } catch (error) {
+        const errorMessage = error instanceof Error ? error.message : 'Unknown error';
+        logger.error({ error, chatId }, 'Failed to get micro-cap analysis');
+        await this.bot!.sendMessage(chatId, `Failed to analyze micro-caps: ${errorMessage}`);
       }
     });
 

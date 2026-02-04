@@ -679,7 +679,7 @@ export const DEFAULT_ELIGIBILITY: MatureTokenEligibility = {
 
   // Holder requirements (tier-specific via TIER_CONFIG)
   minHolderCount: 100,        // Base requirement, RISING tier requires 500+
-  maxTop10Concentration: 60,  // Max 60% in top 10 (relaxed for memecoins)
+  maxTop10Concentration: 75,  // Max 75% in top 10 (relaxed for memecoins)
 
   // Safety requirements
   mintAuthorityDisabled: true,

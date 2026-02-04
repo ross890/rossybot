@@ -6,7 +6,7 @@
 
 import { logger } from '../../utils/logger.js';
 import { Database, pool } from '../../utils/database.js';
-import { getTokenMetrics, dexScreenerClient, birdeyeClient } from '../onchain.js';
+import { getTokenMetrics, dexScreenerClient, birdeyeClient, jupiterClient } from '../onchain.js';
 import { tokenSafetyChecker } from '../safety/token-safety-checker.js';
 import { matureTokenScorer } from './mature-token-scorer.js';
 import { matureTokenTelegram } from './telegram-formatter.js';
@@ -237,13 +237,23 @@ export class MatureTokenScanner {
         seenAddresses.add(addr);
       }
 
-      // Source 2: Birdeye trending tokens (may include larger caps we can filter)
+      // Source 2: Jupiter verified tokens (high quality, vetted tokens)
+      const jupiterVerified = await jupiterClient.getVerifiedTokens(
+        this.eligibility.minMarketCap,
+        this.eligibility.maxMarketCap,
+        100
+      );
+      for (const addr of jupiterVerified) {
+        seenAddresses.add(addr);
+      }
+
+      // Source 3: Birdeye trending tokens (may include larger caps we can filter)
       const birdeyeTrending = await birdeyeClient.getTrendingTokens(50);
       for (const addr of birdeyeTrending) {
         seenAddresses.add(addr);
       }
 
-      // Source 3: DexScreener trending (fallback, includes boosts)
+      // Source 4: DexScreener trending (fallback, includes boosts)
       const dexTrending = await dexScreenerClient.getTrendingSolanaTokens(50);
       for (const addr of dexTrending) {
         seenAddresses.add(addr);
@@ -252,7 +262,7 @@ export class MatureTokenScanner {
       const allAddresses = Array.from(seenAddresses);
       fetchedCount = allAddresses.length;
 
-      logger.info(`📊 FUNNEL: Discovery sources - Birdeye mcap: ${birdeyeMcapTokens.length}, Birdeye trending: ${birdeyeTrending.length}, DexScreener: ${dexTrending.length}, Total unique: ${fetchedCount}`);
+      logger.info(`📊 FUNNEL: Discovery sources - Birdeye mcap: ${birdeyeMcapTokens.length}, Jupiter verified: ${jupiterVerified.length}, Birdeye trending: ${birdeyeTrending.length}, DexScreener: ${dexTrending.length}, Total unique: ${fetchedCount}`);
 
       // Get metrics for each and filter by age
       const minAgeMinutes = this.eligibility.minTokenAgeHours * 60;

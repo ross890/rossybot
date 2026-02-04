@@ -1477,11 +1477,111 @@ export async function analyzeCTO(
   return result;
 }
 
+// ============ JUPITER CLIENT ============
+
+class JupiterClient {
+  private client: AxiosInstance;
+  private tokenListCache: { tokens: any[]; expiry: number } | null = null;
+  private readonly CACHE_TTL_MS = 10 * 60 * 1000; // 10 minute cache (token list doesn't change often)
+
+  constructor() {
+    this.client = axios.create({
+      baseURL: 'https://token.jup.ag',
+      timeout: 15000,
+    });
+  }
+
+  /**
+   * Get verified tokens from Jupiter's strict list
+   * These are tokens that have been vetted by Jupiter
+   * Returns tokens filtered by market cap range
+   */
+  async getVerifiedTokens(
+    minMarketCap: number,
+    maxMarketCap: number,
+    limit = 100
+  ): Promise<string[]> {
+    try {
+      // Check cache first
+      const now = Date.now();
+      if (this.tokenListCache && this.tokenListCache.expiry > now) {
+        return this.filterTokensByMarketCap(this.tokenListCache.tokens, minMarketCap, maxMarketCap, limit);
+      }
+
+      // Fetch strict (verified) token list
+      const response = await this.client.get('/strict');
+      const tokens = response.data || [];
+
+      // Cache the full list
+      this.tokenListCache = {
+        tokens,
+        expiry: now + this.CACHE_TTL_MS,
+      };
+
+      logger.info({ totalTokens: tokens.length }, 'Fetched Jupiter verified token list');
+
+      return this.filterTokensByMarketCap(tokens, minMarketCap, maxMarketCap, limit);
+    } catch (error: any) {
+      logger.error({ error: error?.message }, 'Failed to fetch Jupiter verified tokens');
+      return [];
+    }
+  }
+
+  /**
+   * Filter tokens by market cap range
+   * Jupiter tokens have extensions.coingeckoId which we can use,
+   * but for now we return all verified tokens and let the metrics check filter by mcap
+   */
+  private filterTokensByMarketCap(
+    tokens: any[],
+    _minMarketCap: number,
+    _maxMarketCap: number,
+    limit: number
+  ): string[] {
+    // Jupiter's strict list contains verified tokens
+    // We return addresses and let the metrics fetching do the mcap filtering
+    // (Jupiter list doesn't include market cap directly)
+    const addresses = tokens
+      .filter((t: any) => t.address && t.chainId === 101) // 101 = Solana mainnet
+      .slice(0, limit)
+      .map((t: any) => t.address);
+
+    logger.info({ count: addresses.length }, 'Returning Jupiter verified token addresses');
+    return addresses;
+  }
+
+  /**
+   * Get all verified token addresses (no market cap filter)
+   * Useful for checking if a token is Jupiter-verified
+   */
+  async getAllVerifiedAddresses(): Promise<Set<string>> {
+    try {
+      const now = Date.now();
+      if (this.tokenListCache && this.tokenListCache.expiry > now) {
+        return new Set(this.tokenListCache.tokens.map((t: any) => t.address));
+      }
+
+      const response = await this.client.get('/strict');
+      const tokens = response.data || [];
+
+      this.tokenListCache = {
+        tokens,
+        expiry: now + this.CACHE_TTL_MS,
+      };
+
+      return new Set(tokens.map((t: any) => t.address));
+    } catch (error) {
+      return new Set();
+    }
+  }
+}
+
 // ============ SINGLETON INSTANCES ============
 
 export const heliusClient = new HeliusClient();
 export const birdeyeClient = new BirdeyeClient();
 export const dexScreenerClient = new DexScreenerClient();
+export const jupiterClient = new JupiterClient();
 
 // ============ COMBINED DATA FETCHING ============
 

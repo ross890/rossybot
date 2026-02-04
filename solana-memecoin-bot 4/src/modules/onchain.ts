@@ -963,9 +963,9 @@ class BirdeyeClient {
     limit = 100
   ): Promise<string[]> {
     try {
-      // Use Birdeye v3 token list endpoint with sorting and filtering
+      // Use original Birdeye tokenlist endpoint (NOT v3)
       // Sort by volume to get the most active tokens
-      const response = await this.client.get('/defi/v3/token/list', {
+      const response = await this.client.get('/defi/tokenlist', {
         params: {
           sort_by: 'v24hUSD',      // Sort by 24h volume (most active)
           sort_type: 'desc',
@@ -975,13 +975,12 @@ class BirdeyeClient {
         },
       });
 
-      // V3 API may have different response structure - try multiple paths
-      const tokens = response.data?.data?.items || response.data?.data?.tokens || response.data?.data || [];
+      const tokens = response.data?.data?.tokens || response.data?.data || [];
       const addresses: string[] = [];
 
       // Filter by market cap range
       for (const token of tokens) {
-        const mcap = token.mc || token.marketCap || token.fdv || 0;
+        const mcap = token.mc || token.marketCap || 0;
         if (mcap >= minMarketCap && mcap <= maxMarketCap && token.address) {
           addresses.push(token.address);
         }
@@ -1011,20 +1010,20 @@ class BirdeyeClient {
    * Get trending/gainers tokens from Birdeye
    * Alternative source for token discovery
    */
-  async getTrendingTokens(limit = 50): Promise<string[]> {
+  async getTrendingTokens(limit = 20): Promise<string[]> {
     try {
-      // Use Birdeye v3 trending endpoint
-      const response = await this.client.get('/defi/v3/token/trending', {
+      // Use correct Birdeye trending endpoint (NOT v3)
+      // Max limit is 20 per Birdeye docs
+      const response = await this.client.get('/defi/token_trending', {
         params: {
           sort_by: 'rank',
           sort_type: 'asc',
           offset: 0,
-          limit: limit,
+          limit: Math.min(limit, 20),
         },
       });
 
-      // V3 API may have different response structure
-      const tokens = response.data?.data?.items || response.data?.data?.tokens || response.data?.data || [];
+      const tokens = response.data?.data?.tokens || response.data?.data || [];
       const addresses = tokens
         .filter((t: any) => t.address)
         .map((t: any) => t.address);
@@ -1039,6 +1038,36 @@ class BirdeyeClient {
         status,
         responseData: JSON.stringify(responseData)?.slice(0, 200),
       }, 'Failed to get trending tokens from Birdeye');
+      return [];
+    }
+  }
+
+  /**
+   * Get meme tokens from Birdeye v3 meme list
+   * Better source for memecoin discovery
+   */
+  async getMemeTokens(limit = 100): Promise<string[]> {
+    try {
+      const response = await this.client.get('/defi/v3/token/meme/list', {
+        params: {
+          offset: 0,
+          limit: limit,
+        },
+      });
+
+      const tokens = response.data?.data?.items || response.data?.data?.tokens || response.data?.data || [];
+      const addresses = tokens
+        .filter((t: any) => t.address)
+        .map((t: any) => t.address);
+
+      logger.info({ count: addresses.length }, 'Fetched meme tokens from Birdeye');
+      return addresses;
+    } catch (error: any) {
+      const status = error?.response?.status;
+      logger.warn({
+        error: error?.message,
+        status,
+      }, 'Failed to get meme tokens from Birdeye');
       return [];
     }
   }
@@ -1496,73 +1525,76 @@ export async function analyzeCTO(
 
 class JupiterClient {
   private client: AxiosInstance;
-  private tokenListCache: { tokens: any[]; expiry: number } | null = null;
-  private readonly CACHE_TTL_MS = 10 * 60 * 1000; // 10 minute cache (token list doesn't change often)
+  private tokenListCache: { tokens: string[]; expiry: number } | null = null;
+  private readonly CACHE_TTL_MS = 10 * 60 * 1000; // 10 minute cache
 
   constructor() {
+    // Updated to new Jupiter lite-api (old token.jup.ag returns 403)
     this.client = axios.create({
-      baseURL: 'https://token.jup.ag',
+      baseURL: 'https://lite-api.jup.ag',
       timeout: 15000,
     });
   }
 
   /**
-   * Get verified tokens from Jupiter's strict list
-   * These are tokens that have been vetted by Jupiter
-   * Returns tokens filtered by market cap range
+   * Get verified tokens from Jupiter
+   * Uses the new v2 API endpoint for verified tokens
    */
   async getVerifiedTokens(
-    minMarketCap: number,
-    maxMarketCap: number,
+    _minMarketCap: number,
+    _maxMarketCap: number,
     limit = 100
   ): Promise<string[]> {
     try {
       // Check cache first
       const now = Date.now();
       if (this.tokenListCache && this.tokenListCache.expiry > now) {
-        return this.filterTokensByMarketCap(this.tokenListCache.tokens, minMarketCap, maxMarketCap, limit);
+        logger.info({ count: this.tokenListCache.tokens.length, cached: true }, 'Returning cached Jupiter tokens');
+        return this.tokenListCache.tokens.slice(0, limit);
       }
 
-      // Fetch strict (verified) token list
-      const response = await this.client.get('/strict');
-      const tokens = response.data || [];
+      // Fetch verified tokens from new v2 API
+      const response = await this.client.get('/tokens/v2/tag', {
+        params: { query: 'verified' },
+      });
 
-      // Cache the full list
+      // Response structure: { mints: [...], mintInfoMap: {...} }
+      const mints = response.data?.mints || [];
+
+      // Cache the token addresses
       this.tokenListCache = {
-        tokens,
+        tokens: mints,
         expiry: now + this.CACHE_TTL_MS,
       };
 
-      logger.info({ totalTokens: tokens.length }, 'Fetched Jupiter verified token list');
-
-      return this.filterTokensByMarketCap(tokens, minMarketCap, maxMarketCap, limit);
+      logger.info({ totalTokens: mints.length }, 'Fetched Jupiter verified tokens');
+      return mints.slice(0, limit);
     } catch (error: any) {
-      logger.error({ error: error?.message }, 'Failed to fetch Jupiter verified tokens');
+      const status = error?.response?.status;
+      logger.error({
+        error: error?.message,
+        status,
+        url: 'lite-api.jup.ag/tokens/v2/tag?query=verified'
+      }, 'Failed to fetch Jupiter verified tokens');
       return [];
     }
   }
 
   /**
-   * Filter tokens by market cap range
-   * Jupiter tokens have extensions.coingeckoId which we can use,
-   * but for now we return all verified tokens and let the metrics check filter by mcap
+   * Get recent/trending tokens from Jupiter
+   * Alternative source for token discovery
    */
-  private filterTokensByMarketCap(
-    tokens: any[],
-    _minMarketCap: number,
-    _maxMarketCap: number,
-    limit: number
-  ): string[] {
-    // Jupiter's strict list contains verified tokens
-    // We return addresses and let the metrics fetching do the mcap filtering
-    // (Jupiter list doesn't include market cap directly)
-    const addresses = tokens
-      .filter((t: any) => t.address && t.chainId === 101) // 101 = Solana mainnet
-      .slice(0, limit)
-      .map((t: any) => t.address);
+  async getRecentTokens(limit = 50): Promise<string[]> {
+    try {
+      const response = await this.client.get('/tokens/v2/recent');
+      const mints = response.data?.mints || [];
 
-    logger.info({ count: addresses.length }, 'Returning Jupiter verified token addresses');
-    return addresses;
+      logger.info({ count: mints.length }, 'Fetched Jupiter recent tokens');
+      return mints.slice(0, limit);
+    } catch (error: any) {
+      logger.warn({ error: error?.message }, 'Failed to fetch Jupiter recent tokens');
+      return [];
+    }
   }
 
   /**
@@ -1573,18 +1605,21 @@ class JupiterClient {
     try {
       const now = Date.now();
       if (this.tokenListCache && this.tokenListCache.expiry > now) {
-        return new Set(this.tokenListCache.tokens.map((t: any) => t.address));
+        return new Set(this.tokenListCache.tokens);
       }
 
-      const response = await this.client.get('/strict');
-      const tokens = response.data || [];
+      // Use same v2 API endpoint
+      const response = await this.client.get('/tokens/v2/tag', {
+        params: { query: 'verified' },
+      });
+      const mints = response.data?.mints || [];
 
       this.tokenListCache = {
-        tokens,
+        tokens: mints,
         expiry: now + this.CACHE_TTL_MS,
       };
 
-      return new Set(tokens.map((t: any) => t.address));
+      return new Set(mints);
     } catch (error) {
       return new Set();
     }

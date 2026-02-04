@@ -138,6 +138,9 @@ async function main(): Promise<void> {
   // Initialize database
   await initializeDatabase();
 
+  // Initialize Telegram bot (must be done early for commands to work)
+  await telegramBot.initialize();
+
   // Initialize signal generators based on config
   if (appConfig.trading.enableEarlyStrategy) {
     await signalGenerator.initialize();

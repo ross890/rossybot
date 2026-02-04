@@ -293,11 +293,15 @@ export class MatureTokenScanner {
     // Track tier distribution
     const tierCounts: Record<string, number> = { RISING: 0, EMERGING: 0, GRADUATED: 0, ESTABLISHED: 0 };
 
+    // Track rejected market caps for logging
+    const rejectedMcaps: string[] = [];
+
     for (const token of tokens) {
       // Market cap check (must be in one of our tiers)
       if (token.marketCap < this.eligibility.minMarketCap ||
           token.marketCap > this.eligibility.maxMarketCap) {
         rejections.marketCapOutOfRange++;
+        rejectedMcaps.push(`${token.ticker}=$${(token.marketCap / 1_000_000).toFixed(1)}M`);
         continue;
       }
 
@@ -368,6 +372,11 @@ export class MatureTokenScanner {
     this.funnelStats.tiers = tierCounts as { RISING: number; EMERGING: number; GRADUATED: number; ESTABLISHED: number };
 
     logger.info(`📊 FUNNEL: Eligibility - Input: ${tokens.length}, Eligible: ${eligible.length} | Rejections: mcap=${rejections.marketCapOutOfRange}, vol=${rejections.volumeTooLow}, holders=${rejections.holdersTooLow}, liq=${rejections.liquidityTooLow}, conc=${rejections.concentrationTooHigh}, cooldown=${rejections.onCooldown} | Tiers: R=${tierCounts.RISING} E=${tierCounts.EMERGING} G=${tierCounts.GRADUATED} EST=${tierCounts.ESTABLISHED}`);
+
+    // Log rejected market caps if any (to debug why tokens aren't matching tiers)
+    if (rejectedMcaps.length > 0) {
+      logger.info(`📊 FUNNEL: Rejected mcaps (range $0.5M-$150M): ${rejectedMcaps.join(', ')}`);
+    }
 
     return eligible;
   }

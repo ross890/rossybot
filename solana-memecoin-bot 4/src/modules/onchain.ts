@@ -955,7 +955,7 @@ class BirdeyeClient {
   /**
    * Get tokens by market cap range from Birdeye
    * This is the primary source for mature token discovery
-   * Uses the /defi/tokenlist endpoint with market cap filters
+   * Uses the /defi/v3/token/list endpoint (V1/V2 deprecated March 2025)
    */
   async getTokensByMarketCapRange(
     minMarketCap: number,
@@ -963,25 +963,26 @@ class BirdeyeClient {
     limit = 100
   ): Promise<string[]> {
     try {
-      // Use original Birdeye tokenlist endpoint (NOT v3)
-      // Sort by volume to get the most active tokens
-      const response = await this.client.get('/defi/tokenlist', {
+      // Use Birdeye V3 token list endpoint (V1/V2 deprecated March 2025)
+      // V3 supports min_mc and max_mc filters directly
+      const response = await this.client.get('/defi/v3/token/list', {
         params: {
-          sort_by: 'v24hUSD',      // Sort by 24h volume (most active)
+          sort_by: 'volume_24h_usd',  // V3 parameter name
           sort_type: 'desc',
           offset: 0,
           limit: limit,
-          min_liquidity: 25000,   // $25K minimum liquidity
+          min_liquidity: 15000,       // Lowered for bear market
+          min_mc: minMarketCap,       // V3 supports direct mcap filtering
+          max_mc: maxMarketCap,
         },
       });
 
-      const tokens = response.data?.data?.tokens || response.data?.data || [];
+      // V3 response format: { data: { items: [...] } }
+      const tokens = response.data?.data?.items || response.data?.data?.tokens || response.data?.data || [];
       const addresses: string[] = [];
 
-      // Filter by market cap range
       for (const token of tokens) {
-        const mcap = token.mc || token.marketCap || 0;
-        if (mcap >= minMarketCap && mcap <= maxMarketCap && token.address) {
+        if (token.address) {
           addresses.push(token.address);
         }
       }
@@ -991,17 +992,20 @@ class BirdeyeClient {
         inRange: addresses.length,
         minMcap: `$${(minMarketCap / 1_000_000).toFixed(1)}M`,
         maxMcap: `$${(maxMarketCap / 1_000_000).toFixed(1)}M`,
-      }, 'Fetched tokens by market cap range from Birdeye');
+      }, 'Fetched tokens by market cap range from Birdeye V3');
 
       return addresses;
     } catch (error: any) {
       const status = error?.response?.status;
       const responseData = error?.response?.data;
-      logger.error({
+
+      // Log specific error for debugging
+      logger.warn({
         error: error?.message,
         status,
         responseData: JSON.stringify(responseData)?.slice(0, 200),
-      }, 'Failed to get tokens by market cap from Birdeye');
+      }, 'Birdeye V3 tokenlist failed - relying on other discovery sources');
+
       return [];
     }
   }

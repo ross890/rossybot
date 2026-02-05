@@ -16,8 +16,11 @@ const envSchema = z.object({
   REDIS_URL: z.string().min(1),
 
   // APIs
-  HELIUS_API_KEY: z.string().min(1),
-  HELIUS_RPC_URL: z.string().url(),
+  // Helius can be disabled when rate limited - uses Birdeye fallback for security checks
+  // Set HELIUS_DISABLED=true to run without Helius (top10 concentration defaults to 50%)
+  HELIUS_DISABLED: z.string().optional().transform(val => val?.toLowerCase() === 'true'),
+  HELIUS_API_KEY: z.string().optional().default(''),
+  HELIUS_RPC_URL: z.string().optional().default('https://mainnet.helius-rpc.com'),
   BIRDEYE_API_KEY: z.string().min(1),
 
   // Twitter/X API - supports both Bearer Token or Consumer Key/Secret
@@ -85,6 +88,7 @@ function loadConfig(): AppConfig {
     redisUrl: env.REDIS_URL,
     heliusApiKey: env.HELIUS_API_KEY,
     heliusRpcUrl: env.HELIUS_RPC_URL,
+    heliusDisabled: env.HELIUS_DISABLED || false,
     birdeyeApiKey: env.BIRDEYE_API_KEY,
     twitterBearerToken: env.TWITTER_BEARER_TOKEN || '',
     twitterConsumerKey: env.TWITTER_CONSUMER_KEY || '',

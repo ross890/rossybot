@@ -47,7 +47,15 @@ function printStartupDiagnostics(): void {
   // API Connections
   logger.info('');
   logger.info('🔌 API CONNECTIONS');
-  logger.info(`   Helius (RPC): ${appConfig.heliusApiKey ? '✅ Configured' : '❌ MISSING - on-chain analysis disabled'}`);
+  if (appConfig.heliusDisabled) {
+    logger.info('   Helius (RPC): ⚠️ DISABLED (rate limit mode)');
+    logger.info('      → Using Birdeye fallback for security checks');
+    logger.info('      → Top 10 concentration defaulting to 50%');
+    logger.info('      → Bundle analysis disabled');
+    logger.info('      → Set HELIUS_DISABLED=false when quota resets');
+  } else {
+    logger.info(`   Helius (RPC): ${appConfig.heliusApiKey ? '✅ Configured' : '❌ MISSING - on-chain analysis disabled'}`);
+  }
   logger.info(`   Birdeye: ${appConfig.birdeyeApiKey ? '✅ Configured' : '❌ MISSING - token metrics disabled'}`);
   logger.info(`   Telegram: ${appConfig.telegramBotToken ? '✅ Configured' : '❌ MISSING - alerts disabled'}`);
 

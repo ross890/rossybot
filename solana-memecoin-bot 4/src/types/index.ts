@@ -559,6 +559,7 @@ export interface AppConfig {
   redisUrl: string;
   heliusApiKey: string;
   heliusRpcUrl: string;
+  heliusDisabled: boolean;  // Set to true to disable Helius API (uses Birdeye fallback)
   birdeyeApiKey: string;
   twitterBearerToken: string;
   twitterConsumerKey: string;

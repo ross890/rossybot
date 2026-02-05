@@ -1644,11 +1644,18 @@ export async function getTokenMetrics(address: string): Promise<TokenMetrics | n
   try {
     // COST OPTIMIZATION: Use DexScreener (FREE) + Helius (included) + Birdeye (for holder count)
     // DexScreener provides: price, volume, market cap, liquidity, token name/symbol, pair creation time
-    // Helius provides: holder distribution (top 10 concentration)
+    // Helius provides: holder distribution (top 10 concentration) - SKIPPED when HELIUS_DISABLED=true
     // Birdeye provides: accurate total holder count (Helius pagination caps at 100)
+
+    // When Helius is disabled (rate limited), we skip holder distribution calls
+    // Top 10 concentration will default to 50% (conservative estimate)
+    const heliusDisabled = appConfig.heliusDisabled;
+
     const [dexResult, holderResult, birdeyeResult] = await Promise.allSettled([
       dexScreenerClient.getTokenPairs(address),
-      heliusClient.getTokenHolders(address),
+      heliusDisabled
+        ? Promise.resolve({ total: 0, topHolders: [] })  // Skip Helius when disabled
+        : heliusClient.getTokenHolders(address),
       birdeyeClient.getTokenOverview(address),
     ]);
 
@@ -1718,6 +1725,33 @@ export async function getTokenMetrics(address: string): Promise<TokenMetrics | n
 
 export async function analyzeTokenContract(address: string): Promise<TokenContractAnalysis> {
   try {
+    // When Helius is disabled (rate limited), use Birdeye token_security endpoint
+    if (appConfig.heliusDisabled) {
+      const securityData = await birdeyeClient.getTokenSecurity(address);
+
+      if (!securityData) {
+        logger.warn(`No security data from Birdeye for ${address.slice(0, 8)} - letting through`);
+        return {
+          mintAuthorityRevoked: true,
+          freezeAuthorityRevoked: true,
+          metadataMutable: false,
+          isKnownScamTemplate: false,
+        };
+      }
+
+      logger.info(
+        `Birdeye security for ${address.slice(0, 8)}: mintAuth=${securityData.mutableMetadata ? 'active' : 'null'} freezeAuth=${securityData.freezeable ? 'active' : 'null'}`
+      );
+
+      // Birdeye returns: mutableMetadata, freezeable, etc.
+      return {
+        mintAuthorityRevoked: !securityData.mutableMetadata,
+        freezeAuthorityRevoked: !securityData.freezeable,
+        metadataMutable: securityData.mutableMetadata || false,
+        isKnownScamTemplate: false,
+      };
+    }
+
     // COST OPTIMIZATION: Use Helius RPC (included in plan) instead of Birdeye API
     // This is a direct on-chain query for mint/freeze authority - more reliable and FREE
     const mintInfo = await heliusClient.getTokenMintInfo(address);
@@ -1760,9 +1794,23 @@ export async function analyzeTokenContract(address: string): Promise<TokenContra
 
 export async function analyzeBundles(address: string): Promise<BundleAnalysis> {
   try {
+    // When Helius is disabled, skip bundle analysis (requires transaction history)
+    // Return permissive defaults - other safety checks still apply
+    if (appConfig.heliusDisabled) {
+      logger.debug(`Bundle analysis skipped for ${address.slice(0, 8)} - Helius disabled`);
+      return {
+        bundleDetected: false,
+        bundledSupplyPercent: 0,
+        clusteredWalletCount: 0,
+        fundingOverlapDetected: false,
+        hasRugHistory: false,
+        riskLevel: 'LOW',
+      };
+    }
+
     // Get creation info to find first buyers
     const creationInfo = await birdeyeClient.getTokenCreationInfo(address);
-    
+
     if (!creationInfo) {
       return {
         bundleDetected: false,

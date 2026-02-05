@@ -34,6 +34,95 @@ import { TokenMetrics } from '../../types/index.js';
 const SCAN_INTERVAL_MS = 5 * 60 * 1000; // 5 minutes
 const SIGNAL_EXPIRY_HOURS = 24;
 
+// ============ PROTOCOL/STABLECOIN FILTER ============
+// Exclude tokens that are:
+// 1. Stablecoins (USD-pegged tokens)
+// 2. LP tokens (liquidity pool tokens)
+// 3. Protocol tokens (Orca, Jupiter, Raydium, Meteora)
+// 4. Wrapped tokens (wSOL, etc.)
+
+const EXCLUDED_NAME_PATTERNS = [
+  // Stablecoins
+  /^usdc$/i, /^usdt$/i, /^busd$/i, /^dai$/i, /^frax$/i, /^tusd$/i, /^usdp$/i,
+  /^ust$/i, /^gusd$/i, /^husd$/i, /^susd$/i, /^lusd$/i, /^eusd$/i, /^eurc$/i,
+  /^usdg$/i, /^pyusd$/i,
+  /usd$/i,      // Ends with USD (hyUSD, JupUSD, etc.)
+  /^usd/i,      // Starts with USD
+
+  // LP/Pool tokens
+  /\s*\/\s*/,   // Contains "/" (ONe/JitoSOL pattern)
+  /^lp$/i, /^lp\s/i, /\slp$/i, /\slp\s/i,
+  /-lp$/i, /-lp-/i, /^lp-/i,
+  /pool$/i, /^pool/i,
+
+  // Protocol tokens
+  /^orca$/i, /^jup$/i, /^jupiter$/i, /^ray$/i, /^raydium$/i,
+  /^meteora$/i, /^jito$/i, /^marinade$/i, /^msol$/i,
+  /^bonk$/i, /^wif$/i,  // Major established tokens
+
+  // Wrapped/Bridge tokens
+  /^wsol$/i, /^weth$/i, /^wbtc$/i,
+  /^wrapped\s/i, /\swrapped$/i,
+  /^bridged\s/i, /\sbridged$/i,
+  /^xsol$/i, /^xbtc$/i, /^zbtc$/i,  // Synthetic/wrapped patterns
+
+  // Yield/Staking tokens
+  /^st[a-z]{2,4}$/i,  // stSOL, stETH patterns
+  /^jitosol$/i, /^msol$/i, /^bsol$/i,
+
+  // Stock/Asset tokens (synthetic stocks)
+  /^[a-z]{1,5}x$/i,  // TSLAx, NVDAx, GOOGLx, QQQx, GLDx patterns
+];
+
+// Specific token addresses to always exclude (known protocol tokens)
+const EXCLUDED_ADDRESSES = new Set([
+  'EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v', // USDC
+  'Es9vMFrzaCERmJfrF4H2FYD4KCoNkY11McCe8BenwNYB', // USDT
+  'mSoLzYCxHdYgdzU16g5QSh3i5K3z3KZK7ytfqcJm7So',  // mSOL
+  'J1toso1uCk3RLmjorhTtrVwY9HJ7X8V9yYac6Y7kGCPn', // JitoSOL
+  'bSo13r4TkiE4KumL71LsHTPpL2euBYLFx6h9HP3piy1',  // bSOL
+  'orcaEKTdK7LKz57vaAYr9QeNsVEPfiu6QeMU1kektZE',  // ORCA
+  'JUPyiwrYJFskUPiHa7hkeR8VUtAeFoSYbKedZNsDvCN',  // JUP
+  '4k3Dyjzvzp8eMZWUXbBCjEvwSkkk59S5iCNLY3QrkX6R', // RAY
+  '2u1tszSenaM98QLVa92PBUpMeZB9nWQQDG9uJEBDcpuU', // USDG
+  'HzwqbKZw8HxMN6bF2yFZNrht3c2iXXzpKcFu7uBEDKtr', // EURC
+  '5YMkXAYcyumQrBEFaeFb96xbC1VF8nBv2p5NbEq7bRAi', // hyUSD
+  'JuprjznThw3evH3jDMCB1pJXVzMvMjfLdRG7m6PK7hy',  // JupUSD (address from logs)
+  '5Y8NV33V7jqnqkLJ5RCZU4hWJrP1bGwKZ8b5oj9Lptay', // ONe
+]);
+
+/**
+ * Check if a token is a protocol token, stablecoin, LP token, or wrapped token
+ */
+function isExcludedToken(
+  address: string,
+  name: string,
+  ticker: string,
+  price?: number
+): { excluded: boolean; reason?: string } {
+  // Check address blacklist first
+  if (EXCLUDED_ADDRESSES.has(address)) {
+    return { excluded: true, reason: 'Known protocol/stable address' };
+  }
+
+  // Check name and ticker against patterns
+  for (const pattern of EXCLUDED_NAME_PATTERNS) {
+    if (pattern.test(name) || pattern.test(ticker)) {
+      return { excluded: true, reason: `Name/ticker matches excluded pattern: ${pattern}` };
+    }
+  }
+
+  // Check for stablecoin price pattern (price ~$1)
+  if (price !== undefined && price >= 0.95 && price <= 1.05) {
+    const fullName = `${name} ${ticker}`.toLowerCase();
+    if (/usd|stable|peg|dollar/i.test(fullName)) {
+      return { excluded: true, reason: `Stablecoin detected (price: $${price.toFixed(4)})` };
+    }
+  }
+
+  return { excluded: false };
+}
+
 // ============ CLASS ============
 
 export class MatureTokenScanner {
@@ -370,6 +459,7 @@ export class MatureTokenScanner {
 
     // Track rejection reasons
     const rejections = {
+      excludedToken: 0,  // Protocol/stablecoin/LP tokens
       marketCapOutOfRange: 0,
       noTierMatch: 0,
       volumeTooLow: 0,
@@ -394,6 +484,18 @@ export class MatureTokenScanner {
     const MICRO_CAP_MAX = 500_000;
 
     for (const token of tokens) {
+      // FIRST: Check if token is excluded (protocol/stablecoin/LP token)
+      const exclusionCheck = isExcludedToken(
+        token.address,
+        token.name,
+        token.ticker,
+        token.price
+      );
+      if (exclusionCheck.excluded) {
+        rejections.excludedToken++;
+        continue;
+      }
+
       // Check if token is in micro-cap range ($200K-$500K) - track for opportunity analysis
       if (token.marketCap >= MICRO_CAP_MIN && token.marketCap < MICRO_CAP_MAX) {
         this.trackMicroCapToken(token);
@@ -474,7 +576,7 @@ export class MatureTokenScanner {
     this.funnelStats.rejections.cooldown = rejections.onCooldown;
     this.funnelStats.tiers = tierCounts as { RISING: number; EMERGING: number; GRADUATED: number; ESTABLISHED: number };
 
-    logger.info(`📊 FUNNEL: Eligibility - Input: ${tokens.length}, Eligible: ${eligible.length} | Rejections: mcap=${rejections.marketCapOutOfRange}, vol=${rejections.volumeTooLow}, holders=${rejections.holdersTooLow}, liq=${rejections.liquidityTooLow}, conc=${rejections.concentrationTooHigh}, cooldown=${rejections.onCooldown} | Tiers: R=${tierCounts.RISING} E=${tierCounts.EMERGING} G=${tierCounts.GRADUATED} EST=${tierCounts.ESTABLISHED}`);
+    logger.info(`📊 FUNNEL: Eligibility - Input: ${tokens.length}, Eligible: ${eligible.length} | Rejections: excluded=${rejections.excludedToken}, mcap=${rejections.marketCapOutOfRange}, vol=${rejections.volumeTooLow}, holders=${rejections.holdersTooLow}, liq=${rejections.liquidityTooLow}, conc=${rejections.concentrationTooHigh}, cooldown=${rejections.onCooldown} | Tiers: R=${tierCounts.RISING} E=${tierCounts.EMERGING} G=${tierCounts.GRADUATED} EST=${tierCounts.ESTABLISHED}`);
 
     // Log rejected market caps if any (to debug why tokens aren't matching tiers)
     if (rejectedMcaps.length > 0) {

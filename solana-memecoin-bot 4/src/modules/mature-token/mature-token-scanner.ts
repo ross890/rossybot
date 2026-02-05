@@ -478,7 +478,7 @@ export class MatureTokenScanner {
 
     // Log rejected market caps if any (to debug why tokens aren't matching tiers)
     if (rejectedMcaps.length > 0) {
-      logger.info(`📊 FUNNEL: Rejected mcaps (range $0.5M-$150M): ${rejectedMcaps.join(', ')}`);
+      logger.info(`📊 FUNNEL: Rejected mcaps (range $${(this.eligibility.minMarketCap / 1_000_000).toFixed(1)}M-$${(this.eligibility.maxMarketCap / 1_000_000).toFixed(0)}M): ${rejectedMcaps.join(', ')}`);
     }
 
     // Log rejected concentrations if any (to debug top 10 holder filter)

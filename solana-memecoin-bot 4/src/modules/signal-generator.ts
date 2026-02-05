@@ -158,6 +158,92 @@ function getMarketCapTier(marketCap: number): MarketCapTier {
   return 'UNKNOWN';
 }
 
+// ============ PROTOCOL/STABLECOIN FILTER ============
+// Exclude tokens that are:
+// 1. Stablecoins (USD-pegged tokens)
+// 2. LP tokens (liquidity pool tokens)
+// 3. Protocol tokens (Orca, Jupiter, Raydium, Meteora)
+// 4. Wrapped tokens (wSOL, etc.)
+
+// Known stablecoin/protocol patterns to exclude
+const EXCLUDED_NAME_PATTERNS = [
+  // Stablecoins
+  /^usdc$/i, /^usdt$/i, /^busd$/i, /^dai$/i, /^frax$/i, /^tusd$/i, /^usdp$/i,
+  /^ust$/i, /^gusd$/i, /^husd$/i, /^susd$/i, /^lusd$/i, /^eusd$/i,
+  /usd$/i,      // Ends with USD (hyUSD, JupUSD, etc.)
+  /^usd/i,      // Starts with USD
+
+  // LP/Pool tokens
+  /\s*\/\s*/,   // Contains "/" (ONe/JitoSOL pattern)
+  /^lp$/i, /^lp\s/i, /\slp$/i, /\slp\s/i,  // LP anywhere
+  /-lp$/i, /-lp-/i, /^lp-/i,
+  /pool$/i, /^pool/i,
+
+  // Protocol tokens
+  /^orca$/i, /^jup$/i, /^jupiter$/i, /^ray$/i, /^raydium$/i,
+  /^meteora$/i, /^jito$/i, /^marinade$/i, /^msol$/i,
+  /^bonk$/i,    // Major established token
+  /^wif$/i,     // Major established token
+
+  // Wrapped/Bridge tokens
+  /^wsol$/i, /^weth$/i, /^wbtc$/i,
+  /^wrapped\s/i, /\swrapped$/i,
+  /^bridged\s/i, /\sbridged$/i,
+
+  // Yield/Staking tokens
+  /^st[a-z]{2,4}$/i,  // stSOL, stETH patterns
+  /^b[a-z]{2,4}$/i,   // bSOL patterns (but not all b* tokens)
+  /^jitosol$/i, /^msol$/i, /^bsol$/i,
+];
+
+// Specific token addresses to always exclude (known protocol tokens)
+const EXCLUDED_ADDRESSES = new Set([
+  'EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v', // USDC
+  'Es9vMFrzaCERmJfrF4H2FYD4KCoNkY11McCe8BenwNYB', // USDT
+  'mSoLzYCxHdYgdzU16g5QSh3i5K3z3KZK7ytfqcJm7So',  // mSOL
+  'J1toso1uCk3RLmjorhTtrVwY9HJ7X8V9yYac6Y7kGCPn', // JitoSOL
+  'bSo13r4TkiE4KumL71LsHTPpL2euBYLFx6h9HP3piy1',  // bSOL
+  'orcaEKTdK7LKz57vaAYr9QeNsVEPfiu6QeMU1kektZE',  // ORCA
+  'JUPyiwrYJFskUPiHa7hkeR8VUtAeFoSYbKedZNsDvCN',  // JUP
+  '4k3Dyjzvzp8eMZWUXbBCjEvwSkkk59S5iCNLY3QrkX6R', // RAY
+]);
+
+/**
+ * Check if a token is a protocol token, stablecoin, LP token, or wrapped token
+ * that should be excluded from signal generation
+ */
+function isExcludedToken(
+  address: string,
+  name: string,
+  ticker: string,
+  price?: number
+): { excluded: boolean; reason?: string } {
+  // Check address blacklist first (fastest check)
+  if (EXCLUDED_ADDRESSES.has(address)) {
+    return { excluded: true, reason: 'Known protocol/stable address' };
+  }
+
+  // Check name and ticker against patterns
+  const fullName = `${name} ${ticker}`.toLowerCase();
+
+  for (const pattern of EXCLUDED_NAME_PATTERNS) {
+    if (pattern.test(name) || pattern.test(ticker)) {
+      return { excluded: true, reason: `Name/ticker matches excluded pattern: ${pattern}` };
+    }
+  }
+
+  // Check for stablecoin price pattern (price ~$1 with low deviation)
+  // Most stablecoins trade between $0.98 and $1.02
+  if (price !== undefined && price >= 0.95 && price <= 1.05) {
+    // Additional check: name suggests it's a stablecoin
+    if (/usd|stable|peg|dollar/i.test(fullName)) {
+      return { excluded: true, reason: `Stablecoin detected (price: $${price.toFixed(4)})` };
+    }
+  }
+
+  return { excluded: false };
+}
+
 // ============ SIGNAL GENERATOR CLASS ============
 
 export class SignalGenerator {
@@ -565,6 +651,24 @@ export class SignalGenerator {
     if (!metrics) {
       logger.info({ tokenAddress: shortAddr }, 'EVAL: No metrics available');
       return SignalGenerator.EVAL_RESULTS.NO_METRICS;
+    }
+
+    // PROTOCOL/STABLECOIN FILTER: Exclude non-memecoin tokens
+    // Must be after metrics fetch since we need name, ticker, price
+    const exclusionCheck = isExcludedToken(
+      tokenAddress,
+      metrics.name,
+      metrics.ticker,
+      metrics.price
+    );
+    if (exclusionCheck.excluded) {
+      logger.info({
+        tokenAddress: shortAddr,
+        name: metrics.name,
+        ticker: metrics.ticker,
+        reason: exclusionCheck.reason,
+      }, 'EVAL: Excluded - protocol/stable/LP token');
+      return SignalGenerator.EVAL_RESULTS.SCREENING_FAILED;
     }
 
     // TIER-AWARE FILTERING: Check market cap tier before proceeding

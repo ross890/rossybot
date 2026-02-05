@@ -74,11 +74,11 @@ export const TIER_CONFIG: Record<TokenTier, TierConfig> = {
   [TokenTier.RISING]: {
     minMarketCap: 500_000,       // $500K (lowered to capture more tokens)
     maxMarketCap: 8_000_000,     // $8M (closes gap with EMERGING)
-    minVolume24h: 50_000,        // $50K volume (lowered for smaller tokens)
-    minHolderCount: 500,         // 500+ holders (lowered from 1000)
+    minVolume24h: 25_000,        // $25K volume (lowered for bear market conditions)
+    minHolderCount: 300,         // 300+ holders (lowered from 500 for bear market)
     minTokenAgeHours: 72,        // 3 days minimum
     stopLoss: { initial: 25, timeDecay: 18 },  // Wider stops for volatility
-    signalAllocation: 0.25,      // 25% of signals
+    signalAllocation: 0.40,      // 40% of signals (increased - best performing tier)
   },
   [TokenTier.EMERGING]: {
     minMarketCap: 8_000_000,     // Seamless transition from RISING
@@ -87,7 +87,7 @@ export const TIER_CONFIG: Record<TokenTier, TierConfig> = {
     minHolderCount: 100,
     minTokenAgeHours: 504,       // 21 days
     stopLoss: { initial: 20, timeDecay: 15 },
-    signalAllocation: 0.30,      // Reduced from 0.40
+    signalAllocation: 0,         // DISABLED: 11% WR, -72% avg return in bear market
   },
   [TokenTier.GRADUATED]: {
     minMarketCap: 20_000_000,
@@ -669,16 +669,16 @@ export const DEFAULT_ELIGIBILITY: MatureTokenEligibility = {
   minMarketCap: 500_000,      // $500K for RISING tier
   maxMarketCap: 150_000_000,  // $150M
 
-  // Liquidity requirements
-  minLiquidity: 25_000,       // $25K minimum (lowered for smaller tokens)
-  minLiquidityRatio: 0.02,    // 2% of mcap
+  // Liquidity requirements (lowered for bear market conditions)
+  minLiquidity: 15_000,       // $15K minimum (lowered from $25K for bear market)
+  minLiquidityRatio: 0.015,   // 1.5% of mcap (lowered from 2%)
 
   // Volume requirements (lowest tier minimum - RISING tier)
-  min24hVolume: 50_000,       // $50K for RISING tier
+  min24hVolume: 25_000,       // $25K for RISING tier (lowered from $50K)
   minVolumeMarketCapRatio: 0.02,  // 2%
 
   // Holder requirements (tier-specific via TIER_CONFIG)
-  minHolderCount: 100,        // Base requirement, RISING tier requires 500+
+  minHolderCount: 100,        // Base requirement, RISING tier requires 300+
   maxTop10Concentration: 75,  // Max 75% in top 10 (relaxed for memecoins)
 
   // Safety requirements

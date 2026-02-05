@@ -44,6 +44,11 @@ export class InsiderDetector {
       insiderRiskScore: 0,
     };
 
+    // Skip RPC calls when Helius is disabled - return safe defaults
+    if (appConfig.heliusDisabled) {
+      return result;
+    }
+
     try {
       // 1. Get token creation details
       const creationInfo = await this.getTokenCreationInfo(tokenMint);

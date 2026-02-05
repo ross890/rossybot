@@ -171,6 +171,11 @@ export class TokenSafetyChecker {
     mintAuthorityEnabled: boolean;
     freezeAuthorityEnabled: boolean;
   }> {
+    // Skip RPC call when Helius is disabled - return permissive defaults
+    if (appConfig.heliusDisabled) {
+      return { mintAuthorityEnabled: false, freezeAuthorityEnabled: false };
+    }
+
     try {
       const mintPubkey = new PublicKey(tokenMint);
       const accountInfo = await this.connection.getParsedAccountInfo(mintPubkey);
@@ -202,6 +207,11 @@ export class TokenSafetyChecker {
     top10HolderConcentration: number;
     deployerHolding: number;
   }> {
+    // Skip RPC call when Helius is disabled - return permissive defaults
+    if (appConfig.heliusDisabled) {
+      return { top10HolderConcentration: 0, deployerHolding: 0 };
+    }
+
     try {
       const mintPubkey = new PublicKey(tokenMint);
       const largestAccounts = await this.connection.getTokenLargestAccounts(mintPubkey);
@@ -239,6 +249,11 @@ export class TokenSafetyChecker {
    * Get token age in minutes
    */
   private async getTokenAge(tokenMint: string): Promise<number> {
+    // Skip RPC call when Helius is disabled - return permissive default
+    if (appConfig.heliusDisabled) {
+      return 60; // Return 1 hour as default age to avoid VERY_NEW_TOKEN flag
+    }
+
     try {
       const mintPubkey = new PublicKey(tokenMint);
       const signatures = await this.connection.getSignaturesForAddress(mintPubkey, { limit: 1 }, 'confirmed');
@@ -362,6 +377,11 @@ export class TokenSafetyChecker {
       suspiciousPatterns: [],
       insiderRiskScore: 0,
     };
+
+    // Skip RPC call when Helius is disabled - return safe defaults
+    if (appConfig.heliusDisabled) {
+      return result;
+    }
 
     try {
       const mintPubkey = new PublicKey(tokenMint);

@@ -185,6 +185,11 @@ export class BondingCurveMonitor {
    * Analyze bonding curve on-chain
    */
   private async analyzeOnChain(tokenMint: string): Promise<BondingCurveStatus | null> {
+    // Skip RPC call when Helius is disabled
+    if (appConfig.heliusDisabled) {
+      return null;
+    }
+
     try {
       const mintPubkey = new PublicKey(tokenMint);
 
@@ -473,6 +478,11 @@ export class BondingCurveMonitor {
    * Check if token is a Pump.fun token
    */
   async isPumpfunToken(tokenMint: string): Promise<boolean> {
+    // Skip RPC call when Helius is disabled
+    if (appConfig.heliusDisabled) {
+      return false;
+    }
+
     try {
       // Check if token was created by Pump.fun program
       const mintPubkey = new PublicKey(tokenMint);

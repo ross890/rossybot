@@ -254,6 +254,11 @@ export class KolSellDetector {
     walletAddress: string,
     tokenMint: string
   ): Promise<number> {
+    // Skip RPC call when Helius is disabled
+    if (appConfig.heliusDisabled) {
+      return 0;
+    }
+
     try {
       const walletPubkey = new PublicKey(walletAddress);
       const mintPubkey = new PublicKey(tokenMint);

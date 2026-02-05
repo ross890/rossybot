@@ -6,6 +6,7 @@
 
 import { logger } from '../utils/logger.js';
 import { heliusClient } from './onchain.js';
+import { appConfig } from '../config/index.js';
 
 // ============ TYPES ============
 
@@ -150,6 +151,15 @@ export class MEVDetector {
 
     const reasons: string[] = [];
     let botScore = 0;
+
+    // Skip Helius calls when disabled - use prefix-only detection
+    if (appConfig.heliusDisabled) {
+      const prefix = walletAddress.slice(0, 3).toUpperCase();
+      if (KNOWN_BOT_WALLET_PREFIXES.includes(prefix)) {
+        return { isBot: true, confidence: 0.3, reasons: [`Suspicious wallet prefix: ${prefix}`] };
+      }
+      return { isBot: false, confidence: 0, reasons: [] };
+    }
 
     try {
       // Check wallet prefix patterns
@@ -487,6 +497,11 @@ export class MEVDetector {
   // ============ HELPER METHODS ============
 
   private async getRecentTokenTransactions(tokenAddress: string): Promise<any[]> {
+    // Skip when Helius is disabled
+    if (appConfig.heliusDisabled) {
+      return [];
+    }
+
     try {
       // Use Helius to get recent transactions for the token
       const transactions = await heliusClient.getRecentTransactions(tokenAddress, 100);

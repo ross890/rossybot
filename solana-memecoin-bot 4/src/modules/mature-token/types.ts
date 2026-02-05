@@ -1,7 +1,7 @@
 // ===========================================
 // MATURE TOKEN SIGNAL MODULE - TYPE DEFINITIONS
-// For established tokens (21+ days old, $8M-$150M market cap)
-// Updated for Established Token Strategy v2
+// For established tokens (3+ days old, $200K-$150M market cap)
+// Updated for Established Token Strategy v2 + MICRO tier
 // ===========================================
 
 // ============ ENUMS ============
@@ -11,7 +11,8 @@
  * Each tier has different risk parameters
  */
 export enum TokenTier {
-  RISING = 'RISING',           // $500K-8M - High risk, requires 500+ holders, 3+ days old
+  MICRO = 'MICRO',             // $200K-500K - Micro-cap, requires 250+ holders, 3+ days old
+  RISING = 'RISING',           // $500K-8M - High risk, requires 300+ holders, 3+ days old
   EMERGING = 'EMERGING',       // $8-20M - Higher risk/reward
   GRADUATED = 'GRADUATED',     // $20-50M - Balanced
   ESTABLISHED = 'ESTABLISHED', // $50-150M - Lower risk
@@ -71,14 +72,23 @@ export interface TierConfig {
 }
 
 export const TIER_CONFIG: Record<TokenTier, TierConfig> = {
+  [TokenTier.MICRO]: {
+    minMarketCap: 200_000,       // $200K - micro-cap opportunity zone
+    maxMarketCap: 500_000,       // $500K - transition to RISING
+    minVolume24h: 15_000,        // $15K volume (lower for smaller tokens)
+    minHolderCount: 250,         // 250+ holders (per analysis showing 100% safety pass)
+    minTokenAgeHours: 72,        // 3 days minimum (same as RISING)
+    stopLoss: { initial: 30, timeDecay: 22 },  // Wider stops for higher volatility
+    signalAllocation: 0.15,      // 15% of signals (new tier, start conservative)
+  },
   [TokenTier.RISING]: {
-    minMarketCap: 500_000,       // $500K (lowered to capture more tokens)
+    minMarketCap: 500_000,       // $500K (seamless transition from MICRO)
     maxMarketCap: 8_000_000,     // $8M (closes gap with EMERGING)
     minVolume24h: 25_000,        // $25K volume (lowered for bear market conditions)
     minHolderCount: 300,         // 300+ holders (lowered from 500 for bear market)
     minTokenAgeHours: 72,        // 3 days minimum
     stopLoss: { initial: 25, timeDecay: 18 },  // Wider stops for volatility
-    signalAllocation: 0.40,      // 40% of signals (increased - best performing tier)
+    signalAllocation: 0.35,      // 35% of signals (reduced to make room for MICRO)
   },
   [TokenTier.EMERGING]: {
     minMarketCap: 8_000_000,     // Seamless transition from RISING
@@ -665,8 +675,8 @@ export const DEFAULT_ELIGIBILITY: MatureTokenEligibility = {
   minTokenAgeHours: 72,       // 3 days for RISING tier (other tiers require 21 days via TIER_CONFIG)
   maxTokenAgeDays: 365,       // No practical upper limit
 
-  // Market cap range: $500K - $150M (RISING tier starts at $500K)
-  minMarketCap: 500_000,      // $500K for RISING tier
+  // Market cap range: $200K - $150M (MICRO tier starts at $200K)
+  minMarketCap: 200_000,      // $200K for MICRO tier
   maxMarketCap: 150_000_000,  // $150M
 
   // Liquidity requirements (lowered for bear market conditions)
@@ -706,6 +716,10 @@ export function getTokenTier(marketCap: number): TokenTier | null {
   if (marketCap >= TIER_CONFIG[TokenTier.RISING].minMarketCap &&
       marketCap < TIER_CONFIG[TokenTier.RISING].maxMarketCap) {
     return TokenTier.RISING;
+  }
+  if (marketCap >= TIER_CONFIG[TokenTier.MICRO].minMarketCap &&
+      marketCap < TIER_CONFIG[TokenTier.MICRO].maxMarketCap) {
+    return TokenTier.MICRO;
   }
   return null;  // Outside our range
 }

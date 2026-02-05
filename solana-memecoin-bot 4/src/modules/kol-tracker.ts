@@ -5,6 +5,7 @@
 import { heliusClient, birdeyeClient } from './onchain.js';
 import { Database } from '../utils/database.js';
 import { logger } from '../utils/logger.js';
+import { appConfig } from '../config/index.js';
 import { kolAnalytics } from './kol/kol-analytics.js';
 import {
   Kol,
@@ -83,9 +84,14 @@ export class KolWalletMonitor {
     tokenAddress: string,
     windowMs: number = ACTIVITY_WINDOW_MS
   ): Promise<KolWalletActivity[]> {
+    // Skip when Helius is disabled - return empty results
+    if (appConfig.heliusDisabled) {
+      return [];
+    }
+
     const activities: KolWalletActivity[] = [];
     const cutoffTime = Date.now() - windowMs;
-    
+
     for (const [walletAddress, walletInfo] of this.trackedWallets) {
       try {
         // Get recent transactions for this wallet
@@ -240,6 +246,11 @@ export class KolWalletMonitor {
     };
     signalWeight: number;
   }>> {
+    // Skip when Helius is disabled - return empty results
+    if (appConfig.heliusDisabled) {
+      return [];
+    }
+
     const activities: Array<{
       wallet: AlphaWallet;
       transaction: {
@@ -535,9 +546,14 @@ export class SideWalletDetector {
     startAddress: string,
     maxHops: number
   ): Promise<Array<{ address: string; hops: number; score: number }>> {
+    // Skip when Helius is disabled
+    if (appConfig.heliusDisabled) {
+      return [];
+    }
+
     const seen = new Set<string>([startAddress]);
     const results: Array<{ address: string; hops: number; score: number }> = [];
-    
+
     let currentLevel = [startAddress];
     
     for (let hop = 1; hop <= maxHops; hop++) {
@@ -598,13 +614,18 @@ export class SideWalletDetector {
     timestamp: number;
     action: 'buy' | 'sell';
   }>> {
+    // Skip when Helius is disabled
+    if (appConfig.heliusDisabled) {
+      return [];
+    }
+
     // Simplified - in production, would parse actual transactions
     const trades: Array<{
       tokenAddress: string;
       timestamp: number;
       action: 'buy' | 'sell';
     }> = [];
-    
+
     try {
       const txs = await heliusClient.getRecentTransactions(address, 100);
       

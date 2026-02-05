@@ -55,6 +55,11 @@ class HeliusClient {
   // Cache statistics
   private cacheStats = { hits: 0, misses: 0, rateLimited: 0 };
 
+  // Rate limit logging throttling - avoid log spam
+  private rateLimitHitCount = 0;
+  private lastRateLimitLogTime = 0;
+  private readonly RATE_LIMIT_LOG_INTERVAL_MS = 60 * 1000; // Only log every 60 seconds
+
   constructor() {
     this.apiKey = appConfig.heliusApiKey;
 
@@ -153,7 +158,7 @@ class HeliusClient {
           this.rateLimitResetTime = Date.now() + 2000;
           // Re-queue the request
           this.requestQueue.unshift(item);
-          logger.warn('Helius 429 rate limit hit, backing off for 2 seconds');
+          this.logRateLimit();
           await this.sleep(2000);
         } else {
           item.reject(error);
@@ -166,6 +171,26 @@ class HeliusClient {
 
   private sleep(ms: number): Promise<void> {
     return new Promise(resolve => setTimeout(resolve, ms));
+  }
+
+  /**
+   * Log rate limit events with throttling to avoid spam
+   * Only logs every 60 seconds or when first hit
+   */
+  private logRateLimit(): void {
+    this.rateLimitHitCount++;
+    const now = Date.now();
+    const timeSinceLastLog = now - this.lastRateLimitLogTime;
+
+    // Log if this is the first hit, or if enough time has passed
+    if (this.lastRateLimitLogTime === 0 || timeSinceLastLog >= this.RATE_LIMIT_LOG_INTERVAL_MS) {
+      logger.warn({
+        hitCount: this.rateLimitHitCount,
+        periodSecs: Math.round(timeSinceLastLog / 1000)
+      }, 'Helius 429 rate limit hit');
+      this.lastRateLimitLogTime = now;
+      this.rateLimitHitCount = 0; // Reset counter after logging
+    }
   }
 
   private cleanupCaches(): void {
@@ -1091,6 +1116,11 @@ class DexScreenerClient {
   private readonly MIN_REQUEST_INTERVAL_MS = 250; // Max 4 requests/second
   private rateLimitBackoff = 0; // Additional backoff when rate limited
 
+  // Rate limit logging throttling - avoid log spam
+  private rateLimitHitCount = 0;
+  private lastRateLimitLogTime = 0;
+  private readonly RATE_LIMIT_LOG_INTERVAL_MS = 60 * 1000; // Only log every 60 seconds
+
   constructor() {
     this.client = axios.create({
       baseURL: 'https://api.dexscreener.com',
@@ -1132,6 +1162,27 @@ class DexScreenerClient {
 
     if (cleaned > 0) {
       logger.debug({ cleaned, remaining: this.pairsCache.size }, 'DexScreener cache cleanup');
+    }
+  }
+
+  /**
+   * Log rate limit events with throttling to avoid spam
+   * Only logs every 60 seconds or when first hit
+   */
+  private logRateLimit(): void {
+    this.rateLimitHitCount++;
+    const now = Date.now();
+    const timeSinceLastLog = now - this.lastRateLimitLogTime;
+
+    // Log if this is the first hit, or if enough time has passed
+    if (this.lastRateLimitLogTime === 0 || timeSinceLastLog >= this.RATE_LIMIT_LOG_INTERVAL_MS) {
+      logger.warn({
+        backoffMs: this.rateLimitBackoff,
+        hitCount: this.rateLimitHitCount,
+        periodSecs: Math.round(timeSinceLastLog / 1000)
+      }, 'DexScreener rate limited');
+      this.lastRateLimitLogTime = now;
+      this.rateLimitHitCount = 0; // Reset counter after logging
     }
   }
 
@@ -1178,7 +1229,7 @@ class DexScreenerClient {
       if (status === 429) {
         this.rateLimitBackoff = Math.min(5000, (this.rateLimitBackoff || 500) * 2);
         this.pairsCache.set(address, { data: [], expiry: Date.now() + this.rateLimitBackoff });
-        logger.warn({ backoffMs: this.rateLimitBackoff }, 'DexScreener rate limited, increasing backoff');
+        this.logRateLimit();
       } else {
         logger.info(`DexScreener getTokenPairs failed: status=${status} error=${message} address=${address.slice(0, 8)}...`);
       }
@@ -1199,8 +1250,10 @@ class DexScreenerClient {
       const message = error?.response?.data?.message || error?.message;
       if (status === 429) {
         this.rateLimitBackoff = Math.min(5000, (this.rateLimitBackoff || 500) * 2);
+        this.logRateLimit();
+      } else {
+        logger.error(`DexScreener searchTokens failed: status=${status} error=${message} query=${query}`);
       }
-      logger.error(`DexScreener searchTokens failed: status=${status} error=${message} query=${query}`);
       return [];
     }
   }
@@ -1277,8 +1330,10 @@ class DexScreenerClient {
     } catch (error: any) {
       if (error?.response?.status === 429) {
         this.rateLimitBackoff = Math.min(5000, (this.rateLimitBackoff || 500) * 2);
+        this.logRateLimit();
+      } else {
+        logger.debug({ error: error?.message, status: error?.response?.status }, 'token-boosts endpoint failed for trending tokens');
       }
-      logger.debug({ error: error?.message, status: error?.response?.status }, 'token-boosts endpoint failed for trending tokens');
     }
 
     // Fallback: Try token-profiles endpoint

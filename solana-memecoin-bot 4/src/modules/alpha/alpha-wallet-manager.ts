@@ -6,6 +6,7 @@
 import { Database } from '../../utils/database.js';
 import { logger } from '../../utils/logger.js';
 import { heliusClient } from '../onchain.js';
+import { appConfig } from '../../config/index.js';
 import {
   AlphaWalletStatus,
   AlphaWallet,
@@ -384,6 +385,11 @@ export class AlphaWalletManager {
    * Monitor trades for a single wallet
    */
   private async monitorWalletTrades(wallet: AlphaWallet): Promise<void> {
+    // Skip when Helius is disabled
+    if (appConfig.heliusDisabled) {
+      return;
+    }
+
     // Get recent transactions
     const txs = await heliusClient.getRecentTransactions(wallet.address, 20);
 
@@ -812,6 +818,11 @@ export class AlphaWalletManager {
    * Validate wallet exists on-chain
    */
   private async validateWalletOnChain(address: string): Promise<boolean> {
+    // Skip when Helius is disabled - allow wallets without verification
+    if (appConfig.heliusDisabled) {
+      return true;
+    }
+
     try {
       const accountInfo = await heliusClient.getAccountInfo(address);
       return accountInfo !== null;

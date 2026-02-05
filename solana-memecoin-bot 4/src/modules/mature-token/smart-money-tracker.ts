@@ -6,6 +6,7 @@
 import { logger } from '../../utils/logger.js';
 import { heliusClient, dexScreenerClient } from '../onchain.js';
 import { SmartMoneyMetrics, SMART_MONEY_THRESHOLDS } from './types.js';
+import { appConfig } from '../../config/index.js';
 
 // ============ CONSTANTS ============
 
@@ -72,6 +73,11 @@ export class SmartMoneyTracker {
     avgWhaleBuySize: number;
     whaleBuySellRatio: number;
   }> {
+    // Skip when Helius is disabled - return defaults
+    if (appConfig.heliusDisabled) {
+      return this.getDefaultAccumulationMetrics();
+    }
+
     try {
       const [holderData, pairs] = await Promise.all([
         heliusClient.getTokenHolders(tokenAddress),
@@ -136,6 +142,15 @@ export class SmartMoneyTracker {
     avgWalletWinRate: number;
     topTraderHoldings: number;
   }> {
+    // Skip when Helius is disabled - return defaults
+    if (appConfig.heliusDisabled) {
+      return {
+        profitableWalletRatio: 0.4,
+        avgWalletWinRate: 0.5,
+        topTraderHoldings: 0,
+      };
+    }
+
     try {
       const holderData = await heliusClient.getTokenHolders(tokenAddress);
       const holders = holderData.topHolders || [];

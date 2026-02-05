@@ -6,6 +6,7 @@
 import { logger } from '../../utils/logger.js';
 import { heliusClient, dexScreenerClient } from '../onchain.js';
 import { HolderDynamicsMetrics, HOLDER_THRESHOLDS } from './types.js';
+import { appConfig } from '../../config/index.js';
 
 // ============ CONSTANTS ============
 
@@ -70,6 +71,17 @@ export class HolderDynamicsAnalyzer {
     uniqueSellers24h: number;
     buyerSellerRatio: number;
   }> {
+    // Skip when Helius is disabled - return defaults
+    if (appConfig.heliusDisabled) {
+      return {
+        holderGrowth24h: 0,
+        holderGrowth7d: 0,
+        uniqueBuyers24h: 0,
+        uniqueSellers24h: 0,
+        buyerSellerRatio: 1,
+      };
+    }
+
     try {
       const [holderData, txnData] = await Promise.all([
         heliusClient.getTokenHolders(tokenAddress),
@@ -115,6 +127,11 @@ export class HolderDynamicsAnalyzer {
     top10Change7d: number;
     freshWalletRatio: number;
   }> {
+    // Skip when Helius is disabled - return defaults
+    if (appConfig.heliusDisabled) {
+      return this.getDefaultDistributionMetrics();
+    }
+
     try {
       const holderData = await heliusClient.getTokenHolders(tokenAddress);
       const holders = holderData.topHolders || [];
@@ -206,6 +223,15 @@ export class HolderDynamicsAnalyzer {
     smartMoneyHolders: number;
     institutionalWallets: number;
   }> {
+    // Skip when Helius is disabled - return defaults
+    if (appConfig.heliusDisabled) {
+      return {
+        qualityWalletRatio: 0.5,
+        smartMoneyHolders: 0,
+        institutionalWallets: 0,
+      };
+    }
+
     try {
       const holderData = await heliusClient.getTokenHolders(tokenAddress);
       const holders = holderData.topHolders || [];

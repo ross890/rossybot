@@ -6,6 +6,7 @@
 
 import { logger } from '../utils/logger.js';
 import { heliusClient, birdeyeClient, dexScreenerClient } from './onchain.js';
+import { appConfig } from '../config/index.js';
 
 // ============ TYPES ============
 
@@ -485,6 +486,11 @@ export class MomentumAnalyzer {
     newHolders5m: number;
     holderGrowthRate: number;
   } | null> {
+    // Skip when Helius is disabled - return null (will use fallback data)
+    if (appConfig.heliusDisabled) {
+      return null;
+    }
+
     try {
       const holderData = await heliusClient.getTokenHolders(tokenAddress);
 

@@ -6,6 +6,7 @@
 
 import { logger } from '../utils/logger.js';
 import { heliusClient } from './onchain.js';
+import { appConfig } from '../config/index.js';
 
 // ============ TYPES ============
 
@@ -82,6 +83,11 @@ export class BundleDetector {
    * Analyze a token for bundled launch characteristics
    */
   async analyze(tokenAddress: string): Promise<BundleAnalysisResult> {
+    // Skip analysis when Helius is disabled - return safe defaults
+    if (appConfig.heliusDisabled) {
+      return this.createDefaultResult('Helius disabled - bundle analysis skipped');
+    }
+
     try {
       // Check cache
       const cached = this.analysisCache.get(tokenAddress);
@@ -145,6 +151,11 @@ export class BundleDetector {
     suspected: boolean;
     confidence: 'HIGH' | 'MEDIUM' | 'LOW';
   }> {
+    // Skip check when Helius is disabled - return safe defaults
+    if (appConfig.heliusDisabled) {
+      return { suspected: false, confidence: 'LOW' };
+    }
+
     try {
       const txSignatures = await heliusClient.getRecentTransactions(tokenAddress, 50);
 

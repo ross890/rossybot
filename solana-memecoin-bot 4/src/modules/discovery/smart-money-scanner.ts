@@ -8,6 +8,7 @@ import { Database } from '../../utils/database.js';
 import { logger } from '../../utils/logger.js';
 import { heliusClient, dexScreenerClient } from '../onchain.js';
 import { alphaWalletManager } from '../alpha/alpha-wallet-manager.js';
+import { appConfig } from '../../config/index.js';
 
 // ============ TYPES ============
 
@@ -340,6 +341,11 @@ export class SmartMoneyScanner {
    * Scan trades for a specific token
    */
   private async scanTokenTrades(tokenAddress: string): Promise<void> {
+    // Skip when Helius is disabled
+    if (appConfig.heliusDisabled) {
+      return;
+    }
+
     // Get recent transactions for this token using the token address
     const txs = await heliusClient.getRecentTransactions(tokenAddress, 50);
 

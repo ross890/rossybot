@@ -10,6 +10,7 @@ import {
   AccumulationPattern,
   ACCUMULATION_THRESHOLDS,
 } from './types.js';
+import { appConfig } from '../../config/index.js';
 
 // ============ CONSTANTS ============
 
@@ -190,6 +191,11 @@ export class AccumulationDetector {
     largeWalletAccumulation: number;
     totalHolders: number;
   }> {
+    // Skip when Helius is disabled - return defaults
+    if (appConfig.heliusDisabled) {
+      return this.getDefaultHolderData();
+    }
+
     try {
       const holderInfo = await heliusClient.getTokenHolders(tokenAddress);
       const totalHolders = holderInfo.total || 0;

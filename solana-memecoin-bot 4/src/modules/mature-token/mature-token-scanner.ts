@@ -42,12 +42,11 @@ const SIGNAL_EXPIRY_HOURS = 24;
 // 4. Wrapped tokens (wSOL, etc.)
 
 const EXCLUDED_NAME_PATTERNS = [
-  // Stablecoins
+  // Stablecoins - exact matches only
   /^usdc$/i, /^usdt$/i, /^busd$/i, /^dai$/i, /^frax$/i, /^tusd$/i, /^usdp$/i,
   /^ust$/i, /^gusd$/i, /^husd$/i, /^susd$/i, /^lusd$/i, /^eusd$/i, /^eurc$/i,
-  /^usdg$/i, /^pyusd$/i,
+  /^usdg$/i, /^pyusd$/i, /^hyusd$/i, /^jupusd$/i,
   /usd$/i,      // Ends with USD (hyUSD, JupUSD, etc.)
-  /^usd/i,      // Starts with USD
 
   // LP/Pool tokens
   /\s*\/\s*/,   // Contains "/" (ONe/JitoSOL pattern)
@@ -55,23 +54,21 @@ const EXCLUDED_NAME_PATTERNS = [
   /-lp$/i, /-lp-/i, /^lp-/i,
   /pool$/i, /^pool/i,
 
-  // Protocol tokens
-  /^orca$/i, /^jup$/i, /^jupiter$/i, /^ray$/i, /^raydium$/i,
-  /^meteora$/i, /^jito$/i, /^marinade$/i, /^msol$/i,
-  /^bonk$/i, /^wif$/i,  // Major established tokens
+  // Protocol tokens (DeFi infrastructure, not memecoins)
+  /^orca$/i, /^jupiter$/i, /^raydium$/i,
+  /^meteora$/i, /^marinade$/i,
 
-  // Wrapped/Bridge tokens
+  // Wrapped/Bridge tokens - exact patterns
   /^wsol$/i, /^weth$/i, /^wbtc$/i,
   /^wrapped\s/i, /\swrapped$/i,
   /^bridged\s/i, /\sbridged$/i,
-  /^xsol$/i, /^xbtc$/i, /^zbtc$/i,  // Synthetic/wrapped patterns
 
-  // Yield/Staking tokens
-  /^st[a-z]{2,4}$/i,  // stSOL, stETH patterns
-  /^jitosol$/i, /^msol$/i, /^bsol$/i,
+  // Yield/Staking tokens - specific known tokens
+  /^jitosol$/i, /^msol$/i, /^bsol$/i, /^stsol$/i,
 
-  // Stock/Asset tokens (synthetic stocks)
-  /^[a-z]{1,5}x$/i,  // TSLAx, NVDAx, GOOGLx, QQQx, GLDx patterns
+  // Synthetic stock tokens - specific known patterns
+  /^tslax$/i, /^nvdax$/i, /^googlx$/i, /^qqqqx$/i, /^gldx$/i,
+  /^mstrx$/i, /^aaplx$/i, /^amzx$/i, /^xaut/i,
 ];
 
 // Specific token addresses to always exclude (known protocol tokens)

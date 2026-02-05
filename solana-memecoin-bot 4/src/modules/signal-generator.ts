@@ -167,33 +167,33 @@ function getMarketCapTier(marketCap: number): MarketCapTier {
 
 // Known stablecoin/protocol patterns to exclude
 const EXCLUDED_NAME_PATTERNS = [
-  // Stablecoins
+  // Stablecoins - exact matches only
   /^usdc$/i, /^usdt$/i, /^busd$/i, /^dai$/i, /^frax$/i, /^tusd$/i, /^usdp$/i,
   /^ust$/i, /^gusd$/i, /^husd$/i, /^susd$/i, /^lusd$/i, /^eusd$/i,
+  /^usdg$/i, /^pyusd$/i, /^hyusd$/i, /^jupusd$/i, /^eurc$/i,
   /usd$/i,      // Ends with USD (hyUSD, JupUSD, etc.)
-  /^usd/i,      // Starts with USD
 
   // LP/Pool tokens
   /\s*\/\s*/,   // Contains "/" (ONe/JitoSOL pattern)
-  /^lp$/i, /^lp\s/i, /\slp$/i, /\slp\s/i,  // LP anywhere
+  /^lp$/i, /^lp\s/i, /\slp$/i, /\slp\s/i,
   /-lp$/i, /-lp-/i, /^lp-/i,
   /pool$/i, /^pool/i,
 
-  // Protocol tokens
-  /^orca$/i, /^jup$/i, /^jupiter$/i, /^ray$/i, /^raydium$/i,
-  /^meteora$/i, /^jito$/i, /^marinade$/i, /^msol$/i,
-  /^bonk$/i,    // Major established token
-  /^wif$/i,     // Major established token
+  // Protocol tokens (DeFi infrastructure, not memecoins)
+  /^orca$/i, /^jupiter$/i, /^raydium$/i,
+  /^meteora$/i, /^marinade$/i,
 
-  // Wrapped/Bridge tokens
+  // Wrapped/Bridge tokens - exact patterns
   /^wsol$/i, /^weth$/i, /^wbtc$/i,
   /^wrapped\s/i, /\swrapped$/i,
   /^bridged\s/i, /\sbridged$/i,
 
-  // Yield/Staking tokens
-  /^st[a-z]{2,4}$/i,  // stSOL, stETH patterns
-  /^b[a-z]{2,4}$/i,   // bSOL patterns (but not all b* tokens)
-  /^jitosol$/i, /^msol$/i, /^bsol$/i,
+  // Yield/Staking tokens - specific known tokens
+  /^jitosol$/i, /^msol$/i, /^bsol$/i, /^stsol$/i,
+
+  // Synthetic stock tokens - specific known patterns
+  /^tslax$/i, /^nvdax$/i, /^googlx$/i, /^qqqqx$/i, /^gldx$/i,
+  /^mstrx$/i, /^aaplx$/i, /^amzx$/i, /^xaut/i,
 ];
 
 // Specific token addresses to always exclude (known protocol tokens)

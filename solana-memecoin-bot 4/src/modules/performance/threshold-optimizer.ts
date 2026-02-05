@@ -64,12 +64,12 @@ export interface FactorAnalysis {
 // - Higher scores currently ANTI-predict wins (scoring inversion issue)
 // Strategy: Tighter filters to only take highest-quality signals
 const DEFAULT_THRESHOLDS: ThresholdSet = {
-  minMomentumScore: 35,      // Raised from 10 - filter weak momentum
-  minOnChainScore: 45,       // Raised from 30 - higher quality filtering
-  minSafetyScore: 55,        // Raised from 40 - prioritize safety (key predictor)
-  maxBundleRiskScore: 45,    // Lowered from 60 - stricter bundle risk
-  minLiquidity: 12000,       // Raised from 8000 - better liquidity
-  maxTop10Concentration: 50, // Lowered from 60 - better distribution
+  minMomentumScore: 25,      // Lowered for more volume - memecoins are inherently risky
+  minOnChainScore: 35,       // Lowered from 45 - let position sizing manage risk
+  minSafetyScore: 45,        // Lowered from 55 - basic safety checks only
+  maxBundleRiskScore: 55,    // Raised from 45 - accept more bundle risk with small positions
+  minLiquidity: 8000,        // Lowered from 12000 - more opportunities
+  maxTop10Concentration: 60, // Raised from 50 - memecoins often have concentrated holders early
 };
 
 // Target performance

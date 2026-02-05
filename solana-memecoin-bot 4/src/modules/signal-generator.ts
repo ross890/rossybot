@@ -118,10 +118,10 @@ const TIER_CONFIGS: Record<MarketCapTier, TierConfig> = {
   EMERGING: {
     minMcap: 8_000_000,
     maxMcap: 20_000_000,
-    enabled: false,  // DISABLED: 11% win rate, -72% avg return
-    minLiquidity: 25000,  // Higher liquidity required
-    minSafetyScore: 70,  // Much stricter safety
-    positionSizeMultiplier: 0.25,  // Quarter size if enabled
+    enabled: true,  // RE-ENABLED: Using smaller position size to manage risk
+    minLiquidity: 20000,  // Moderate liquidity requirement
+    minSafetyScore: 55,  // Standard safety (not overly strict)
+    positionSizeMultiplier: 0.5,  // Half size to manage risk in this tier
   },
   GRADUATED: {
     minMcap: 20_000_000,
@@ -908,17 +908,17 @@ export class SignalGenerator {
       // Check for exceptional on-chain metrics FIRST (faster than KOL lookup)
       // Use the on-chain score components that are already calculated
       //
-      // SIGNAL VOLUME FIX: Lowered thresholds from 70/75/70/50/50 to 55/60/55/30/40
-      // Previous thresholds were too strict - almost no early tokens could pass
-      // without KOL validation, defeating the purpose of on-chain first detection.
+      // VOLUME STRATEGY: Lowered thresholds significantly
+      // Memecoins are inherently risky - manage risk via position sizing, not over-filtering.
+      // We want MORE signals with SMALLER positions rather than fewer "quality" signals.
       //
-      // LEARNING MODE FIX: In learning mode, use much lower thresholds to collect
-      // more training data. The ML model needs diverse samples to learn patterns.
-      const earlyMomentumThreshold = isLearningMode ? 30 : 55;
-      const earlySafetyThreshold = isLearningMode ? 40 : 60;
-      const earlyBundleThreshold = isLearningMode ? 35 : 55;
-      const earlyHolderThreshold = isLearningMode ? 15 : 30;
-      const earlyMarketThreshold = isLearningMode ? 25 : 40;
+      // Production mode now uses thresholds similar to previous learning mode.
+      // Learning mode is even more relaxed for maximum data collection.
+      const earlyMomentumThreshold = isLearningMode ? 20 : 35;
+      const earlySafetyThreshold = isLearningMode ? 30 : 45;
+      const earlyBundleThreshold = isLearningMode ? 25 : 40;
+      const earlyHolderThreshold = isLearningMode ? 10 : 20;
+      const earlyMarketThreshold = isLearningMode ? 20 : 30;
 
       const hasSuperiorOnChain =
         onChainScore.components.momentum >= earlyMomentumThreshold &&      // Good buy pressure
@@ -951,6 +951,7 @@ export class SignalGenerator {
 
         if (kolActivity.length > 0) {
           // Find highest-tier KOL that mentioned/bought this token
+          // EXPANDED: Now accepting B-tier KOLs for more signal volume
           let bestKolTier: KolReputationTier = KolReputationTier.UNPROVEN;
 
           for (const activity of kolActivity) {
@@ -963,11 +964,19 @@ export class SignalGenerator {
                 break; // S-tier is best, no need to check more
               } else if (kolCheck.tier === KolReputationTier.A_TIER) {
                 bestKolTier = KolReputationTier.A_TIER;
+              } else if (kolCheck.tier === KolReputationTier.B_TIER && bestKolTier === KolReputationTier.UNPROVEN) {
+                bestKolTier = KolReputationTier.B_TIER;
               }
             }
           }
 
-          if (bestKolTier === KolReputationTier.S_TIER || bestKolTier === KolReputationTier.A_TIER) {
+          // VOLUME STRATEGY: Accept S, A, and B tier KOLs
+          // B-tier provides some signal even if less reliable than S/A
+          const isAcceptableKol = bestKolTier === KolReputationTier.S_TIER ||
+                                   bestKolTier === KolReputationTier.A_TIER ||
+                                   bestKolTier === KolReputationTier.B_TIER;
+
+          if (isAcceptableKol) {
             signalTrack = SignalTrack.EARLY_QUALITY;
             kolReputationTier = bestKolTier;
             logger.info({
@@ -980,13 +989,13 @@ export class SignalGenerator {
               kolCount: kolActivity.length,
             }, 'EVAL: Routing to EARLY QUALITY track (KOL validated)');
           } else {
-            // KOL activity exists but no S/A tier validation
+            // KOL activity exists but no S/A/B tier validation
             logger.info({
               tokenAddress: shortAddr,
               ticker: metrics.ticker,
               tokenAgeMinutes: metrics.tokenAge,
               kolCount: kolActivity.length,
-              reason: 'KOL activity found but no S/A tier validation',
+              reason: 'KOL activity found but no S/A/B tier validation',
             }, 'EVAL: BLOCKED - Early token without trusted KOL');
             return SignalGenerator.EVAL_RESULTS.TOO_EARLY;
           }
@@ -1134,13 +1143,10 @@ export class SignalGenerator {
 
     if (signalTrack === SignalTrack.PROVEN_RUNNER) {
       // PROVEN RUNNER: Holder growth requirement
-      // SIGNAL VOLUME FIX: Lowered from 0.1 to 0.03 (3 new holders per 100 minutes)
-      // Many legitimate tokens have slow but steady growth, especially older ones
-      //
-      // LEARNING MODE FIX: Skip holder growth requirement entirely in learning mode.
-      // This requirement was blocking stable tokens that might still be good trades.
-      // The ML model needs to learn from diverse outcomes, not pre-filtered data.
-      const MIN_HOLDER_GROWTH_RATE = isLearningMode ? 0 : 0.03;
+      // VOLUME STRATEGY: Lowered from 0.03 to 0.01 (1 new holder per 100 minutes)
+      // Stable tokens with minimal growth can still pump on news/catalysts
+      // We want volume - let position sizing manage risk
+      const MIN_HOLDER_GROWTH_RATE = isLearningMode ? 0 : 0.01;
 
       if (holderGrowthRate < MIN_HOLDER_GROWTH_RATE && !isLearningMode) {
         logger.info({
@@ -1174,8 +1180,9 @@ export class SignalGenerator {
       // LEARNING MODE FIX: Relax these requirements significantly in learning mode
       // to collect more diverse training data for the ML model.
 
-      // 1. Safety score required (relaxed from 70 to 65, or 45 in learning mode)
-      const EARLY_QUALITY_MIN_SAFETY = isLearningMode ? 45 : 65;
+      // 1. Safety score required - VOLUME STRATEGY: Lowered thresholds
+      // We accept more risk and manage it via position sizing
+      const EARLY_QUALITY_MIN_SAFETY = isLearningMode ? 35 : 50;
       if (safetyResult.safetyScore < EARLY_QUALITY_MIN_SAFETY) {
         logger.info({
           tokenAddress: shortAddr,
@@ -1188,8 +1195,8 @@ export class SignalGenerator {
         return SignalGenerator.EVAL_RESULTS.DISCOVERY_FAILED;
       }
 
-      // 2. Bundle risk required (relaxed from 35 to 40, or 60 in learning mode)
-      const EARLY_QUALITY_MAX_BUNDLE_RISK = isLearningMode ? 60 : 40;
+      // 2. Bundle risk required - VOLUME STRATEGY: Accept higher bundle risk
+      const EARLY_QUALITY_MAX_BUNDLE_RISK = isLearningMode ? 70 : 55;
       if (bundleAnalysis.riskScore > EARLY_QUALITY_MAX_BUNDLE_RISK) {
         logger.info({
           tokenAddress: shortAddr,
@@ -1301,12 +1308,14 @@ export class SignalGenerator {
         note: 'Learning mode: ML gate bypassed for data collection',
       }, 'EVAL: Learning mode - skipping ML probability filter');
     } else if (signalTrack === SignalTrack.PROVEN_RUNNER) {
-      // PROVEN RUNNER: Token has survived 45+ minutes, require decent edge
-      mlProbabilityThreshold = 55;
-      confidenceOk = prediction.confidence === 'HIGH' || prediction.confidence === 'MEDIUM';
+      // PROVEN RUNNER: Token has survived 45+ minutes
+      // VOLUME STRATEGY: Lowered from 55% to 45% - let more signals through
+      mlProbabilityThreshold = 45;
+      confidenceOk = prediction.confidence === 'HIGH' || prediction.confidence === 'MEDIUM' || prediction.confidence === 'LOW';
     } else {
       // EARLY_QUALITY: Already validated by KOL or superior on-chain metrics
-      mlProbabilityThreshold = 50;
+      // VOLUME STRATEGY: Lowered from 50% to 40% - accept more early trades
+      mlProbabilityThreshold = 40;
       confidenceOk = true;  // Trust the external validation, don't double-gate
     }
 

@@ -126,11 +126,11 @@ function printStartupDiagnostics(): void {
   logger.info('📊 ANALYSIS MODULES');
   logger.info('   ✅ On-Chain Scoring Engine');
   logger.info('   ✅ Momentum Analyzer');
-  logger.info('   ✅ Bundle/Insider Detector');
+  logger.info('   ✅ Bundle Detector (informational)');
   logger.info('   ✅ Token Safety Checker');
   logger.info('   ✅ Scam Filter');
-  logger.info('   ✅ ML Win Predictor');
-  logger.info(`   ${appConfig.twitterEnabled ? '✅' : '⚠️'} Social Analyzer (X/Twitter)`);
+  logger.info('   ✅ Moonshot Assessor');
+  logger.info('   ✅ Discovery Scanners');
 
   logger.info('');
   logger.info(divider);

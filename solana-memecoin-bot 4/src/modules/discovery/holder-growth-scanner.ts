@@ -50,18 +50,18 @@ interface HolderGrowthConfig {
 }
 
 const DEFAULT_CONFIG: HolderGrowthConfig = {
-  minHoldersPerHour: 50,       // 50+ new holders per hour
-  minTokenAgeHours: 2,         // At least 2 hours old
+  minHoldersPerHour: 10,       // 10+ new holders per hour (was 50)
+  minTokenAgeHours: 0.25,     // 15 minutes old (was 2 hours)
   maxTokenAgeHours: 2160,      // Up to 90 days old (90 * 24)
-  minExistingHolders: 100,     // At least 100 existing holders
-  minLiquidity: 15000,         // At least $15K liquidity
+  minExistingHolders: 20,      // 20 existing holders (was 100)
+  minLiquidity: 2000,          // $2K liquidity (was $15K)
   scanIntervalMinutes: 5,      // Scan every 5 minutes
   maxTokensPerScan: 50,        // Return up to 50 tokens
   trackingWindowHours: 6,      // Track for 6 hours
   holderQualityAnalysis: {
     enabled: true,
-    minRelativeGrowthPercent: 5,    // Need at least 5% growth relative to base
-    suspiciousGrowthRatePercent: 50, // >50% growth in 1 hour is suspicious
+    minRelativeGrowthPercent: 2,     // 2% growth (was 5%)
+    suspiciousGrowthRatePercent: 200, // >200% in 1 hour is suspicious (was 50% - 50% is GOOD)
     idealNewToExistingRatio: 0.7,    // 70% new wallets is ideal (30% experienced)
   },
 };

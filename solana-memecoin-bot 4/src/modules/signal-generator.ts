@@ -34,14 +34,8 @@ import { bundleDetector, BundleAnalysisResult } from './bundle-detector.js';
 import { onChainScoringEngine, OnChainScore } from './onchain-scoring.js';
 import { smallCapitalManager, SignalQuality } from './small-capital-manager.js';
 
-// Performance tracking and prediction
-import { signalPerformanceTracker, thresholdOptimizer, winPredictor, WinPrediction, performanceLogger } from './performance/index.js';
-
-// MEV bot detection for early pump signals
-import { mevDetector, MEVSignal } from './mev-detector.js';
-
-// Social/X integration
-import { socialAnalyzer } from './social/index.js';
+// Performance tracking
+import { signalPerformanceTracker, thresholdOptimizer, performanceLogger } from './performance/index.js';
 
 // Auto-trading integration
 import { autoTrader } from './trading/index.js';
@@ -97,46 +91,46 @@ interface TierConfig {
   positionSizeMultiplier: number;  // Scale position size for tier
 }
 
-// Tier configuration based on performance analysis
+// Tier configuration - LOOSENED for memecoin signal generation
 const TIER_CONFIGS: Record<MarketCapTier, TierConfig> = {
   MICRO: {
     minMcap: 0,
     maxMcap: 500_000,
     enabled: true,
-    minLiquidity: 5000,
-    minSafetyScore: 50,
+    minLiquidity: 500,           // Was $5K - early gems start tiny
+    minSafetyScore: 20,          // Was 50 - memecoins are inherently risky
     positionSizeMultiplier: 0.5,  // Half size for micro caps
   },
   RISING: {
     minMcap: 500_000,
     maxMcap: 8_000_000,
-    enabled: true,  // Best performing tier - 47% win rate
-    minLiquidity: 10000,
-    minSafetyScore: 50,
+    enabled: true,
+    minLiquidity: 2000,          // Was $10K
+    minSafetyScore: 25,          // Was 50
     positionSizeMultiplier: 1.0,  // Full position size
   },
   EMERGING: {
     minMcap: 8_000_000,
     maxMcap: 20_000_000,
-    enabled: true,  // RE-ENABLED: Using smaller position size to manage risk
-    minLiquidity: 20000,  // Moderate liquidity requirement
-    minSafetyScore: 55,  // Standard safety (not overly strict)
-    positionSizeMultiplier: 0.5,  // Half size to manage risk in this tier
+    enabled: true,
+    minLiquidity: 5000,          // Was $20K
+    minSafetyScore: 30,          // Was 55
+    positionSizeMultiplier: 0.5,
   },
   GRADUATED: {
     minMcap: 20_000_000,
     maxMcap: 50_000_000,
-    enabled: true,  // Keep enabled but with caution
-    minLiquidity: 50000,
-    minSafetyScore: 60,
+    enabled: true,
+    minLiquidity: 15000,         // Was $50K
+    minSafetyScore: 35,          // Was 60
     positionSizeMultiplier: 0.75,
   },
   ESTABLISHED: {
     minMcap: 50_000_000,
     maxMcap: 150_000_000,
-    enabled: true,  // Lower volatility, more predictable
-    minLiquidity: 100000,
-    minSafetyScore: 55,
+    enabled: true,
+    minLiquidity: 30000,         // Was $100K
+    minSafetyScore: 35,          // Was 55
     positionSizeMultiplier: 0.5,
   },
   UNKNOWN: {
@@ -270,18 +264,6 @@ export class SignalGenerator {
     // Initialize Telegram bot
     await telegramBot.initialize();
 
-    // Initialize Social/X analyzer for real-time social metrics
-    try {
-      const socialReady = await socialAnalyzer.initialize();
-      if (socialReady) {
-        logger.info('Social analyzer initialized - X/Twitter integration active');
-      } else {
-        logger.warn('Social analyzer initialization failed - social metrics will be limited');
-      }
-    } catch (error) {
-      logger.warn({ error }, 'Failed to initialize social analyzer - social signals will use fallback data');
-    }
-
     // Initialize Pump.fun bonding curve monitor (Feature 4)
     bondingCurveMonitor.onAlert(async (alert) => {
       const message = bondingCurveMonitor.formatAlertMessage(alert);
@@ -300,14 +282,6 @@ export class SignalGenerator {
       logger.info('Daily digest generated');
     });
     dailyDigestGenerator.start(9); // 9 AM
-
-    // Initialize Win Predictor (ML-based prediction)
-    try {
-      await winPredictor.initialize();
-      logger.info('Win Predictor initialized - ML predictions active');
-    } catch (error) {
-      logger.warn({ error }, 'Failed to initialize Win Predictor - predictions will use defaults');
-    }
 
     // AUDIT FIX: Sync optimizer thresholds to on-chain scoring engine
     // This ensures learned thresholds are used for risk assessment
@@ -906,120 +880,64 @@ export class SignalGenerator {
         track: 'PROVEN_RUNNER',
       }, 'EVAL: Routing to PROVEN RUNNER track');
 
+    } else if (metrics.tokenAge < 2) {
+      // BLOCKED: Tokens under 2 minutes are too risky (instant dumps)
+      logger.info({
+        tokenAddress: shortAddr,
+        ticker: metrics.ticker,
+        tokenAgeMinutes: metrics.tokenAge,
+        reason: 'Token under 2 minutes old - too risky, instant dump potential',
+      }, 'EVAL: BLOCKED - Token too new (< 2 min)');
+      return SignalGenerator.EVAL_RESULTS.TOO_EARLY;
+
     } else if (metrics.tokenAge < EARLY_QUALITY_MAX_AGE) {
-      // TRACK 2: EARLY QUALITY - Need trust signal (KOL OR exceptional on-chain metrics)
-      //
-      // HIT RATE IMPROVEMENT: Added ON-CHAIN FIRST path
-      // Previously: ONLY KOL validation could pass early tokens
-      // Now: Exceptional on-chain metrics can also provide trust signal
-      // This removes 20-30 second latency from waiting for KOL detection
+      // TRACK 2: EARLY QUALITY (2-45 min)
+      // Route to EARLY_QUALITY track without requiring KOL validation.
+      // KOL activity adds bonus points but is not a gate.
+      signalTrack = SignalTrack.EARLY_QUALITY;
 
-      // Check for exceptional on-chain metrics FIRST (faster than KOL lookup)
-      // Use the on-chain score components that are already calculated
-      //
-      // VOLUME STRATEGY: Lowered thresholds significantly
-      // Memecoins are inherently risky - manage risk via position sizing, not over-filtering.
-      // We want MORE signals with SMALLER positions rather than fewer "quality" signals.
-      //
-      // Production mode now uses thresholds similar to previous learning mode.
-      // Learning mode is even more relaxed for maximum data collection.
-      const earlyMomentumThreshold = isLearningMode ? 20 : 35;
-      const earlySafetyThreshold = isLearningMode ? 30 : 45;
-      const earlyBundleThreshold = isLearningMode ? 25 : 40;
-      const earlyHolderThreshold = isLearningMode ? 10 : 20;
-      const earlyMarketThreshold = isLearningMode ? 20 : 30;
+      // Check for KOL activity as optional bonus (not required)
+      const kolActivity = await kolWalletMonitor.getKolActivityForToken(tokenAddress);
+      if (kolActivity.length > 0) {
+        let bestKolTier: KolReputationTier = KolReputationTier.UNPROVEN;
 
-      const hasSuperiorOnChain =
-        onChainScore.components.momentum >= earlyMomentumThreshold &&      // Good buy pressure
-        onChainScore.components.safety >= earlySafetyThreshold &&        // Safe contract
-        onChainScore.components.bundleSafety >= earlyBundleThreshold &&  // Reasonably clean launch
-        metrics.holderCount >= earlyHolderThreshold &&                   // Some traction
-        onChainScore.components.marketStructure >= earlyMarketThreshold; // Decent market dynamics
+        for (const activity of kolActivity) {
+          const kolCheck = await kolAnalytics.isHighTierKolByHandle(activity.kol.handle);
+          if (kolCheck.isTrusted) {
+            if (kolCheck.tier === KolReputationTier.S_TIER) {
+              bestKolTier = KolReputationTier.S_TIER;
+              break;
+            } else if (kolCheck.tier === KolReputationTier.A_TIER) {
+              bestKolTier = KolReputationTier.A_TIER;
+            } else if (kolCheck.tier === KolReputationTier.B_TIER && bestKolTier === KolReputationTier.UNPROVEN) {
+              bestKolTier = KolReputationTier.B_TIER;
+            }
+          }
+        }
 
-      if (hasSuperiorOnChain) {
-        // ON-CHAIN FIRST: Accept without KOL if metrics are exceptional
-        signalTrack = SignalTrack.EARLY_QUALITY;
-        kolReputationTier = undefined; // No KOL, on-chain validated
+        const isAcceptableKol = bestKolTier === KolReputationTier.S_TIER ||
+                                 bestKolTier === KolReputationTier.A_TIER ||
+                                 bestKolTier === KolReputationTier.B_TIER;
+
+        if (isAcceptableKol) {
+          kolReputationTier = bestKolTier;
+        }
+
         logger.info({
           tokenAddress: shortAddr,
           ticker: metrics.ticker,
           tokenAgeMinutes: metrics.tokenAge,
           track: 'EARLY_QUALITY',
-          validationMethod: 'ON_CHAIN_FIRST',
-          learningMode: isLearningMode,
-          momentumScore: onChainScore.components.momentum,
-          momentumThreshold: earlyMomentumThreshold,
-          safetyScore: onChainScore.components.safety,
-          safetyThreshold: earlySafetyThreshold,
-          marketStructure: onChainScore.components.marketStructure,
-          holderCount: metrics.holderCount,
-        }, 'EVAL: Routing to EARLY QUALITY track (ON-CHAIN VALIDATED - no KOL needed)');
+          kolActivity: kolActivity.length,
+          kolTier: kolReputationTier || 'NONE',
+        }, 'EVAL: Routing to EARLY QUALITY track (KOL bonus applied if found)');
       } else {
-        // Fallback: Check for KOL validation
-        const kolActivity = await kolWalletMonitor.getKolActivityForToken(tokenAddress);
-
-        if (kolActivity.length > 0) {
-          // Find highest-tier KOL that mentioned/bought this token
-          // EXPANDED: Now accepting B-tier KOLs for more signal volume
-          let bestKolTier: KolReputationTier = KolReputationTier.UNPROVEN;
-
-          for (const activity of kolActivity) {
-            // Use consolidated kol-analytics for tier checking (single source of truth)
-            const kolCheck = await kolAnalytics.isHighTierKolByHandle(activity.kol.handle);
-            if (kolCheck.isTrusted) {
-              // Found a trusted KOL
-              if (kolCheck.tier === KolReputationTier.S_TIER) {
-                bestKolTier = KolReputationTier.S_TIER;
-                break; // S-tier is best, no need to check more
-              } else if (kolCheck.tier === KolReputationTier.A_TIER) {
-                bestKolTier = KolReputationTier.A_TIER;
-              } else if (kolCheck.tier === KolReputationTier.B_TIER && bestKolTier === KolReputationTier.UNPROVEN) {
-                bestKolTier = KolReputationTier.B_TIER;
-              }
-            }
-          }
-
-          // VOLUME STRATEGY: Accept S, A, and B tier KOLs
-          // B-tier provides some signal even if less reliable than S/A
-          const isAcceptableKol = bestKolTier === KolReputationTier.S_TIER ||
-                                   bestKolTier === KolReputationTier.A_TIER ||
-                                   bestKolTier === KolReputationTier.B_TIER;
-
-          if (isAcceptableKol) {
-            signalTrack = SignalTrack.EARLY_QUALITY;
-            kolReputationTier = bestKolTier;
-            logger.info({
-              tokenAddress: shortAddr,
-              ticker: metrics.ticker,
-              tokenAgeMinutes: metrics.tokenAge,
-              track: 'EARLY_QUALITY',
-              validationMethod: 'KOL_VALIDATED',
-              kolTier: bestKolTier,
-              kolCount: kolActivity.length,
-            }, 'EVAL: Routing to EARLY QUALITY track (KOL validated)');
-          } else {
-            // KOL activity exists but no S/A/B tier validation
-            logger.info({
-              tokenAddress: shortAddr,
-              ticker: metrics.ticker,
-              tokenAgeMinutes: metrics.tokenAge,
-              kolCount: kolActivity.length,
-              reason: 'KOL activity found but no S/A/B tier validation',
-            }, 'EVAL: BLOCKED - Early token without trusted KOL');
-            return SignalGenerator.EVAL_RESULTS.TOO_EARLY;
-          }
-        } else {
-          // No KOL activity and no exceptional on-chain for early token
-          logger.info({
-            tokenAddress: shortAddr,
-            ticker: metrics.ticker,
-            tokenAgeMinutes: metrics.tokenAge,
-            momentumScore: onChainScore.components.momentum,
-            safetyScore: onChainScore.components.safety,
-            reason: 'Early token without KOL or exceptional on-chain metrics',
-          }, 'EVAL: BLOCKED - Early token without validation');
-          return SignalGenerator.EVAL_RESULTS.TOO_EARLY;
-        }
+        logger.info({
+          tokenAddress: shortAddr,
+          ticker: metrics.ticker,
+          tokenAgeMinutes: metrics.tokenAge,
+          track: 'EARLY_QUALITY',
+        }, 'EVAL: Routing to EARLY QUALITY track (no KOL - on-chain only)');
       }
 
     } else {
@@ -1127,24 +1045,11 @@ export class SignalGenerator {
 
     // Step 4: Get additional data for position sizing and display
     // Run bundle, momentum, and MEV analysis in parallel for speed
-    const [bundleAnalysis, momentumData, mevSignal] = await Promise.all([
+    const [bundleAnalysis, momentumData] = await Promise.all([
       bundleDetector.analyze(tokenAddress),
       momentumAnalyzer.analyze(tokenAddress),
-      mevDetector.analyzeToken(tokenAddress),
     ]);
     const momentumScore = momentumData ? momentumAnalyzer.calculateScore(momentumData) : null;
-
-    // Log MEV activity if detected (early pump signal)
-    if (mevSignal.isEarlyPumpSignal) {
-      logger.info({
-        tokenAddress: shortAddr,
-        ticker: metrics.ticker,
-        mevActivity: mevSignal.activityLevel,
-        botsActive: mevSignal.botWalletsActive,
-        recommendation: mevSignal.recommendation,
-        reasoning: mevSignal.reasoning,
-      }, '🤖 MEV EARLY PUMP SIGNAL - Bot activity suggests potential pump');
-    }
 
     // Step 4.5: TRACK-SPECIFIC REQUIREMENTS
     // Different requirements for PROVEN_RUNNER vs EARLY_QUALITY
@@ -1262,125 +1167,6 @@ export class SignalGenerator {
 
     const positionSize = smallCapitalManager.calculatePositionSize(signalQuality);
 
-    // Step 6: Get ML-based win prediction
-    const prediction = await winPredictor.predict({
-      momentumScore: onChainScore.components.momentum,
-      onChainScore: onChainScore.total,
-      safetyScore: safetyResult.safetyScore,
-      bundleRiskScore: bundleAnalysis.riskScore,
-      liquidity: metrics.liquidityPool,
-      tokenAge: metrics.tokenAge,
-      holderCount: metrics.holderCount,
-      top10Concentration: metrics.top10Concentration,
-      buySellRatio: momentumData?.buySellRatio || 1,
-      uniqueBuyers: momentumData?.uniqueBuyers5m || 0,
-      marketCap: metrics.marketCap,
-      volumeMarketCapRatio: metrics.volumeMarketCapRatio,
-    });
-
-    logger.debug({
-      tokenAddress,
-      ticker: metrics.ticker,
-      winProbability: prediction.winProbability,
-      confidence: prediction.confidence,
-      action: prediction.recommendedAction,
-      patterns: prediction.matchedWinPatterns,
-    }, 'Win prediction calculated');
-
-    // Filter signals by ML win probability - TRACK-SPECIFIC THRESHOLDS
-    //
-    // QUALITY FIX: Raised thresholds to require meaningful edge
-    // A 50% win probability is a coin flip - we need better than that.
-    // Previous thresholds (30-50%) were letting through too many marginal signals.
-    //
-    // New approach: Require meaningful statistical edge before signaling.
-    // Learning mode still allows lower thresholds for data collection.
-    //
-    // LEARNING MODE FIX: Skip ML gate entirely in learning mode.
-    // The ML model needs training data to learn from - we can't expect it to
-    // make good predictions without data. By skipping this gate in learning mode,
-    // we collect the signal outcomes that the ML model needs to improve.
-    //
-    let mlProbabilityThreshold: number;
-    let confidenceOk: boolean;
-
-    if (isLearningMode) {
-      // LEARNING MODE: Skip ML gate entirely - we need to collect training data
-      // The model can't learn if we filter out all signals before generating them
-      mlProbabilityThreshold = 0;  // Accept any probability
-      confidenceOk = true;         // Accept any confidence
-      logger.info({
-        tokenAddress: shortAddr,
-        ticker: metrics.ticker,
-        winProbability: prediction.winProbability,
-        confidence: prediction.confidence,
-        note: 'Learning mode: ML gate bypassed for data collection',
-      }, 'EVAL: Learning mode - skipping ML probability filter');
-    } else if (signalTrack === SignalTrack.PROVEN_RUNNER) {
-      // PROVEN RUNNER: Token has survived 45+ minutes
-      // VOLUME STRATEGY: Lowered from 55% to 45% - let more signals through
-      mlProbabilityThreshold = 45;
-      confidenceOk = prediction.confidence === 'HIGH' || prediction.confidence === 'MEDIUM' || prediction.confidence === 'LOW';
-    } else {
-      // EARLY_QUALITY: Already validated by KOL or superior on-chain metrics
-      // VOLUME STRATEGY: Lowered from 50% to 40% - accept more early trades
-      mlProbabilityThreshold = 40;
-      confidenceOk = true;  // Trust the external validation, don't double-gate
-    }
-
-    if (prediction.winProbability < mlProbabilityThreshold) {
-      logger.info({
-        tokenAddress,
-        ticker: metrics.ticker,
-        winProbability: prediction.winProbability,
-        threshold: mlProbabilityThreshold,
-        confidence: prediction.confidence,
-        learningMode: isLearningMode,
-        track: signalTrack,
-        reason: 'Win probability below threshold',
-      }, 'Signal filtered by ML predictor - probability too low');
-      return SignalGenerator.EVAL_RESULTS.DISCOVERY_FAILED;
-    }
-
-    if (!confidenceOk) {
-      logger.info({
-        tokenAddress,
-        ticker: metrics.ticker,
-        winProbability: prediction.winProbability,
-        confidence: prediction.confidence,
-        learningMode: isLearningMode,
-        track: signalTrack,
-        reason: 'Confidence too low for track requirements',
-      }, 'Signal filtered by ML predictor - confidence too low');
-      return SignalGenerator.EVAL_RESULTS.DISCOVERY_FAILED;
-    }
-
-    logger.info({
-      tokenAddress,
-      ticker: metrics.ticker,
-      winProbability: prediction.winProbability,
-      mlAction: prediction.recommendedAction,
-      learningMode: isLearningMode,
-    }, 'Token PASSED ML prediction filter - generating signal');
-
-    // AUDIT FIX: Cap position size multipliers to prevent extremes
-    // Previously: positionSize * mlMultiplier could result in 0.25x (0.5*0.5) or 2.25x (1.5*1.5)
-    // Now: Cap the combined multiplier to reasonable range
-    const rawMultipliedAmount = positionSize.solAmount * prediction.positionSizeMultiplier;
-    const minPosition = positionSize.solAmount * 0.5;  // Never less than 50% of calculated
-    const maxPosition = positionSize.solAmount * 1.5;  // Never more than 150% of calculated
-    const cappedAmount = Math.min(maxPosition, Math.max(minPosition, rawMultipliedAmount));
-
-    const adjustedPositionSize = {
-      ...positionSize,
-      solAmount: cappedAmount,
-      rationale: [
-        ...positionSize.rationale,
-        `ML Win Probability: ${prediction.winProbability}% (${prediction.confidence})`,
-        `Position multiplier: ${prediction.positionSizeMultiplier}x (capped to 0.5-1.5x range)`,
-      ],
-    };
-
     // Step 7: Build and send on-chain momentum signal
     const onChainSignal = this.buildOnChainSignal(
       tokenAddress,
@@ -1388,16 +1174,14 @@ export class SignalGenerator {
       onChainScore,
       bundleAnalysis,
       safetyResult,
-      adjustedPositionSize,
+      positionSize,
       signalQuality,
       momentumScore,
       socialMetrics,
       dexScreenerInfo,
       ctoAnalysis,
-      prediction,
       signalTrack!,      // Track type (PROVEN_RUNNER or EARLY_QUALITY)
       kolReputationTier, // KOL tier (for EARLY_QUALITY track)
-      mevSignal          // MEV bot activity signal
     );
 
     // Track for KOL follow-up (optional validation)
@@ -1498,10 +1282,8 @@ export class SignalGenerator {
     socialMetrics: SocialMetrics,
     dexScreenerInfo?: DexScreenerTokenInfo,
     ctoAnalysis?: CTOAnalysis,
-    prediction?: WinPrediction,
     signalTrack: SignalTrack = SignalTrack.PROVEN_RUNNER,
     kolReputation?: KolReputationTier,
-    mevSignal?: MEVSignal
   ): DiscoverySignal {
     // Build risk warnings
     const riskWarnings: string[] = [];
@@ -1519,13 +1301,6 @@ export class SignalGenerator {
       riskWarnings.push(`Bundle risk: ${bundleAnalysis.riskScore}% (${bundleAnalysis.riskLevel})`);
     }
     riskWarnings.push(...onChainScore.warnings);
-
-    // MEV activity warnings/info
-    if (mevSignal?.isEarlyPumpSignal) {
-      riskWarnings.push(`🤖 MEV PUMP SIGNAL: ${mevSignal.botWalletsActive} bots active - potential early pump`);
-    } else if (mevSignal?.activityLevel === 'HIGH') {
-      riskWarnings.push(`⚠️ High MEV activity: ${mevSignal.recentMEVCount} events - watch for slippage`);
-    }
 
     // AUDIT FIX: Calculate social momentum score from collected metrics
     // Previously set to 0, wasting valuable social signals that were already collected
@@ -1563,9 +1338,6 @@ export class SignalGenerator {
         `MOMENTUM_${onChainScore.components.momentum}`,
         ...(socialMomentumScore > 30 ? ['SOCIAL_TRACTION'] : []),
         ...onChainScore.bullishSignals.slice(0, 3),
-        // NEW: Add MEV flags if bot activity detected
-        ...(mevSignal?.isEarlyPumpSignal ? ['MEV_PUMP_SIGNAL'] : []),
-        ...(mevSignal?.activityLevel === 'HIGH' ? ['HIGH_MEV_ACTIVITY'] : []),
       ],
       riskLevel: onChainScore.riskLevel === 'HIGH' || onChainScore.riskLevel === 'CRITICAL' ? 'HIGH' :
                  onChainScore.riskLevel === 'MEDIUM' ? 'MEDIUM' : 'LOW',
@@ -1625,18 +1397,8 @@ export class SignalGenerator {
       onChainScore,
       positionRationale: positionSize.rationale,
 
-      // ML Prediction data
-      prediction: prediction ? {
-        winProbability: prediction.winProbability,
-        confidence: prediction.confidence,
-        predictedReturn: prediction.predictedReturn,
-        recommendedAction: prediction.recommendedAction,
-        matchedPatterns: prediction.matchedWinPatterns,
-        riskFactors: prediction.riskFactors,
-        bullishFactors: prediction.bullishFactors,
-        optimalHoldTime: prediction.predictedOptimalHoldTime,
-        earlyExitRisk: prediction.earlyExitRisk,
-      } : null,
+      // ML Prediction removed
+      prediction: null,
     } as any;
   }
 
@@ -2088,29 +1850,17 @@ export class SignalGenerator {
     metrics: TokenMetrics
   ): Promise<SocialMetrics> {
     try {
-      // Use real X/Twitter social analyzer
-      const socialMetrics = await socialAnalyzer.getSocialMetrics(
-        tokenAddress,
-        metrics.ticker,
-        metrics.name
-      );
-
-      // If social analyzer returned data, use it
-      if (socialMetrics.mentionVelocity1h > 0 || socialMetrics.kolMentionDetected) {
-        logger.debug({
-          ticker: metrics.ticker,
-          velocity: socialMetrics.mentionVelocity1h,
-          sentiment: socialMetrics.sentimentPolarity,
-          kolMentions: socialMetrics.kolMentions.length,
-        }, 'Real social metrics retrieved from X');
-        return socialMetrics;
-      }
-
-      // Fallback: If no social data found, return with detected narrative
-      return {
-        ...socialMetrics,
-        narrativeFit: socialMetrics.narrativeFit || this.detectNarrative(metrics),
+      // Social analyzer removed - return default metrics with on-chain proxy fallback
+      const socialMetrics: SocialMetrics = {
+        mentionVelocity1h: 0,
+        engagementQuality: 0,
+        accountAuthenticity: 0,
+        sentimentPolarity: 0,
+        kolMentionDetected: false,
+        kolMentions: [],
+        narrativeFit: this.detectNarrative(metrics),
       };
+      return socialMetrics;
     } catch (error) {
       logger.debug({ error, ticker: metrics.ticker }, 'Social metrics fetch failed, using on-chain proxy');
 

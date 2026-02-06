@@ -66,18 +66,18 @@ export const SMART_MONEY_THRESHOLDS = {
   MIN_TRADE_SIZE_SOL: 0.5,         // Only track trades >= 0.5 SOL
   MAX_CANDIDATES: 500,             // Max candidates to monitor (oldest dropped)
 
-  // Evaluation thresholds
-  MIN_TRADES_FOR_EVALUATION: 10,   // Need 10+ trades before evaluating
-  MIN_UNIQUE_TOKENS: 5,            // Must trade at least 5 different tokens
+  // Evaluation thresholds - loosened for faster signal
+  MIN_TRADES_FOR_EVALUATION: 3,    // 3 trades (was 10)
+  MIN_UNIQUE_TOKENS: 2,            // 2 different tokens (was 5)
 
-  // Promotion thresholds
-  PROMOTE_WIN_RATE: 0.50,          // 50%+ win rate
-  PROMOTE_MIN_PROFIT_SOL: 5,       // 5+ SOL profit
+  // Promotion thresholds - loosened for memecoins
+  PROMOTE_WIN_RATE: 0.35,          // 35%+ win rate is great in memecoins (was 50%)
+  PROMOTE_MIN_PROFIT_SOL: 1,       // 1+ SOL profit (was 5)
   PROMOTE_CONSISTENCY_MAX: 150,    // Max ROI std dev (lower = more consistent)
 
-  // Rejection thresholds
-  REJECT_WIN_RATE: 0.30,           // Below 30% = reject
-  REJECT_MAX_LOSS_SOL: -10,        // Lost more than 10 SOL = reject
+  // Rejection thresholds - loosened
+  REJECT_WIN_RATE: 0.15,           // Below 15% = reject (was 30%)
+  REJECT_MAX_LOSS_SOL: -25,        // Lost more than 25 SOL = reject (was -10)
 
   // Win/Loss definition (same as KOL system)
   WIN_THRESHOLD_ROI: 100,          // 100% ROI = 2x = win

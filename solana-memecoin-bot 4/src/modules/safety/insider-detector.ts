@@ -10,7 +10,7 @@ import type { InsiderAnalysis } from '../../types/index.js';
 
 // ============ CONSTANTS ============
 
-const INSIDER_RISK_THRESHOLD = 70;
+const INSIDER_RISK_THRESHOLD = 100;
 const SAME_BLOCK_BUYERS_WARNING = 3;
 const DEPLOYER_FUNDED_WARNING = 2;
 const FUNDING_LOOKBACK_HOURS = 24;
@@ -110,9 +110,10 @@ export class InsiderDetector {
 
   /**
    * Check if token should be blocked due to insider risk
+   * NOTE: Insider data is informational only - never blocks signals
    */
   shouldBlockForInsiderRisk(analysis: InsiderAnalysis): boolean {
-    return analysis.insiderRiskScore > INSIDER_RISK_THRESHOLD;
+    return false;
   }
 
   /**

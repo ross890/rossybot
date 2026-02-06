@@ -2,7 +2,7 @@
 // MODULE 1C: SCAM FILTERING PIPELINE
 // ===========================================
 
-import { analyzeTokenContract, analyzeBundles, analyzeDevWallet } from './onchain.js';
+import { analyzeTokenContract, analyzeBundles, analyzeDevWallet, getTokenMetrics } from './onchain.js';
 import { Database } from '../utils/database.js';
 import { logger } from '../utils/logger.js';
 import {
@@ -30,6 +30,9 @@ const THRESHOLDS = {
   
   // Liquidity
   MIN_LIQUIDITY_FOR_TRADE: 5000,
+
+  // Mint authority - new pump.fun tokens legitimately have mint authority briefly
+  MINT_AUTHORITY_AGE_THRESHOLD_MINS: 30,
 } as const;
 
 // ============ SCAM FILTER CLASS ============
@@ -44,10 +47,21 @@ export class ScamFilter {
     let result: ScamFilterResult = ScamFilterResult.PASS;
     
     logger.debug({ tokenAddress }, 'Running scam filter');
-    
+
+    // Pre-check: Get token age for mint authority evaluation
+    const tokenMetrics = await getTokenMetrics(tokenAddress);
+    const tokenAgeMins = tokenMetrics?.tokenAge ?? undefined;
+
+    // Stage 0: Honeypot Detection (absolute deal-breaker - can't sell)
+    const isHoneypot = await this.checkHoneypot(tokenAddress);
+    if (isHoneypot) {
+      flags.push('HONEYPOT: Token cannot be sold - confirmed honeypot');
+      return this.buildOutput(ScamFilterResult.REJECT, flags);
+    }
+
     // Stage 1: Contract Analysis
     const contractAnalysis = await analyzeTokenContract(tokenAddress);
-    const contractResult = this.evaluateContract(contractAnalysis, flags);
+    const contractResult = this.evaluateContract(contractAnalysis, flags, tokenAgeMins);
     if (contractResult === ScamFilterResult.REJECT) {
       return this.buildOutput(ScamFilterResult.REJECT, flags, contractAnalysis);
     }
@@ -77,13 +91,12 @@ export class ScamFilter {
       }
     }
     
-    // Stage 4: Rug History Check (on top holders)
+    // Stage 4: Rug History Check (on top holders) - informational only, no hard reject
     const rugHistoryCount = await this.checkRugHistory(tokenAddress);
     if (rugHistoryCount >= THRESHOLDS.RUG_HISTORY_REJECT_COUNT) {
-      flags.push(`RUG_HISTORY: ${rugHistoryCount} wallets with prior rug involvement`);
-      return this.buildOutput(ScamFilterResult.REJECT, flags, contractAnalysis, bundleAnalysis, devBehaviour, rugHistoryCount);
-    }
-    if (rugHistoryCount >= THRESHOLDS.RUG_HISTORY_FLAG_COUNT) {
+      flags.push(`RUG_HISTORY_HIGH: ${rugHistoryCount} wallets with prior rug involvement`);
+      result = ScamFilterResult.FLAG;
+    } else if (rugHistoryCount >= THRESHOLDS.RUG_HISTORY_FLAG_COUNT) {
       flags.push(`RUG_HISTORY: ${rugHistoryCount} wallet(s) with prior rug involvement`);
       result = ScamFilterResult.FLAG;
     }
@@ -98,33 +111,42 @@ export class ScamFilter {
    */
   private evaluateContract(
     analysis: TokenContractAnalysis,
-    flags: string[]
+    flags: string[],
+    tokenAgeMins?: number
   ): ScamFilterResult {
-    // Mint authority must be revoked
-    if (!analysis.mintAuthorityRevoked) {
-      flags.push('MINT_AUTHORITY: Not revoked - tokens can be minted');
-      return ScamFilterResult.REJECT;
-    }
-    
-    // Freeze authority must be revoked
-    if (!analysis.freezeAuthorityRevoked) {
-      flags.push('FREEZE_AUTHORITY: Not revoked - tokens can be frozen');
-      return ScamFilterResult.REJECT;
-    }
-    
-    // Known scam template is instant reject
+    let result: ScamFilterResult = ScamFilterResult.PASS;
+
+    // Known scam template is instant reject (absolute deal-breaker)
     if (analysis.isKnownScamTemplate) {
       flags.push('SCAM_TEMPLATE: Contract matches known scam pattern');
       return ScamFilterResult.REJECT;
     }
-    
-    // Mutable metadata is a flag (not reject)
+
+    // Mint authority check:
+    // - REJECT only if token is older than 30 minutes (new pump.fun tokens legitimately have it briefly)
+    // - FLAG if token is new or age is unknown
+    if (!analysis.mintAuthorityRevoked) {
+      if (tokenAgeMins !== undefined && tokenAgeMins > THRESHOLDS.MINT_AUTHORITY_AGE_THRESHOLD_MINS) {
+        flags.push(`MINT_AUTHORITY: Not revoked after ${tokenAgeMins.toFixed(0)} mins - tokens can still be minted`);
+        return ScamFilterResult.REJECT;
+      }
+      flags.push('MINT_AUTHORITY: Not yet revoked - tokens can be minted (new token, monitoring)');
+      result = ScamFilterResult.FLAG;
+    }
+
+    // Freeze authority - FLAG only (informational)
+    if (!analysis.freezeAuthorityRevoked) {
+      flags.push('FREEZE_AUTHORITY: Not revoked - tokens can be frozen');
+      result = ScamFilterResult.FLAG;
+    }
+
+    // Mutable metadata is a flag
     if (analysis.metadataMutable) {
       flags.push('METADATA_MUTABLE: Token metadata can be changed');
-      return ScamFilterResult.FLAG;
+      result = ScamFilterResult.FLAG;
     }
-    
-    return ScamFilterResult.PASS;
+
+    return result;
   }
   
   /**
@@ -134,10 +156,10 @@ export class ScamFilter {
     analysis: BundleAnalysis,
     flags: string[]
   ): ScamFilterResult {
-    // High risk with rug history is instant reject
+    // High risk with rug history - FLAG (informational warning, not a hard block)
     if (analysis.riskLevel === 'HIGH' && analysis.hasRugHistory) {
       flags.push(`BUNDLE_RUG: ${analysis.bundledSupplyPercent.toFixed(1)}% bundled supply with rug history wallets`);
-      return ScamFilterResult.REJECT;
+      return ScamFilterResult.FLAG;
     }
     
     // High bundled supply is a flag
@@ -165,16 +187,16 @@ export class ScamFilter {
     behaviour: DevWalletBehaviour,
     flags: string[]
   ): ScamFilterResult {
-    // Transfer to CEX is suspicious
+    // Transfer to CEX - FLAG (informational warning, not a hard block)
     if (behaviour.transferredToCex) {
       flags.push(`DEV_CEX_TRANSFER: Dev wallet transferred to CEX`);
-      return ScamFilterResult.REJECT;
+      return ScamFilterResult.FLAG;
     }
-    
-    // High sell percent is a reject
+
+    // High sell percent - FLAG (informational warning, not a hard block)
     if (behaviour.soldPercent48h >= THRESHOLDS.DEV_SELL_HIGH_RISK_PERCENT) {
       flags.push(`DEV_DUMP: Dev sold ${behaviour.soldPercent48h.toFixed(1)}% within 48h`);
-      return ScamFilterResult.REJECT;
+      return ScamFilterResult.FLAG;
     }
     
     // Moderate sell is a flag
@@ -192,6 +214,26 @@ export class ScamFilter {
     return ScamFilterResult.PASS;
   }
   
+  /**
+   * Honeypot Detection: Check if token can actually be sold
+   * This is an absolute deal-breaker - instant reject if confirmed
+   * In production, this should simulate a sell transaction (e.g., via Jupiter quote)
+   */
+  private async checkHoneypot(tokenAddress: string): Promise<boolean> {
+    try {
+      // TODO: Integrate with honeypot detection service
+      // Production implementation should:
+      // 1. Attempt a simulated sell via Jupiter to confirm token is sellable
+      // 2. Check for transfer restrictions in the token program
+      // 3. Verify sell transactions exist on-chain
+      logger.debug({ tokenAddress }, 'Checking honeypot status');
+      return false;
+    } catch (error) {
+      logger.error({ error, tokenAddress }, 'Honeypot check failed');
+      return false; // Fail open - don't block if check itself fails
+    }
+  }
+
   /**
    * Stage 4: Check top holders against rug database
    */
@@ -259,28 +301,34 @@ export class ScamFilter {
 export async function quickScamCheck(tokenAddress: string): Promise<{
   pass: boolean;
   reason?: string;
+  warnings?: string[];
 }> {
   try {
+    const warnings: string[] = [];
+
     // Just check contract basics
     const contractAnalysis = await analyzeTokenContract(tokenAddress);
 
-    if (!contractAnalysis.mintAuthorityRevoked) {
-      logger.info({ tokenAddress }, 'Quick check FAIL: Mint authority not revoked');
-      return { pass: false, reason: 'Mint authority not revoked' };
-    }
-
-    if (!contractAnalysis.freezeAuthorityRevoked) {
-      logger.info({ tokenAddress }, 'Quick check FAIL: Freeze authority not revoked');
-      return { pass: false, reason: 'Freeze authority not revoked' };
-    }
-
+    // Known scam template is a hard reject (absolute deal-breaker)
     if (contractAnalysis.isKnownScamTemplate) {
       logger.info({ tokenAddress }, 'Quick check FAIL: Known scam template');
       return { pass: false, reason: 'Known scam contract template' };
     }
 
-    logger.info({ tokenAddress }, 'Quick check PASS');
-    return { pass: true };
+    // Mint authority - flag only, don't block (new pump.fun tokens have it briefly)
+    if (!contractAnalysis.mintAuthorityRevoked) {
+      logger.info({ tokenAddress }, 'Quick check FLAG: Mint authority not revoked');
+      warnings.push('Mint authority not revoked (may be new token)');
+    }
+
+    // Freeze authority - flag only, not a hard block
+    if (!contractAnalysis.freezeAuthorityRevoked) {
+      logger.info({ tokenAddress }, 'Quick check FLAG: Freeze authority not revoked');
+      warnings.push('Freeze authority not revoked');
+    }
+
+    logger.info({ tokenAddress, warnings }, 'Quick check PASS');
+    return { pass: true, warnings: warnings.length > 0 ? warnings : undefined };
   } catch (error) {
     logger.error({ error, tokenAddress }, 'Quick scam check failed with exception');
     return { pass: false, reason: 'Check failed - treating as suspicious' };

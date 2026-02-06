@@ -55,7 +55,7 @@ const THRESHOLDS = {
   // Score requirements
   MIN_SCORE_BUY: appConfig.trading.minScoreBuySignal,
   MIN_SCORE_WATCH: appConfig.trading.minScoreWatchSignal,
-  MIN_SCORE_DISCOVERY: 55,  // Minimum score for discovery signals (no KOL)
+  MIN_SCORE_DISCOVERY: 30,  // Lowered from 55 - let more discovery signals through
 
   // Risk levels
   RISK_VERY_LOW_MAX_SCORE: 85,

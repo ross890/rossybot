@@ -849,14 +849,17 @@ export class SignalGenerator {
     }, 'EVAL: On-chain + social scoring complete');
 
     // Step 2: Check if bundle/safety risk is too high
-    // Only block CRITICAL risk - HIGH risk tokens can still generate signals with warnings
-    if (onChainScore.riskLevel === 'CRITICAL') {
+    // Production mode: block both CRITICAL and HIGH risk (audit fix — HIGH risk was leaking through)
+    // Learning mode: only block CRITICAL (to collect more data)
+    const isLearning = appConfig.trading.learningMode;
+    if (onChainScore.riskLevel === 'CRITICAL' || (!isLearning && onChainScore.riskLevel === 'HIGH')) {
       logger.info({
         tokenAddress: shortAddr,
         ticker: metrics.ticker,
         riskLevel: onChainScore.riskLevel,
+        learningMode: isLearning,
         warnings: onChainScore.warnings,
-      }, 'EVAL: BLOCKED - Critical risk level');
+      }, `EVAL: BLOCKED - ${onChainScore.riskLevel} risk level`);
       return SignalGenerator.EVAL_RESULTS.BUNDLE_BLOCKED;
     }
 

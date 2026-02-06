@@ -3791,6 +3791,28 @@ export class TelegramAlertBot {
       msg += `\n`;
     }
 
+    // ATH Detection & Suggested Entry Price
+    if (signal.nearATH && signal.suggestedEntryPrice) {
+      msg += `───────────────────────────────\n`;
+      msg += `🏔️ *NEAR ALL-TIME HIGH*\n`;
+      const currentPrice = tokenMetrics.price || 0;
+      msg += `├─ Current: \`$${currentPrice.toFixed(8)}\`\n`;
+      msg += `├─ Suggested Entry: \`$${signal.suggestedEntryPrice.toFixed(8)}\`\n`;
+      if (signal.priceChangeData) {
+        const changes: string[] = [];
+        if (signal.priceChangeData.h1) changes.push(`1h: +${signal.priceChangeData.h1.toFixed(0)}%`);
+        if (signal.priceChangeData.h6) changes.push(`6h: +${signal.priceChangeData.h6.toFixed(0)}%`);
+        if (signal.priceChangeData.h24) changes.push(`24h: +${signal.priceChangeData.h24.toFixed(0)}%`);
+        if (changes.length > 0) {
+          msg += `├─ Price Change: ${changes.join(' · ')}\n`;
+        }
+      }
+      if (signal.suggestedEntryReason) {
+        msg += `└─ ⏳ _${signal.suggestedEntryReason}_\n`;
+      }
+      msg += `\n`;
+    }
+
     // Position sizing - simplified
     msg += `💵 *Size:* ${signal.suggestedPositionSize || 0.1} SOL\n`;
     msg += `🎯 TP: +100% · SL: -40%\n\n`;

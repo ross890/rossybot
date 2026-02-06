@@ -179,6 +179,11 @@ const EXCLUDED_NAME_PATTERNS = [
   /-lp$/i, /-lp-/i, /^lp-/i,
   /pool$/i, /^pool/i,
 
+  // Known LP/synthetic token names and leet-speak variants
+  /^0ne$/i, /^one$/i,           // ONe LP token and "0Ne" leet-speak variant
+  /^0n[3e]$/i,                   // Additional leet variants: 0N3, 0Ne
+  /^infinity$/i,                 // Infinity LP token
+
   // Protocol tokens (DeFi infrastructure, not memecoins)
   /^orca$/i, /^jupiter$/i, /^raydium$/i,
   /^meteora$/i, /^marinade$/i,

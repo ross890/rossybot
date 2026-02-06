@@ -105,6 +105,7 @@ export class MatureTokenTelegramFormatter {
       await this.bot.sendMessage(this.chatId, message, {
         parse_mode: 'Markdown',
         disable_web_page_preview: true,
+        reply_markup: createTelegramInlineKeyboard(item.tokenAddress),
       });
 
       return true;

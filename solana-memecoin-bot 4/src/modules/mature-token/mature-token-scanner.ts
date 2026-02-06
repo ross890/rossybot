@@ -521,6 +521,12 @@ export class MatureTokenScanner {
       tierCounts[tier]++;
       const tierConfig = TIER_CONFIG[tier];
 
+      // Check if tier is disabled (signalAllocation = 0)
+      if (tierConfig.signalAllocation === 0) {
+        rejections.noTierMatch++;
+        continue;
+      }
+
       // Tier-specific volume check
       if (token.volume24h < tierConfig.minVolume24h) {
         rejections.volumeTooLow++;
@@ -533,8 +539,8 @@ export class MatureTokenScanner {
         continue;
       }
 
-      // Tier-specific token age check
-      if (token.tokenAge && token.tokenAge < tierConfig.minTokenAgeHours) {
+      // Tier-specific token age check (tokenAge is in minutes, minTokenAgeHours is in hours)
+      if (token.tokenAge && token.tokenAge < tierConfig.minTokenAgeHours * 60) {
         rejections.ageTooYoung++;
         continue;
       }

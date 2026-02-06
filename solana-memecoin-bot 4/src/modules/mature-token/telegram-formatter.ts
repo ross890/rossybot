@@ -169,7 +169,7 @@ export class MatureTokenTelegramFormatter {
     msg += `├─ Whale Accumulation: ${smartMoneyMetrics.whaleAccumulation} whales adding\n`;
     msg += `├─ Smart Money Inflow: $${this.formatNumber(smartMoneyMetrics.smartMoneyInflow24h)} (24h)\n`;
     msg += `├─ Smart Wallet Holdings: ${smartMoneyMetrics.topTraderHoldings.toFixed(1)}%\n`;
-    msg += `├─ Exchange Net Flow: ${smartMoneyMetrics.exchangeNetFlow > 0 ? '📥 INFLOW' : '📤 OUTFLOW'}\n`;
+    msg += `├─ DEX Buy Pressure: ${smartMoneyMetrics.exchangeNetFlow > 0 ? '🟢 POSITIVE' : smartMoneyMetrics.exchangeNetFlow < 0 ? '🔴 NEGATIVE' : '⚪ NEUTRAL'}\n`;
     msg += `└─ Smart Money Score: *${smartMoneyMetrics.smartMoneyScore}/100*\n\n`;
 
     msg += `───────────────────────────────\n`;
@@ -181,7 +181,7 @@ export class MatureTokenTelegramFormatter {
     msg += `├─ KOLs Holding: ${kolReentryMetrics.tier1KolCount + kolReentryMetrics.tier2KolCount + kolReentryMetrics.tier3KolCount}`;
     msg += ` (T1:${kolReentryMetrics.tier1KolCount} T2:${kolReentryMetrics.tier2KolCount} T3:${kolReentryMetrics.tier3KolCount})\n`;
     msg += `├─ Recent Buys: ${kolReentryMetrics.kolBuys24h} in 24h / ${kolReentryMetrics.kolBuys7d} in 7d\n`;
-    msg += `├─ Avg Entry vs Current: ${this.formatPercent(kolReentryMetrics.currentVsKolEntry - 1)}\n`;
+    msg += `├─ Avg Entry vs Current: ${kolReentryMetrics.kolBuys7d > 0 ? this.formatPercent(kolReentryMetrics.currentVsKolEntry - 1) : 'N/A'}\n`;
     msg += `├─ KOL Conviction: ${kolReentryMetrics.kolConvictionScore >= 50 ? 'HIGH' : kolReentryMetrics.kolConvictionScore >= 30 ? 'MEDIUM' : 'LOW'}\n`;
     msg += `└─ KOL Score: *${kolReentryMetrics.kolActivityScore}/100*\n\n`;
 
@@ -205,7 +205,7 @@ export class MatureTokenTelegramFormatter {
     msg += `├─ 24h Volume: $${this.formatNumber(signal.volume24h)} (${breakoutMetrics.volumeExpansion.toFixed(1)}x avg)\n`;
     msg += `├─ Liquidity: $${this.formatNumber(signal.liquidity)} (${((signal.liquidity / signal.marketCap) * 100).toFixed(1)}% of mcap)\n`;
     msg += `├─ Volume Authenticity: ${volumeProfile.volumeAuthenticityScore}%\n`;
-    msg += `└─ LP Status: ${signal.score.contractSafetyScore >= 70 ? '🔒 LOCKED' : '🔓 UNLOCKED'}\n\n`;
+    msg += `└─ Contract Safety: ${signal.score.contractSafetyScore >= 70 ? '🟢 SAFE' : signal.score.contractSafetyScore >= 50 ? '🟡 CAUTION' : '🔴 RISK'} (${signal.score.contractSafetyScore}/100)\n\n`;
 
     msg += `───────────────────────────────\n`;
 
@@ -216,15 +216,15 @@ export class MatureTokenTelegramFormatter {
     msg += `├─ Insider Risk: ${score.bundleRiskScore >= 70 ? 'LOW' : score.bundleRiskScore >= 50 ? 'MEDIUM' : 'HIGH'}\n`;
     msg += `└─ Safety Score: *${score.contractSafetyScore}/100*\n\n`;
 
-    // Bullish/Bearish signals
+    // Bullish/Bearish signals (replace underscores to avoid Telegram Markdown italic parsing)
     if (score.bullishSignals.length > 0) {
-      msg += `✅ *Bullish:* ${score.bullishSignals.slice(0, 4).join(', ')}\n`;
+      msg += `✅ Bullish: ${score.bullishSignals.slice(0, 4).map(s => s.replace(/_/g, ' ')).join(', ')}\n`;
     }
     if (score.bearishSignals.length > 0) {
-      msg += `⚠️ *Bearish:* ${score.bearishSignals.slice(0, 3).join(', ')}\n`;
+      msg += `⚠️ Bearish: ${score.bearishSignals.slice(0, 3).map(s => s.replace(/_/g, ' ')).join(', ')}\n`;
     }
     if (score.warnings.length > 0) {
-      msg += `🚨 *Warnings:* ${score.warnings.slice(0, 3).join(', ')}\n`;
+      msg += `🚨 Warnings: ${score.warnings.slice(0, 3).map(s => s.replace(/_/g, ' ')).join(', ')}\n`;
     }
 
     msg += `\n${'━'.repeat(24)}\n\n`;
@@ -430,7 +430,8 @@ export class MatureTokenTelegramFormatter {
 
   private getTierLabel(tier: TokenTier): string {
     switch (tier) {
-      case TokenTier.RISING: return 'RISING ($1-5M)';
+      case TokenTier.MICRO: return 'MICRO ($200K-500K)';
+      case TokenTier.RISING: return 'RISING ($500K-8M)';
       case TokenTier.EMERGING: return 'EMERGING ($8-20M)';
       case TokenTier.GRADUATED: return 'GRADUATED ($20-50M)';
       case TokenTier.ESTABLISHED: return 'ESTABLISHED ($50-150M)';
@@ -440,6 +441,7 @@ export class MatureTokenTelegramFormatter {
 
   private getTierEmoji(tier: TokenTier): string {
     switch (tier) {
+      case TokenTier.MICRO: return '🔬';        // Micro-cap, highest risk
       case TokenTier.RISING: return '🚀';        // High potential, strong holder base
       case TokenTier.EMERGING: return '🌱';      // Higher risk/reward
       case TokenTier.GRADUATED: return '🎓';     // Balanced

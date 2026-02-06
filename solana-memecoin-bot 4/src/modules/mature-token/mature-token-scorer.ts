@@ -486,8 +486,8 @@ export class MatureTokenScorer {
       bullishSignals.push('SMART_MONEY_INFLOW');
     }
 
-    if (smartMoney.exchangeNetFlow > 1000) {
-      bearishSignals.push('EXCHANGE_INFLOW');
+    if (smartMoney.exchangeNetFlow < -1000) {
+      bearishSignals.push('SELL PRESSURE');
     }
 
     // KOL signals

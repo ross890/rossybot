@@ -291,6 +291,12 @@ export class KolReentryDetector {
    * Calculate KOL activity score
    */
   private calculateScore(metrics: KolReentryMetrics): number {
+    // If no KOLs are involved at all, score should be 0
+    const totalKols = metrics.tier1KolCount + metrics.tier2KolCount + metrics.tier3KolCount;
+    if (totalKols === 0 && metrics.kolBuys24h === 0 && metrics.kolBuys7d === 0) {
+      return 0;
+    }
+
     let score = 0;
 
     // KOL Buys 24h Score (0-25)

@@ -27,9 +27,9 @@ const envSchema = z.object({
   TWITTER_BEARER_TOKEN: z.string().optional(),
   TWITTER_CONSUMER_KEY: z.string().optional(),
   TWITTER_CONSUMER_SECRET: z.string().optional(),
-  // Set to false to disable Twitter API entirely (saves credits, uses DexScreener social data only)
+  // Twitter API toggle: auto-enables when credentials exist, set to "false" to force-disable
   // Explicitly parse string "true"/"false" from env vars (Railway passes strings)
-  TWITTER_ENABLED: z.string().optional().transform(val => val?.toLowerCase() === 'true'),
+  TWITTER_ENABLED: z.string().optional(),
 
   // Telegram
   TELEGRAM_BOT_TOKEN: z.string().min(1),
@@ -93,7 +93,10 @@ function loadConfig(): AppConfig {
     twitterBearerToken: env.TWITTER_BEARER_TOKEN || '',
     twitterConsumerKey: env.TWITTER_CONSUMER_KEY || '',
     twitterConsumerSecret: env.TWITTER_CONSUMER_SECRET || '',
-    twitterEnabled: env.TWITTER_ENABLED,
+    // Auto-enable Twitter if credentials exist, unless explicitly disabled
+    twitterEnabled: env.TWITTER_ENABLED !== undefined
+      ? env.TWITTER_ENABLED.toLowerCase() === 'true'
+      : !!(env.TWITTER_BEARER_TOKEN || (env.TWITTER_CONSUMER_KEY && env.TWITTER_CONSUMER_SECRET)),
     telegramBotToken: env.TELEGRAM_BOT_TOKEN,
     telegramChatId: env.TELEGRAM_CHAT_ID,
     nodeEnv: env.NODE_ENV,

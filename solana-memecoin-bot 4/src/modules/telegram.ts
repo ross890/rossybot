@@ -34,9 +34,8 @@ import {
   CTOAnalysis,
 } from '../types/index.js';
 
-// Trading module imports (disabled - signal-only mode)
-// import { TradingCommands } from './telegram/trading-commands.js';
-// import { tradeExecutor, positionManager, autoTrader } from './trading/index.js';
+// Trading commands (conditionally enabled when wallet key is present)
+import { TradingCommands } from './telegram/trading-commands.js';
 
 // ============ RATE LIMITING ============
 
@@ -226,9 +225,18 @@ export class TelegramAlertBot {
       logger.error({ error }, 'Failed to initialize performance tracking');
     }
 
-    // Trading system disabled - using signal-only mode
-    // Wallet integration and auto-trading can be re-enabled later
-    logger.info('Running in signal-only mode (trading system disabled)');
+    // Initialize trading commands if wallet key is configured
+    if (appConfig.trading && process.env.BOT_WALLET_PRIVATE_KEY && this.bot) {
+      try {
+        const tradingCommands = new TradingCommands(this.bot, this.chatId);
+        await tradingCommands.initialize();
+        logger.info('Trading commands enabled (wallet key configured)');
+      } catch (error) {
+        logger.warn({ error }, 'Failed to initialize trading commands - running in signal-only mode');
+      }
+    } else {
+      logger.info('Running in signal-only mode (no wallet key configured)');
+    }
 
     // Initialize alpha wallet manager with notification callback
     try {

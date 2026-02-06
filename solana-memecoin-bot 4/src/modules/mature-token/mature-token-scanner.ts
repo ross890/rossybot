@@ -585,6 +585,22 @@ export class MatureTokenScanner {
       logger.info(`📊 FUNNEL: Rejected concentrations (max ${this.eligibility.maxTop10Concentration}%): ${rejectedConcentrations.join(', ')}`);
     }
 
+    // Near-miss analysis: log tokens that are within 20% of passing each threshold
+    // This helps identify if thresholds are too tight for current market conditions
+    const totalRejections = Object.values(rejections).reduce((a, b) => a + b, 0);
+    if (eligible.length === 0 && totalRejections > 0) {
+      const topBlocker = Object.entries(rejections)
+        .filter(([, v]) => v > 0)
+        .sort(([, a], [, b]) => b - a)
+        .map(([k, v]) => `${k}=${v}`)
+        .slice(0, 3);
+      logger.warn({
+        eligible: 0,
+        totalRejected: totalRejections,
+        topBlockers: topBlocker,
+      }, '⚠️ FUNNEL BLOCKED: 0 tokens passed eligibility — top rejection reasons listed');
+    }
+
     return eligible;
   }
 

@@ -12,7 +12,7 @@
 
 import { logger } from '../../utils/logger.js';
 import { Database, pool } from '../../utils/database.js';
-import { getTokenMetrics, dexScreenerClient, birdeyeClient } from '../onchain.js';
+import { getTokenMetrics, dexScreenerClient } from '../onchain.js';
 import { TokenMetrics } from '../../types/index.js';
 
 // ============ CONFIGURATION ============
@@ -233,14 +233,6 @@ class HolderGrowthScanner {
 
       for (const address of trendingAddresses) {
         candidates.add(address);
-      }
-
-      // Also get from Birdeye new listings (slightly older ones for growth tracking)
-      const newListings = await birdeyeClient.getNewListings(50);
-      for (const listing of newListings) {
-        if (listing.address) {
-          candidates.add(listing.address);
-        }
       }
 
       logger.debug({ count: candidates.size }, 'Holder growth scanner candidates');

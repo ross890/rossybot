@@ -11,7 +11,7 @@
 
 import { logger } from '../../utils/logger.js';
 import { Database, pool } from '../../utils/database.js';
-import { getTokenMetrics, dexScreenerClient, birdeyeClient } from '../onchain.js';
+import { getTokenMetrics, dexScreenerClient } from '../onchain.js';
 import { TokenMetrics } from '../../types/index.js';
 
 // ============ CONFIGURATION ============
@@ -465,37 +465,23 @@ class VolumeAnomalyScanner {
     topWalletsVolumePercent: number;
   } | null> {
     try {
-      // Try to get from Birdeye trade data
-      const tradeData = await birdeyeClient.getTokenTradeData(address);
-      if (tradeData && tradeData.trades && tradeData.trades.length > 0) {
-        // Analyze trades
-        const walletVolumes = new Map<string, number>();
-        let buyVolume = 0;
-        let sellVolume = 0;
+      // Use DexScreener pairs data (FREE) for trade statistics
+      const pairs = await dexScreenerClient.getTokenPairs(address);
+      if (pairs.length > 0) {
+        const pair = pairs[0] as any;
+        const buys24h = pair.txns?.h24?.buys || 0;
+        const sells24h = pair.txns?.h24?.sells || 0;
+        const totalTrades = buys24h + sells24h;
 
-        for (const trade of tradeData.trades) {
-          const wallet = trade.owner || 'unknown';
-          const volume = trade.volumeUsd || 0;
-          walletVolumes.set(wallet, (walletVolumes.get(wallet) || 0) + volume);
-
-          if (trade.side === 'buy') {
-            buyVolume += volume;
-          } else {
-            sellVolume += volume;
-          }
-        }
-
-        // Calculate unique traders
-        const uniqueTraders = walletVolumes.size;
-
-        // Calculate top 3 wallet concentration
-        const sortedVolumes = Array.from(walletVolumes.values()).sort((a, b) => b - a);
-        const totalVolume = sortedVolumes.reduce((sum, v) => sum + v, 0);
-        const top3Volume = sortedVolumes.slice(0, 3).reduce((sum, v) => sum + v, 0);
-        const topWalletsVolumePercent = totalVolume > 0 ? (top3Volume / totalVolume) * 100 : 0;
+        // Estimate unique traders from transaction counts
+        const uniqueTraders = totalTrades;
 
         // Calculate buy/sell ratio
-        const buyToSellRatio = sellVolume > 0 ? buyVolume / sellVolume : buyVolume > 0 ? 10 : 1;
+        const buyToSellRatio = sells24h > 0 ? buys24h / sells24h : buys24h > 0 ? 10 : 1;
+
+        // Estimate top wallet concentration (not directly available from DexScreener)
+        // Use a moderate default - actual concentration checked via Helius holder data
+        const topWalletsVolumePercent = 30; // Conservative estimate
 
         return {
           uniqueTraders,

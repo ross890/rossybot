@@ -6,7 +6,7 @@
 
 import { logger } from '../../utils/logger.js';
 import { Database, pool } from '../../utils/database.js';
-import { getTokenMetrics, dexScreenerClient, birdeyeClient, jupiterClient } from '../onchain.js';
+import { getTokenMetrics, dexScreenerClient, jupiterClient } from '../onchain.js';
 import { tokenSafetyChecker } from '../safety/token-safety-checker.js';
 import { matureTokenScorer } from './mature-token-scorer.js';
 import { matureTokenTelegram } from './telegram-formatter.js';
@@ -166,10 +166,8 @@ export class MatureTokenScanner {
     },
     tiers: { RISING: 0, EMERGING: 0, GRADUATED: 0, ESTABLISHED: 0 },
     sourceStats: {
-      birdeyeMcap: 0,
+      dexscreenerTrending: 0,
       jupiter: 0,
-      birdeyeTrending: 0,
-      birdeyeMeme: 0,
       dexscreener: 0,
     },
     lastScanTime: '',
@@ -345,9 +343,8 @@ export class MatureTokenScanner {
   }
 
   /**
-   * Get candidate tokens from multiple sources
-   * Primary: Birdeye token list filtered by market cap range
-   * Secondary: Birdeye trending, DexScreener trending
+   * Get candidate tokens from multiple free sources
+   * Primary: DexScreener trending + Jupiter verified tokens
    */
   private async getCandidateTokens(): Promise<TokenMetrics[]> {
     const candidates: TokenMetrics[] = [];
@@ -358,13 +355,9 @@ export class MatureTokenScanner {
     let tooOldCount = 0;
 
     try {
-      // Source 1: Birdeye tokens in our target market cap range ($500K - $150M)
-      const birdeyeMcapTokens = await birdeyeClient.getTokensByMarketCapRange(
-        this.eligibility.minMarketCap,
-        this.eligibility.maxMarketCap,
-        100
-      );
-      for (const addr of birdeyeMcapTokens) {
+      // Source 1: DexScreener trending tokens (free, includes boosts)
+      const dexTrending = await dexScreenerClient.getTrendingSolanaTokens(100);
+      for (const addr of dexTrending) {
         seenAddresses.add(addr);
       }
 
@@ -378,22 +371,13 @@ export class MatureTokenScanner {
         seenAddresses.add(addr);
       }
 
-      // Source 3: Birdeye trending tokens (may include larger caps we can filter)
-      const birdeyeTrending = await birdeyeClient.getTrendingTokens(20);
-      for (const addr of birdeyeTrending) {
-        seenAddresses.add(addr);
-      }
-
-      // Source 4: Birdeye meme tokens (better for memecoin discovery)
-      const birdeyeMeme = await birdeyeClient.getMemeTokens(100);
-      for (const addr of birdeyeMeme) {
-        seenAddresses.add(addr);
-      }
-
-      // Source 5: DexScreener trending (fallback, includes boosts)
-      const dexTrending = await dexScreenerClient.getTrendingSolanaTokens(50);
-      for (const addr of dexTrending) {
-        seenAddresses.add(addr);
+      // Source 3: DexScreener new Solana pairs (recently listed)
+      const dexNewPairs = await dexScreenerClient.getNewSolanaPairs(50);
+      for (const pair of dexNewPairs) {
+        const addr = pair.tokenAddress || pair.baseToken?.address;
+        if (addr) {
+          seenAddresses.add(addr);
+        }
       }
 
       const allAddresses = Array.from(seenAddresses);
@@ -401,14 +385,12 @@ export class MatureTokenScanner {
 
       // Track source stats for /sources command
       this.funnelStats.sourceStats = {
-        birdeyeMcap: birdeyeMcapTokens.length,
+        dexscreenerTrending: dexTrending.length,
         jupiter: jupiterVerified.length,
-        birdeyeTrending: birdeyeTrending.length,
-        birdeyeMeme: birdeyeMeme.length,
-        dexscreener: dexTrending.length,
+        dexscreener: dexNewPairs.length,
       };
 
-      logger.info(`📊 FUNNEL: Discovery sources - Birdeye mcap: ${birdeyeMcapTokens.length}, Jupiter: ${jupiterVerified.length}, Birdeye trend: ${birdeyeTrending.length}, Birdeye meme: ${birdeyeMeme.length}, DexScreener: ${dexTrending.length}, Total: ${fetchedCount}`);
+      logger.info(`📊 FUNNEL: Discovery sources - DexScreener trending: ${dexTrending.length}, Jupiter: ${jupiterVerified.length}, DexScreener new: ${dexNewPairs.length}, Total: ${fetchedCount}`);
 
       // Get metrics for each and filter by age
       const minAgeMinutes = this.eligibility.minTokenAgeHours * 60;

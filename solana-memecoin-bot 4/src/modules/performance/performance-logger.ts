@@ -363,7 +363,7 @@ export class PerformanceLogger {
    * Log an API call (success or error)
    */
   async logApiCall(
-    service: 'birdeye' | 'helius' | 'dexscreener' | 'twitter',
+    service: 'helius' | 'dexscreener' | 'jupiter' | 'twitter',
     endpoint: string,
     success: boolean,
     latencyMs: number,

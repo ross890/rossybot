@@ -4,7 +4,7 @@
 // ===========================================
 
 import { logger } from '../../utils/logger.js';
-import { dexScreenerClient, birdeyeClient } from '../onchain.js';
+import { dexScreenerClient } from '../onchain.js';
 import { VolumeProfileMetrics, VolumeTrend, VOLUME_THRESHOLDS } from './types.js';
 
 // ============ CONSTANTS ============

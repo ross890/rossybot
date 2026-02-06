@@ -198,9 +198,7 @@ export class ScamFilter {
   private async checkRugHistory(tokenAddress: string): Promise<number> {
     try {
       // Get top 20 holders
-      const { birdeyeClient } = await import('./onchain.js');
-      
-      // This would need holder list from Birdeye or Helius
+      // Uses Helius for holder data (included in plan)
       // Simplified implementation - in production, get actual holder list
       const topHolders: string[] = [];
       

@@ -4,7 +4,7 @@
 // ===========================================
 
 import { logger } from '../../utils/logger.js';
-import { dexScreenerClient, birdeyeClient, heliusClient } from '../onchain.js';
+import { dexScreenerClient, heliusClient } from '../onchain.js';
 import {
   AccumulationMetrics,
   AccumulationPattern,

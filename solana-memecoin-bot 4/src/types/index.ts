@@ -559,8 +559,7 @@ export interface AppConfig {
   redisUrl: string;
   heliusApiKey: string;
   heliusRpcUrl: string;
-  heliusDisabled: boolean;  // Set to true to disable Helius API (uses Birdeye fallback)
-  birdeyeApiKey: string;
+  heliusDisabled: boolean;  // Set to true to disable Helius API (security checks return permissive defaults)
   twitterBearerToken: string;
   twitterConsumerKey: string;
   twitterConsumerSecret: string;
@@ -586,16 +585,6 @@ export interface HeliusTokenData {
   };
 }
 
-export interface BirdeyeTokenOverview {
-  address: string;
-  symbol: string;
-  name: string;
-  price: number;
-  mc: number;
-  v24h: number;
-  holder: number;
-  liquidity: number;
-}
 
 export interface DexScreenerPair {
   chainId: string;

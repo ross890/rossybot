@@ -9,8 +9,8 @@ import { Database } from '../utils/database.js';
 import {
   getTokenMetrics,
   calculateVolumeAuthenticity,
-  birdeyeClient,
   dexScreenerClient,
+  jupiterClient,
   analyzeCTO,
 } from './onchain.js';
 import { scamFilter, quickScamCheck } from './scam-filter.js';
@@ -263,20 +263,6 @@ export class SignalGenerator {
    */
   async initialize(): Promise<void> {
     logger.info('Initializing signal generator...');
-
-    // Initialize Birdeye WebSocket for real-time new listings
-    try {
-      await birdeyeClient.initWebSocket();
-      logger.info('Birdeye WebSocket initialized for real-time token listings');
-
-      // Set up callback for immediate processing of new listings
-      birdeyeClient.onNewListing((listing) => {
-        logger.info({ token: listing.symbol || listing.address }, 'New token listing detected via WebSocket');
-        // Could trigger immediate evaluation here if desired
-      });
-    } catch (error) {
-      logger.warn({ error }, 'Failed to initialize Birdeye WebSocket, will use REST API fallback');
-    }
 
     // Initialize KOL wallet monitor
     await kolWalletMonitor.initialize();
@@ -535,37 +521,52 @@ export class SignalGenerator {
   
   /**
    * Get candidate tokens to evaluate
-   * Now uses multi-source discovery: Birdeye, DexScreener, volume anomalies,
+   * Now uses multi-source discovery: DexScreener, Jupiter, volume anomalies,
    * holder growth velocity, and narrative-based searches
    */
   private async getCandidateTokens(): Promise<string[]> {
     const candidates: Set<string> = new Set();
 
-    // Check WebSocket connection status
-    const wsConnected = birdeyeClient.isWebSocketConnected();
-    logger.debug({ wsConnected }, 'Birdeye WebSocket status');
-
-    // ===== SOURCE 1: Birdeye New Listings (real-time new tokens) =====
+    // ===== SOURCE 1: DexScreener New Pairs (recently listed tokens) =====
     try {
-      const newListings = await birdeyeClient.getNewListings(50);
+      const newPairs = await dexScreenerClient.getNewSolanaPairs(50);
 
-      for (const listing of newListings) {
-        if (listing.address) {
-          candidates.add(listing.address);
+      for (const pair of newPairs) {
+        const addr = pair.tokenAddress || pair.baseToken?.address;
+        if (addr) {
+          candidates.add(addr);
         }
       }
 
       if (candidates.size > 0) {
         logger.debug({
           count: candidates.size,
-          source: 'Birdeye'
-        }, 'Candidates from Birdeye new listings');
+          source: 'DexScreener new pairs'
+        }, 'Candidates from DexScreener new pairs');
       }
     } catch (error) {
-      logger.debug({ error }, 'Birdeye new listings failed');
+      logger.debug({ error }, 'DexScreener new pairs failed');
     }
 
-    // ===== SOURCE 2: DexScreener Trending (active tokens) =====
+    // ===== SOURCE 2: Jupiter Recent Tokens (new tokens) =====
+    try {
+      const recentTokens = await jupiterClient.getRecentTokens(50);
+
+      for (const address of recentTokens) {
+        candidates.add(address);
+      }
+
+      if (recentTokens.length > 0) {
+        logger.debug({
+          count: recentTokens.length,
+          source: 'Jupiter recent'
+        }, 'Candidates from Jupiter recent tokens');
+      }
+    } catch (error) {
+      logger.debug({ error }, 'Jupiter recent tokens failed');
+    }
+
+    // ===== SOURCE 3: DexScreener Trending (active tokens) =====
     try {
       const dexTokens = await dexScreenerClient.getTrendingSolanaTokens(50);
 
@@ -581,7 +582,7 @@ export class SignalGenerator {
       logger.debug({ error }, 'DexScreener trending failed');
     }
 
-    // ===== SOURCE 3: Discovery Engine (volume anomalies, holder growth, narratives) =====
+    // ===== SOURCE 4: Discovery Engine (volume anomalies, holder growth, narratives) =====
     try {
       const discoveryTokens = await discoveryEngine.getAllDiscoveredTokens();
 
@@ -602,7 +603,7 @@ export class SignalGenerator {
     // Log final candidate pool composition
     logger.info({
       totalCandidates: candidates.size,
-      sources: 'Birdeye + DexScreener + Discovery Engine (volume/holder/narrative)',
+      sources: 'DexScreener + Jupiter + Discovery Engine (volume/holder/narrative)',
     }, 'Candidate token pool assembled');
 
     return Array.from(candidates);

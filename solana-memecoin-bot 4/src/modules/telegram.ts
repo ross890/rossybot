@@ -606,11 +606,9 @@ export class TelegramAlertBot {
 
         // Source status with counts
         const sources = [
+          { name: 'DexScreener Trending', key: 'dexscreenerTrending', expected: 100 },
           { name: 'Jupiter Verified', key: 'jupiter', expected: 100 },
-          { name: 'Birdeye Trending', key: 'birdeyeTrending', expected: 20 },
-          { name: 'Birdeye Meme', key: 'birdeyeMeme', expected: 100 },
-          { name: 'DexScreener', key: 'dexscreener', expected: 40 },
-          { name: 'Birdeye Mcap', key: 'birdeyeMcap', expected: 50 },
+          { name: 'DexScreener New', key: 'dexscreener', expected: 50 },
         ];
 
         let totalTokens = 0;
@@ -3002,7 +3000,7 @@ export class TelegramAlertBot {
       msg += `🔌 *Connections:*\n`;
       msg += `├─ Database: ${connectionStatus.database ? '🟢 Connected' : '🔴 Disconnected'}\n`;
       msg += `├─ Helius: ${connectionStatus.helius ? '🟢 Connected' : '🔴 Disconnected'}\n`;
-      msg += `└─ Birdeye: ${connectionStatus.birdeye ? '🟢 Connected' : '🔴 Disconnected'}\n\n`;
+      msg += `└─ DexScreener: ${connectionStatus.dexscreener ? '🟢 Connected' : '🔴 Disconnected'}\n\n`;
 
       // Signal stats
       msg += `📈 *Signal Stats:*\n`;
@@ -3031,8 +3029,8 @@ export class TelegramAlertBot {
   /**
    * Check connection statuses for external services
    */
-  private async checkConnections(): Promise<{ database: boolean; helius: boolean; birdeye: boolean }> {
-    const results = { database: false, helius: false, birdeye: false };
+  private async checkConnections(): Promise<{ database: boolean; helius: boolean; dexscreener: boolean }> {
+    const results = { database: false, helius: false, dexscreener: false };
 
     // Check database
     try {
@@ -3055,15 +3053,14 @@ export class TelegramAlertBot {
       results.helius = false;
     }
 
-    // Check Birdeye
+    // Check DexScreener
     try {
-      const response = await fetch('https://public-api.birdeye.so/defi/tokenlist?sort_by=v24hUSD&sort_type=desc&offset=0&limit=1', {
-        headers: { 'X-API-KEY': appConfig.birdeyeApiKey },
+      const response = await fetch('https://api.dexscreener.com/latest/dex/tokens/So11111111111111111111111111111111111111112', {
         signal: AbortSignal.timeout(5000),
       });
-      results.birdeye = response.ok;
+      results.dexscreener = response.ok;
     } catch {
-      results.birdeye = false;
+      results.dexscreener = false;
     }
 
     return results;
@@ -3882,7 +3879,7 @@ export class TelegramAlertBot {
     // Trade links
     msg += `🔗 [Jupiter](https://jup.ag/swap/SOL-${signal.tokenAddress || ''})`;
     msg += ` · [DexS](https://dexscreener.com/solana/${signal.tokenAddress || ''})`;
-    msg += ` · [Birdeye](https://birdeye.so/token/${signal.tokenAddress || ''})\n\n`;
+    msg += ` · [Solscan](https://solscan.io/token/${signal.tokenAddress || ''})\n\n`;
 
     // Footer
     msg += `_No KOL validation · DYOR_\n`;

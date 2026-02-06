@@ -2,7 +2,7 @@
 // MODULE 2: KOL WALLET TRACKING SYSTEM
 // ===========================================
 
-import { heliusClient, birdeyeClient } from './onchain.js';
+import { heliusClient } from './onchain.js';
 import { Database } from '../utils/database.js';
 import { logger } from '../utils/logger.js';
 import { appConfig } from '../config/index.js';

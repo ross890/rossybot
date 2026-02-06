@@ -5,7 +5,7 @@
 // ===========================================
 
 import { logger } from '../utils/logger.js';
-import { heliusClient, birdeyeClient, dexScreenerClient } from './onchain.js';
+import { heliusClient, dexScreenerClient } from './onchain.js';
 import { appConfig } from '../config/index.js';
 
 // ============ TYPES ============
@@ -393,87 +393,40 @@ export class MomentumAnalyzer {
     uniqueSellers5m: number;
   } | null> {
     try {
-      // Get trade data from Birdeye
-      const tradeData = await birdeyeClient.getTokenTradeData(tokenAddress);
+      // Get trade data from DexScreener (FREE)
+      const pairs = await dexScreenerClient.getTokenPairs(tokenAddress);
+      if (pairs.length === 0) return null;
 
-      if (!tradeData) {
-        // Fallback to DexScreener
-        const pairs = await dexScreenerClient.getTokenPairs(tokenAddress);
-        if (pairs.length === 0) return null;
+      // Cast to any since DexScreener API returns more fields than typed
+      const pair = pairs[0] as any;
 
-        // Cast to any since DexScreener API returns more fields than typed
-        const pair = pairs[0] as any;
-
-        // DexScreener may return extended data - use h24 as fallback
-        const vol24h = pair.volume?.h24 || 0;
-        const vol5m = pair.volume?.m5 || vol24h / 288; // Estimate 5m from 24h
-        const vol1h = pair.volume?.h1 || vol24h / 24;
-        const vol1m = pair.volume?.m1 || vol5m / 5;   // NEW: 1-minute volume
-        const buys5m = pair.txns?.m5?.buys || 0;
-        const sells5m = pair.txns?.m5?.sells || 0;
-        const buys1m = pair.txns?.m1?.buys || Math.ceil(buys5m / 5);  // NEW: Estimate 1m
-        const sells1m = pair.txns?.m1?.sells || Math.ceil(sells5m / 5);
-
-        return {
-          buyCount5m: buys5m,
-          sellCount5m: sells5m,
-          buyVolume5m: vol5m * 0.6, // Estimate 60% buy volume
-          sellVolume5m: vol5m * 0.4,
-          volume5m: vol5m,
-          volume1h: vol1h,
-          volume1m: vol1m,            // NEW
-          buyCount1m: buys1m,         // NEW
-          sellCount1m: sells1m,       // NEW
-          volumeAcceleration: this.calculateVolumeAcceleration(pair),
-          avgTradeSize: (buys5m + sells5m) > 0 ? vol5m / (buys5m + sells5m) : 0,
-          medianTradeSize: 0, // Not available from DexScreener
-          largeTradeCount: 0,
-          smallTradeRatio: 0.5, // Default estimate
-          uniqueBuyers5m: buys5m, // Approximate
-          uniqueSellers5m: sells5m,
-        };
-      }
-
-      // Parse Birdeye trade data
-      const buy5m = tradeData.buy5m || 0;
-      const sell5m = tradeData.sell5m || 0;
-      const buyVol5m = tradeData.buyVolume5m || tradeData.vBuy5m || 0;
-      const sellVol5m = tradeData.sellVolume5m || tradeData.vSell5m || 0;
-      const vol5m = buyVol5m + sellVol5m;
-      const vol1h = tradeData.volume1h || tradeData.v1h || vol5m * 12;
-
-      // NEW: 1-minute data from Birdeye (or estimate)
-      const buy1m = tradeData.buy1m || Math.ceil(buy5m / 5);
-      const sell1m = tradeData.sell1m || Math.ceil(sell5m / 5);
-      const vol1m = tradeData.volume1m || tradeData.v1m || vol5m / 5;
-
-      // Calculate volume acceleration (is volume increasing?)
-      const vol15m = tradeData.volume15m || tradeData.v15m || vol5m * 3;
-      const avgVolPer5m = vol15m / 3;
-      const volumeAcceleration = avgVolPer5m > 0
-        ? (vol5m - avgVolPer5m) / avgVolPer5m
-        : 0;
-
-      const totalTrades = buy5m + sell5m;
-      const avgSize = totalTrades > 0 ? vol5m / totalTrades : 0;
+      // DexScreener provides volume and transaction data at various intervals
+      const vol24h = pair.volume?.h24 || 0;
+      const vol5m = pair.volume?.m5 || vol24h / 288; // Estimate 5m from 24h
+      const vol1h = pair.volume?.h1 || vol24h / 24;
+      const vol1m = pair.volume?.m1 || vol5m / 5;
+      const buys5m = pair.txns?.m5?.buys || 0;
+      const sells5m = pair.txns?.m5?.sells || 0;
+      const buys1m = pair.txns?.m1?.buys || Math.ceil(buys5m / 5);
+      const sells1m = pair.txns?.m1?.sells || Math.ceil(sells5m / 5);
 
       return {
-        buyCount5m: buy5m,
-        sellCount5m: sell5m,
-        buyVolume5m: buyVol5m,
-        sellVolume5m: sellVol5m,
+        buyCount5m: buys5m,
+        sellCount5m: sells5m,
+        buyVolume5m: vol5m * 0.6, // Estimate 60% buy volume
+        sellVolume5m: vol5m * 0.4,
         volume5m: vol5m,
         volume1h: vol1h,
-        volume1m: vol1m,          // NEW
-        buyCount1m: buy1m,        // NEW
-        sellCount1m: sell1m,      // NEW
-        volumeAcceleration: Math.max(-1, Math.min(1, volumeAcceleration)),
-        avgTradeSize: avgSize,
-        medianTradeSize: avgSize * 0.7, // Estimate median as 70% of avg
-        largeTradeCount: 0, // Would need transaction-level data
-        smallTradeRatio: 0.5, // Default
-        uniqueBuyers5m: tradeData.uniqueBuy5m || buy5m * 0.8,
-        uniqueSellers5m: tradeData.uniqueSell5m || sell5m * 0.8,
+        volume1m: vol1m,
+        buyCount1m: buys1m,
+        sellCount1m: sells1m,
+        volumeAcceleration: this.calculateVolumeAcceleration(pair),
+        avgTradeSize: (buys5m + sells5m) > 0 ? vol5m / (buys5m + sells5m) : 0,
+        medianTradeSize: 0, // Not available from DexScreener
+        largeTradeCount: 0,
+        smallTradeRatio: 0.5, // Default estimate
+        uniqueBuyers5m: buys5m, // Approximate
+        uniqueSellers5m: sells5m,
       };
     } catch (error) {
       logger.error({ error, tokenAddress }, 'Failed to get trade metrics');

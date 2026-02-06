@@ -286,26 +286,22 @@ export class BotWallet {
   }
 
   /**
-   * Get current SOL price in USD
+   * Get current SOL price in USD using Jupiter Price API (FREE)
    */
   private async getSolPrice(): Promise<number> {
     try {
-      // Use Birdeye or similar API for price
+      // Jupiter Price API v2 - free, no API key required
       const response = await fetch(
-        'https://public-api.birdeye.so/defi/price?address=So11111111111111111111111111111111111111112',
-        {
-          headers: {
-            'X-API-KEY': appConfig.birdeyeApiKey,
-          },
-        }
+        'https://api.jup.ag/price/v2?ids=So11111111111111111111111111111111111111112'
       );
 
       if (!response.ok) {
-        throw new Error(`Birdeye API error: ${response.status}`);
+        throw new Error(`Jupiter Price API error: ${response.status}`);
       }
 
-      const data = await response.json() as { data?: { value?: number } };
-      return data.data?.value || 150; // Fallback to $150
+      const data = await response.json() as { data?: Record<string, { price?: string }> };
+      const solPrice = parseFloat(data.data?.['So11111111111111111111111111111111111111112']?.price || '0');
+      return solPrice || 150; // Fallback to $150
     } catch (error) {
       logger.warn({ error }, 'Failed to get SOL price, using fallback');
       return 150; // Fallback price

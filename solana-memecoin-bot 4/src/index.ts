@@ -49,14 +49,15 @@ function printStartupDiagnostics(): void {
   logger.info('🔌 API CONNECTIONS');
   if (appConfig.heliusDisabled) {
     logger.info('   Helius (RPC): ⚠️ DISABLED (rate limit mode)');
-    logger.info('      → Using Birdeye fallback for security checks');
+    logger.info('      → Security checks return permissive defaults');
     logger.info('      → Top 10 concentration defaulting to 50%');
     logger.info('      → Bundle analysis disabled');
     logger.info('      → Set HELIUS_DISABLED=false when quota resets');
   } else {
     logger.info(`   Helius (RPC): ${appConfig.heliusApiKey ? '✅ Configured' : '❌ MISSING - on-chain analysis disabled'}`);
   }
-  logger.info(`   Birdeye: ${appConfig.birdeyeApiKey ? '✅ Configured' : '❌ MISSING - token metrics disabled'}`);
+  logger.info('   DexScreener: ✅ Free (no API key needed)');
+  logger.info('   Jupiter: ✅ Free (no API key needed)');
   logger.info(`   Telegram: ${appConfig.telegramBotToken ? '✅ Configured' : '❌ MISSING - alerts disabled'}`);
 
   // Twitter/X Status - Critical for social analysis
@@ -112,8 +113,9 @@ function printStartupDiagnostics(): void {
   // Discovery Sources
   logger.info('');
   logger.info('🔎 TOKEN DISCOVERY SOURCES');
-  logger.info('   ✅ Birdeye New Listings');
+  logger.info('   ✅ DexScreener New Pairs');
   logger.info('   ✅ DexScreener Trending');
+  logger.info('   ✅ Jupiter Recent Tokens');
   logger.info('   ✅ Volume Anomaly Scanner');
   logger.info('   ✅ Holder Growth Scanner');
   logger.info('   ✅ Narrative Scanner');

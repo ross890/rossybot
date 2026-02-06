@@ -34,13 +34,6 @@ export function getRugCheckLink(tokenMint: string): string {
 }
 
 /**
- * Generate Birdeye link
- */
-export function getBirdeyeLink(tokenMint: string): string {
-  return `https://birdeye.so/token/${tokenMint}?chain=solana`;
-}
-
-/**
  * Generate Solscan token link
  */
 export function getSolscanTokenLink(tokenMint: string): string {
@@ -82,7 +75,6 @@ export interface TradeLinks {
   raydium: string;
   dexscreener: string;
   rugcheck: string;
-  birdeye: string;
   solscan: string;
   pumpfun: string;
   photon: string;
@@ -98,7 +90,6 @@ export function getAllTradeLinks(tokenMint: string): TradeLinks {
     raydium: getRaydiumLink(tokenMint),
     dexscreener: getDexScreenerLink(tokenMint),
     rugcheck: getRugCheckLink(tokenMint),
-    birdeye: getBirdeyeLink(tokenMint),
     solscan: getSolscanTokenLink(tokenMint),
     pumpfun: getPumpfunLink(tokenMint),
     photon: getPhotonLink(tokenMint),
@@ -130,8 +121,8 @@ export function getInlineKeyboardButtons(tokenMint: string): InlineButton[][] {
     // Row 2: Analysis links
     [
       { text: 'DexScreener', url: links.dexscreener },
-      { text: 'Birdeye', url: links.birdeye },
       { text: 'RugCheck', url: links.rugcheck },
+      { text: 'Photon', url: links.photon },
     ],
     // Row 3: Explorer
     [
@@ -151,7 +142,7 @@ export function formatLinksAsMarkdown(tokenMint: string): string {
     `[Raydium](${links.raydium})`,
     `[DexScreener](${links.dexscreener})`,
     `[RugCheck](${links.rugcheck})`,
-    `[Birdeye](${links.birdeye})`,
+    `[Solscan](${links.solscan})`,
   ].join(' | ');
 }
 
@@ -169,7 +160,6 @@ export default {
   getRaydiumLink,
   getDexScreenerLink,
   getRugCheckLink,
-  getBirdeyeLink,
   getSolscanTokenLink,
   getSolscanAccountLink,
   getPumpfunLink,

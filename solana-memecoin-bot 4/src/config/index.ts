@@ -61,7 +61,7 @@ const envSchema = z.object({
   ENABLE_MATURE_STRATEGY: z.string().optional().transform(val => val?.toLowerCase() !== 'false').default('true'),
   
   // Screening (with defaults) - Aggressively optimized for early entries
-  MIN_MARKET_CAP: z.coerce.number().default(5000),        // Lowered from 10k - catch microcaps earlier
+  MIN_MARKET_CAP: z.coerce.number().default(50000),       // No tokens below $50K MC
   MAX_MARKET_CAP: z.coerce.number().default(25000000),   // Raised from 15M for broader range
   MIN_24H_VOLUME: z.coerce.number().default(500),        // Lowered from 3k - very early tokens have tiny volume
   MIN_VOLUME_MCAP_RATIO: z.coerce.number().default(0.01), // Lowered from 0.05 - more flexibility for early tokens

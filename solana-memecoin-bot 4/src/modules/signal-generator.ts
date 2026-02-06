@@ -94,7 +94,7 @@ interface TierConfig {
 // Tier configuration - LOOSENED for memecoin signal generation
 const TIER_CONFIGS: Record<MarketCapTier, TierConfig> = {
   MICRO: {
-    minMcap: 0,
+    minMcap: 50_000,             // No tokens below $50K MC
     maxMcap: 500_000,
     enabled: true,
     minLiquidity: 500,           // Was $5K - early gems start tiny
@@ -1168,7 +1168,7 @@ export class SignalGenerator {
     const positionSize = smallCapitalManager.calculatePositionSize(signalQuality);
 
     // Step 7: Build and send on-chain momentum signal
-    const onChainSignal = this.buildOnChainSignal(
+    const onChainSignal = await this.buildOnChainSignal(
       tokenAddress,
       metrics,
       onChainScore,
@@ -1270,7 +1270,7 @@ export class SignalGenerator {
   /**
    * Build on-chain momentum signal (no KOL dependency)
    */
-  private buildOnChainSignal(
+  private async buildOnChainSignal(
     tokenAddress: string,
     metrics: TokenMetrics,
     onChainScore: OnChainScore,
@@ -1284,7 +1284,7 @@ export class SignalGenerator {
     ctoAnalysis?: CTOAnalysis,
     signalTrack: SignalTrack = SignalTrack.PROVEN_RUNNER,
     kolReputation?: KolReputationTier,
-  ): DiscoverySignal {
+  ): Promise<DiscoverySignal> {
     // Build risk warnings
     const riskWarnings: string[] = [];
 
@@ -1343,6 +1343,53 @@ export class SignalGenerator {
                  onChainScore.riskLevel === 'MEDIUM' ? 'MEDIUM' : 'LOW',
     };
 
+    // ATH Detection & Suggested Entry Price
+    // Fetch DexScreener pair data to get price change percentages
+    let priceChangeData: { m5?: number; h1?: number; h6?: number; h24?: number } = {};
+    let nearATH = false;
+    let suggestedEntryPrice: number | null = null;
+    let suggestedEntryReason = '';
+
+    try {
+      const pairs = await dexScreenerClient.getTokenPairs(tokenAddress);
+      if (pairs && pairs.length > 0) {
+        const pair = pairs[0];
+        priceChangeData = {
+          m5: pair.priceChange?.m5 || 0,
+          h1: pair.priceChange?.h1 || 0,
+          h6: pair.priceChange?.h6 || 0,
+          h24: pair.priceChange?.h24 || 0,
+        };
+
+        // Detect if token is at/near ATH
+        // For new tokens (< 6h), strong positive price action = at ATH
+        // For older tokens, sustained multi-timeframe gains = at/near ATH
+        const isNewToken = metrics.tokenAge < 360; // < 6 hours
+        const h1Change = priceChangeData.h1 || 0;
+        const h6Change = priceChangeData.h6 || 0;
+        const h24Change = priceChangeData.h24 || 0;
+
+        if (isNewToken) {
+          // New token: if h1 > +25%, it's likely at ATH
+          nearATH = h1Change > 25;
+        } else {
+          // Established token: if h6 > +30% or h24 > +50% with h1 still positive
+          nearATH = (h6Change > 30 && h1Change > 0) || (h24Change > 50 && h1Change > 5);
+        }
+
+        if (nearATH && metrics.price > 0) {
+          // Suggest entry at 10-20% below current price based on pump intensity
+          const pullbackPercent = h1Change > 50 ? 0.20 : h1Change > 25 ? 0.15 : 0.10;
+          suggestedEntryPrice = metrics.price * (1 - pullbackPercent);
+          suggestedEntryReason = `Price near ATH (1h: +${h1Change.toFixed(0)}%${h6Change > 10 ? `, 6h: +${h6Change.toFixed(0)}%` : ''}). Wait for ${(pullbackPercent * 100).toFixed(0)}% pullback.`;
+          riskWarnings.push(`AT/NEAR ATH: ${suggestedEntryReason}`);
+        }
+      }
+    } catch (error) {
+      // Non-critical - just skip ATH detection if DexScreener fails
+      logger.debug({ error, tokenAddress }, 'Failed to fetch pair data for ATH detection');
+    }
+
     return {
       id: `onchain_${Date.now()}_${tokenAddress.slice(0, 8)}`,
       tokenAddress,
@@ -1365,7 +1412,7 @@ export class SignalGenerator {
 
       kolActivity: null,
 
-      // DexScreener & CTO Info (NEW)
+      // DexScreener & CTO Info
       dexScreenerInfo,
       ctoAnalysis,
 
@@ -1396,6 +1443,12 @@ export class SignalGenerator {
       bundleAnalysis,
       onChainScore,
       positionRationale: positionSize.rationale,
+
+      // Price change and entry suggestion
+      priceChangeData,
+      nearATH,
+      suggestedEntryPrice,
+      suggestedEntryReason,
 
       // ML Prediction removed
       prediction: null,

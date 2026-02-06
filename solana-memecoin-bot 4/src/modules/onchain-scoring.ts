@@ -19,8 +19,8 @@ interface DynamicThresholds {
 
 // Default thresholds if optimizer not available
 const DEFAULT_DYNAMIC_THRESHOLDS: DynamicThresholds = {
-  minSafetyScore: 40,
-  maxBundleRiskScore: 60,
+  minSafetyScore: 20,
+  maxBundleRiskScore: 80,
 };
 
 // ============ TYPES ============
@@ -89,37 +89,37 @@ const WEIGHTS = {
 // ============ THRESHOLDS ============
 
 const THRESHOLDS = {
-  // Grade thresholds
-  GRADE_A: 80,
-  GRADE_B: 65,
-  GRADE_C: 50,
-  GRADE_D: 35,
+  // Grade thresholds - loosened for memecoin trading
+  GRADE_A: 70,
+  GRADE_B: 50,
+  GRADE_C: 35,
+  GRADE_D: 20,
 
-  // Recommendation thresholds
-  STRONG_BUY: 80,
-  BUY: 65,
-  WATCH: 50,
-  AVOID: 35,
+  // Recommendation thresholds - loosened
+  STRONG_BUY: 70,
+  BUY: 50,
+  WATCH: 35,
+  AVOID: 20,
 
-  // Risk thresholds
-  RISK_VERY_LOW: 80,
-  RISK_LOW: 65,
-  RISK_MEDIUM: 50,
-  RISK_HIGH: 35,
+  // Risk thresholds - loosened
+  RISK_VERY_LOW: 70,
+  RISK_LOW: 50,
+  RISK_MEDIUM: 35,
+  RISK_HIGH: 20,
 
-  // Market structure ideals - aligned with config for early tokens
-  IDEAL_LIQUIDITY_RATIO: 0.05,     // 5% of mcap (lowered from 10%)
-  MIN_LIQUIDITY_USD: 2000,         // $2k minimum (aligned with config)
-  IDEAL_TOP10_CONCENTRATION: 40,   // 40% max (relaxed for early tokens)
-  MAX_TOP10_CONCENTRATION: 75,     // 75% reject threshold (aligned with config)
-  MIN_HOLDER_COUNT: 20,            // 20 min holders (aligned with config)
-  IDEAL_HOLDER_COUNT: 200,         // 200 ideal (lowered from 500)
+  // Market structure ideals - loosened for early memecoin entries
+  IDEAL_LIQUIDITY_RATIO: 0.03,     // 3% of mcap (lowered from 5%)
+  MIN_LIQUIDITY_USD: 500,          // $500 minimum (early gems start tiny)
+  IDEAL_TOP10_CONCENTRATION: 50,   // 50% max (memecoins are concentrated)
+  MAX_TOP10_CONCENTRATION: 90,     // 90% reject threshold (memecoins are very concentrated)
+  MIN_HOLDER_COUNT: 5,             // 5 min holders (brand new tokens)
+  IDEAL_HOLDER_COUNT: 50,          // 50 ideal (lowered from 200)
 
-  // Timing ideals
-  OPTIMAL_AGE_MIN: 30,             // 30 minutes minimum
-  OPTIMAL_AGE_MAX: 240,            // 4 hours maximum sweet spot
-  TOO_EARLY_MIN: 15,               // Too early if < 15 min
-  TOO_LATE_HOURS: 24,              // Too late if > 24 hours
+  // Timing ideals - wider window
+  OPTIMAL_AGE_MIN: 5,              // 5 minutes minimum (catch early)
+  OPTIMAL_AGE_MAX: 720,            // 12 hours maximum sweet spot
+  TOO_EARLY_MIN: 2,                // Too early only if < 2 min
+  TOO_LATE_HOURS: 48,              // Too late if > 48 hours
 } as const;
 
 // ============ ON-CHAIN SCORING ENGINE CLASS ============

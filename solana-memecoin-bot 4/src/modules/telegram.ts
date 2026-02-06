@@ -16,7 +16,7 @@ import { kolAnalytics } from './kol/kol-analytics.js';
 import { alphaWalletManager } from './alpha/index.js';
 import { bondingCurveMonitor } from './pumpfun/bonding-monitor.js';
 import { dailyDigestGenerator } from './telegram/daily-digest.js';
-import { dailyReportGenerator, signalPerformanceTracker, thresholdOptimizer, winPredictor, aiQueryInterface } from './performance/index.js';
+import { dailyReportGenerator, signalPerformanceTracker, thresholdOptimizer, aiQueryInterface } from './performance/index.js';
 import { volumeAnomalyScanner } from './discovery/index.js';
 import {
   BuySignal,
@@ -1660,61 +1660,15 @@ export class TelegramAlertBot {
       }
     });
 
-    // /learning command - ML prediction system info
+    // /learning command - Performance system info (ML predictor removed)
     this.bot.onText(/\/learning/, async (msg) => {
       const chatId = msg.chat.id;
 
       try {
-        const modelSummary = winPredictor.getModelSummary();
+        let message = '📊 *SIGNAL PERFORMANCE SYSTEM*\n\n';
 
-        let message = '🧠 *ML PREDICTION SYSTEM*\n\n';
-
-        // System overview
         message += '*How It Works:*\n';
-        message += 'The bot uses machine learning to predict which signals are most likely to hit +100% (WIN).\n\n';
-
-        message += '📚 *Learning Process:*\n';
-        message += '• Analyzes historical signal outcomes (WIN/LOSS)\n';
-        message += '• Learns which factors correlate with wins\n';
-        message += '• Discovers winning and losing patterns\n';
-        message += '• Retrains weekly for statistical significance\n\n';
-
-        // Training status
-        if (modelSummary.lastTrained) {
-          const trainedAgo = Math.round((Date.now() - modelSummary.lastTrained.getTime()) / (1000 * 60));
-          message += `⏱️ *Last Trained:* ${trainedAgo < 60 ? `${trainedAgo}m ago` : `${Math.round(trainedAgo / 60)}h ago`}\n\n`;
-        } else {
-          message += '⏱️ *Last Trained:* Not yet trained\n\n';
-        }
-
-        // Feature weights
-        if (modelSummary.featureWeights.length > 0) {
-          message += '📊 *Top Predictive Features:*\n';
-          for (const fw of modelSummary.featureWeights.slice(0, 5)) {
-            const direction = fw.weight > 0 ? '↑' : '↓';
-            const importance = Math.round(fw.importance * 100);
-            message += `• ${this.formatFeatureName(fw.feature)}: ${direction} (${importance}% importance)\n`;
-          }
-          message += '\n';
-        }
-
-        // Winning patterns
-        if (modelSummary.winningPatterns.length > 0) {
-          message += '✅ *Winning Patterns Discovered:*\n';
-          for (const pattern of modelSummary.winningPatterns.slice(0, 4)) {
-            message += `• ${pattern.name}: ${pattern.winRate}% WR\n`;
-          }
-          message += '\n';
-        }
-
-        // Losing patterns
-        if (modelSummary.losingPatterns.length > 0) {
-          message += '⚠️ *Risk Patterns (to avoid):*\n';
-          for (const pattern of modelSummary.losingPatterns.slice(0, 3)) {
-            message += `• ${pattern.name}: ${pattern.winRate}% WR\n`;
-          }
-          message += '\n';
-        }
+        message += 'The bot uses on-chain scoring and threshold optimization to generate signals.\n\n';
 
         // DUAL-TRACK performance stats
         try {
@@ -1737,19 +1691,12 @@ export class TelegramAlertBot {
           // Ignore track stats errors
         }
 
-        // Prediction output explanation
-        message += '🎯 *What Predictions Tell You:*\n';
-        message += '• *Win Probability:* 0-100% chance of +100% return\n';
-        message += '• *Confidence:* HIGH/MEDIUM/LOW based on pattern matches\n';
-        message += '• *Recommendation:* STRONG\\_BUY / BUY / WATCH / SKIP\n';
-        message += '• *Optimal Hold Time:* Predicted best duration\n';
-        message += '• *Early Exit Risk:* Chance of hitting stop-loss early\n\n';
-
-        message += '💡 *Tips:*\n';
-        message += '• Higher win probability = better signal quality\n';
-        message += '• HIGH confidence means multiple patterns matched\n';
-        message += '• More training data = better predictions\n';
-        message += '• System improves as it learns from outcomes';
+        const thresholds = thresholdOptimizer.getCurrentThresholds();
+        message += '🎯 *Current Thresholds:*\n';
+        message += `• Min On-Chain Score: ${thresholds.minOnChainScore}\n`;
+        message += `• Min Safety Score: ${thresholds.minSafetyScore}\n`;
+        message += `• Max Bundle Risk: ${thresholds.maxBundleRiskScore}\n`;
+        message += `• Min Liquidity: $${thresholds.minLiquidity.toLocaleString()}\n`;
 
         await this.bot!.sendMessage(chatId, message, { parse_mode: 'Markdown' });
       } catch (error) {
@@ -1765,7 +1712,6 @@ export class TelegramAlertBot {
 
       try {
         const isLearningMode = appConfig.trading.learningMode;
-        const modelSummary = winPredictor.getModelSummary();
         const thresholds = thresholdOptimizer.getCurrentThresholds();
 
         let message = '🎓 LEARNING MODE STATUS\n\n';
@@ -1776,15 +1722,13 @@ export class TelegramAlertBot {
           message += 'What this means:\n';
           message += '• Signal filtering is RELAXED to collect more data\n';
           message += '• Only STRONG AVOID recommendations are blocked\n';
-          message += '• ML probability threshold lowered to 15-20%\n';
-          message += '• More signals will come through for training\n';
+          message += '• More signals will come through\n';
           message += '• Rate limits bypassed for data collection\n\n';
         } else {
           message += '🔒 Learning Mode: DISABLED\n\n';
           message += 'What this means:\n';
           message += '• Signal filtering is STRICT for quality\n';
           message += '• Both AVOID and STRONG AVOID blocked\n';
-          message += '• ML probability threshold at 50-55%\n';
           message += '• Fewer but higher quality signals\n\n';
         }
 
@@ -1792,19 +1736,14 @@ export class TelegramAlertBot {
         message += 'Current Signal Thresholds:\n';
         message += `• Min Momentum Score: ${thresholds.minMomentumScore}\n`;
         message += `• Min OnChain Score: ${thresholds.minOnChainScore}\n`;
-        message += `• ML Probability Threshold: ${isLearningMode ? '15-20%' : '50-55%'}\n\n`;
-
-        // Training data status
-        message += 'Training Data:\n';
-        message += `• Model trained: ${modelSummary.lastTrained ? 'Yes' : 'Not yet'}\n`;
-        message += `• Patterns discovered: ${modelSummary.winningPatterns.length + modelSummary.losingPatterns.length}\n\n`;
+        message += `• Min Safety Score: ${thresholds.minSafetyScore}\n`;
+        message += `• Max Bundle Risk: ${thresholds.maxBundleRiskScore}\n\n`;
 
         // Recommendation
         if (isLearningMode) {
           message += '💡 Recommendation:\n';
           message += 'Keep learning mode ON until you have:\n';
           message += '• At least 30 completed signals\n';
-          message += '• At least 5 winning patterns discovered\n';
           message += '• Stable win rate in performance reports\n\n';
           message += 'Set LEARNING_MODE=false in .env to disable';
         } else {

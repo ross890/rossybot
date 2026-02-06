@@ -8,7 +8,7 @@ import { logger } from '../../utils/logger.js';
 import { Database, pool } from '../../utils/database.js';
 import { getTokenMetrics, dexScreenerClient, jupiterClient } from '../onchain.js';
 import { tokenSafetyChecker } from '../safety/token-safety-checker.js';
-import { matureTokenScorer } from './mature-token-scorer.js';
+import { onChainScoringEngine } from '../onchain-scoring.js';
 import { matureTokenTelegram } from './telegram-formatter.js';
 import { signalPerformanceTracker } from '../performance/index.js';
 import {
@@ -611,28 +611,43 @@ export class MatureTokenScanner {
       return 'BLOCKED';
     }
 
-    // Calculate comprehensive score
-    const {
-      score,
-      accumulationMetrics,
-      breakoutMetrics,
-      holderDynamics,
-      volumeProfile,
-      smartMoneyMetrics,
-      kolReentryMetrics,
-    } = await matureTokenScorer.calculateScore(
+    // Calculate comprehensive score using on-chain scoring engine
+    const onChainScore = await onChainScoringEngine.calculateScore(
       metrics.address,
-      metrics,
-      metrics.price
+      metrics
     );
+
+    // Map on-chain score to the mature token score interface
+    const score = {
+      compositeScore: onChainScore.total,
+      accumulationScore: onChainScore.components.marketStructure,
+      breakoutScore: onChainScore.components.momentum,
+      holderDynamicsScore: onChainScore.components.marketStructure,
+      volumeAuthenticityScore: onChainScore.components.momentum,
+      smartMoneyScore: 0,
+      kolActivityScore: 0,
+      contractSafetyScore: onChainScore.components.safety,
+      confidence: onChainScore.confidence,
+      recommendation: onChainScore.recommendation,
+      bullishSignals: onChainScore.bullishSignals,
+      bearishSignals: onChainScore.bearishSignals,
+      warnings: onChainScore.warnings,
+    };
+
+    // Default empty metrics for removed analyzers
+    const accumulationMetrics = { accumulationScore: score.accumulationScore };
+    const breakoutMetrics = { breakoutScore: score.breakoutScore, volumeExpansion: 0, priceVelocity5m: 0 };
+    const holderDynamics = {};
+    const volumeProfile = {};
+    const smartMoneyMetrics = { whaleAccumulation: 0, smartMoneyInflow24h: 0 };
+    const kolReentryMetrics = { kolBuys24h: 0, tier1KolCount: 0 };
 
     // Log score for visibility
     logger.info(`📊 FUNNEL: Scored ${metrics.ticker} (${metrics.address.slice(0, 8)}) - Score: ${score.compositeScore.toFixed(0)} [${score.recommendation}/${score.confidence}] | Acc: ${score.accumulationScore.toFixed(0)}, Brk: ${score.breakoutScore.toFixed(0)}, Safe: ${score.contractSafetyScore.toFixed(0)} | $${(metrics.marketCap / 1_000_000).toFixed(2)}M, ${metrics.holderCount} holders`);
 
-    // Determine action
-    if (!matureTokenScorer.meetsSignalThreshold(score)) {
-      const reason = score.compositeScore < 50 ? 'score_too_low' : 'sub_threshold_not_met';
-      logger.info(`📊 FUNNEL: Rejected ${metrics.ticker} - Score ${score.compositeScore.toFixed(0)} < 50 required (${reason})`);
+    // Determine action - simple threshold check (score >= 45)
+    if (score.compositeScore < 45) {
+      logger.info(`📊 FUNNEL: Rejected ${metrics.ticker} - Score ${score.compositeScore.toFixed(0)} < 45 required (score_too_low)`);
       return 'SKIPPED';
     }
 
@@ -963,15 +978,14 @@ export class MatureTokenScanner {
         const metrics = await getTokenMetrics(address);
         if (!metrics) continue;
 
-        // Re-evaluate score
-        const { score } = await matureTokenScorer.calculateScore(
+        // Re-evaluate score using on-chain scoring engine
+        const onChainResult = await onChainScoringEngine.calculateScore(
           address,
-          metrics,
-          metrics.price
+          metrics
         );
 
         // Check if now meets signal threshold
-        if (score.compositeScore >= item.targetScore && this.canSendSignal()) {
+        if (onChainResult.total >= item.targetScore && this.canSendSignal()) {
           // Remove from watchlist
           this.watchlist.delete(address);
 

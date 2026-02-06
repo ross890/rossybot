@@ -57,29 +57,25 @@ export interface FactorAnalysis {
 
 // ============ CONSTANTS ============
 
-// Default thresholds (TIGHTENED for 50% win rate target)
-// Based on performance data analysis:
-// - Token Age +0.83 correlation (strongest predictor)
-// - Holder Count +0.33 correlation
-// - Higher scores currently ANTI-predict wins (scoring inversion issue)
-// Strategy: Tighter filters to only take highest-quality signals
+// Default thresholds (LOOSENED for memecoin signal generation)
+// Strategy: Let more signals through, use position sizing to manage risk
+// The bot is an alert system, not a gatekeeper
 const DEFAULT_THRESHOLDS: ThresholdSet = {
-  minMomentumScore: 25,      // Lowered for more volume - memecoins are inherently risky
-  minOnChainScore: 35,       // Lowered from 45 - let position sizing manage risk
-  minSafetyScore: 45,        // Lowered from 55 - basic safety checks only
-  maxBundleRiskScore: 55,    // Raised from 45 - accept more bundle risk with small positions
-  minLiquidity: 8000,        // Lowered from 12000 - more opportunities
-  maxTop10Concentration: 60, // Raised from 50 - memecoins often have concentrated holders early
+  minMomentumScore: 10,      // Loosened from 25 - let scoring handle quality
+  minOnChainScore: 20,       // Loosened from 35 - let more signals through
+  minSafetyScore: 15,        // Loosened from 45 - only reject clearly dangerous tokens
+  maxBundleRiskScore: 80,    // Raised from 55 - bundle activity is normal on pump.fun
+  minLiquidity: 1000,        // Lowered from 8000 - early gems start with tiny liquidity
+  maxTop10Concentration: 85, // Raised from 60 - memecoins are concentrated by nature
 };
 
 // Target performance
-// UPDATED: 50% target for profitable autobuying (was 30%)
-// At 50% WR with 2:1 R/R (100% TP, 40% SL), expected value is positive
-const TARGET_WIN_RATE = 50;  // 50% win rate target for profitable autobuying
+// 30% win rate with 3x+ winners is profitable in memecoins
+const TARGET_WIN_RATE = 30;  // 30% win rate target (was 50%)
 // AUDIT FIX: Aligned with win-predictor MIN_SAMPLES_FOR_PREDICTION (15)
 // Previously required 50 which meant very long wait for optimization
 const MIN_DATA_POINTS = 20;  // Minimum completed signals for optimization
-const MAX_THRESHOLD_CHANGE = 15;  // Max change per optimization cycle (%)
+const MAX_THRESHOLD_CHANGE = 25;  // Let it adapt faster (was 15%)
 
 // ============ THRESHOLD OPTIMIZER CLASS ============
 

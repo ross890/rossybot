@@ -87,29 +87,29 @@ export interface MomentumScore {
 
 // Research-backed thresholds
 const THRESHOLDS = {
-  // Buy/Sell Ratio
-  EXCELLENT_BUY_RATIO: 2.0,       // Strong buying pressure
-  GOOD_BUY_RATIO: 1.5,            // Healthy buying
-  MIN_BUY_RATIO: 1.2,             // Minimum for momentum
-  WEAK_BUY_RATIO: 0.8,            // Selling pressure
+  // Buy/Sell Ratio - loosened for memecoins
+  EXCELLENT_BUY_RATIO: 1.8,       // Strong buying pressure (was 2.0)
+  GOOD_BUY_RATIO: 1.2,            // Healthy buying (was 1.5)
+  MIN_BUY_RATIO: 0.9,             // Even slight sell pressure shouldn't block (was 1.2)
+  WEAK_BUY_RATIO: 0.5,            // Only block extreme dumps (was 0.8)
 
-  // Volume Velocity (5m volume as % of 1h)
-  EXCELLENT_VELOCITY: 0.30,       // 30% of hourly in 5 mins = explosive
-  GOOD_VELOCITY: 0.20,            // 20% = strong momentum
-  MIN_VELOCITY: 0.10,             // 10% = moderate interest
+  // Volume Velocity (5m volume as % of 1h) - loosened
+  EXCELLENT_VELOCITY: 0.25,       // 25% of hourly in 5 mins = explosive (was 0.30)
+  GOOD_VELOCITY: 0.12,            // 12% = strong momentum (was 0.20)
+  MIN_VELOCITY: 0.05,             // 5% = moderate interest (was 0.10)
 
-  // Trade Quality
-  MAX_SMALL_TRADE_RATIO: 0.70,    // >70% tiny trades = bots
-  MIN_UNIQUE_BUYERS: 5,           // Need at least 5 unique buyers in 5m
+  // Trade Quality - loosened significantly
+  MAX_SMALL_TRADE_RATIO: 0.90,    // Bots are normal on memecoins (was 0.70)
+  MIN_UNIQUE_BUYERS: 2,           // Early tokens won't have 5 unique buyers (was 5)
 
   // Holder Growth
   EXCELLENT_GROWTH_RATE: 2.0,     // 2+ holders/minute
   GOOD_GROWTH_RATE: 1.0,          // 1 holder/minute
   MIN_GROWTH_RATE: 0.2,           // At least some growth
 
-  // Price Action
-  MAX_VOLATILITY: 0.50,           // >50% swings = manipulation
-  MIN_PRICE_SUPPORT: -0.15,       // Max 15% drawdown in 5m
+  // Price Action - loosened for memecoins
+  MAX_VOLATILITY: 1.00,           // Memecoins ARE volatile, 50% swings are normal (was 0.50)
+  MIN_PRICE_SUPPORT: -0.40,       // Allow bigger dips - these often recover (was -0.15)
 } as const;
 
 // ============ MOMENTUM ANALYZER CLASS ============

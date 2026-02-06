@@ -32,13 +32,6 @@ export {
 } from './daily-auto-optimizer.js';
 
 export {
-  WinPredictor,
-  winPredictor,
-  SignalFeatures,
-  WinPrediction,
-} from './win-predictor.js';
-
-export {
   DeploymentLogsReader,
   deploymentLogsReader,
   DeploymentLog,

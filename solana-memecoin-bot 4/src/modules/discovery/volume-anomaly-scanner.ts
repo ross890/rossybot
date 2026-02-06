@@ -47,18 +47,18 @@ interface VolumeAnomalyConfig {
 }
 
 const DEFAULT_CONFIG: VolumeAnomalyConfig = {
-  minVolumeMultiplier: 5,     // 5x normal volume
-  minAbsoluteVolume: 25000,   // At least $25K volume
-  minTokenAgeDays: 1,         // At least 1 day old
+  minVolumeMultiplier: 3,     // 3x normal volume (was 5x)
+  minAbsoluteVolume: 5000,    // $5K volume (was $25K)
+  minTokenAgeDays: 0.083,     // 2 hours old (was 1 day)
   maxTokenAgeDays: 90,        // Up to 90 days old (extended from 14)
-  minLiquidity: 15000,        // At least $15K liquidity
+  minLiquidity: 2000,         // $2K liquidity (was $15K)
   scanIntervalMinutes: 10,    // Scan every 10 minutes
   maxTokensPerScan: 50,       // Return up to 50 tokens
   washTradingDetection: {
     enabled: true,
-    maxRepetitiveTxPercent: 40,     // >40% same-amount txs is suspicious
-    maxTopWalletVolumePercent: 60,  // >60% from top 3 wallets is suspicious
-    minUniqueTraders: 20,           // Need at least 20 unique traders
+    maxRepetitiveTxPercent: 70,     // Bots are normal on memecoins (was 40%)
+    maxTopWalletVolumePercent: 85,  // Whales dominate early (was 60%)
+    minUniqueTraders: 5,            // 5 unique traders (was 20)
     suspiciousAvgTxSize: 500,       // Very uniform avg tx size is suspicious
   },
 };

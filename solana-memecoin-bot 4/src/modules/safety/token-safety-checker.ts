@@ -11,7 +11,7 @@ import type { TokenSafetyResult, InsiderAnalysis } from '../../types/index.js';
 // ============ CONSTANTS ============
 
 const CACHE_TTL_MS = 15 * 60 * 1000; // 15 minutes
-const MIN_SAFETY_SCORE_THRESHOLD = 30; // Lowered from 40 - most new tokens have authorities enabled
+const MIN_SAFETY_SCORE_THRESHOLD = 10; // Lowered from 30 - only block extremely dangerous tokens
 const RUGCHECK_API_BASE = 'https://api.rugcheck.xyz/v1';
 
 // ============ TOKEN SAFETY CHECKER CLASS ============
@@ -148,17 +148,22 @@ export class TokenSafetyChecker {
       return { blocked: true, reason: `Safety score too low: ${result.safetyScore}` };
     }
 
-    // Instant rejection flags
-    const instantRejectFlags = ['HONEYPOT_RISK', 'HIGH_INSIDER_RISK'];
+    // Instant rejection flags - only honeypot is a hard block
+    const instantRejectFlags = ['HONEYPOT_RISK'];
     for (const flag of instantRejectFlags) {
       if (result.flags.includes(flag)) {
         return { blocked: true, reason: `Critical flag: ${flag}` };
       }
     }
 
-    // Block if both mint and freeze authority are enabled
+    // HIGH_INSIDER_RISK is informational only - log but do not block
+    if (result.flags.includes('HIGH_INSIDER_RISK')) {
+      logger.warn({ tokenAddress: result.tokenAddress }, 'High insider risk detected (informational - not blocking)');
+    }
+
+    // Both mint and freeze authority enabled is a warning, not a block
     if (result.mintAuthorityEnabled && result.freezeAuthorityEnabled) {
-      return { blocked: true, reason: 'Both mint and freeze authorities enabled' };
+      logger.warn({ tokenAddress: result.tokenAddress }, 'Both mint and freeze authorities enabled (warning - not blocking)');
     }
 
     return { blocked: false };

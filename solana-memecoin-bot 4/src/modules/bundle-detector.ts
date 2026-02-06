@@ -1,7 +1,8 @@
 // ===========================================
 // MODULE: BUNDLE DETECTOR
 // Detects bundled launches, insider allocations, and sniper activity
-// Critical for avoiding coordinated dumps
+// INFORMATIONAL ONLY - findings are reported but NEVER used to block signals.
+// Risk scores and flags are for logging/diagnostics; they do not gate trades.
 // ===========================================
 
 import { logger } from '../utils/logger.js';
@@ -11,8 +12,8 @@ import { appConfig } from '../config/index.js';
 // ============ TYPES ============
 
 export interface BundleAnalysisResult {
-  // Bundle Detection
-  isBundled: boolean;
+  // Bundle Detection (informational only - never used to block signals)
+  isBundled: boolean;               // Always false - kept for interface compat; never gates trades
   bundleConfidence: 'HIGH' | 'MEDIUM' | 'LOW' | 'NONE';
 
   // Metrics
@@ -26,10 +27,10 @@ export interface BundleAnalysisResult {
   deployerFundedBuyers: number;     // Buyers funded by deployer
   freshWalletBuyers: number;        // Brand new wallets buying
 
-  // Risk Assessment
-  riskScore: number;                // 0-100 (higher = more risk)
-  riskLevel: 'CRITICAL' | 'HIGH' | 'MEDIUM' | 'LOW';
-  flags: string[];
+  // Risk Assessment (informational only - reported but never blocks signals)
+  riskScore: number;                // 0-100 (higher = more risk) - informational only
+  riskLevel: 'CRITICAL' | 'HIGH' | 'MEDIUM' | 'LOW'; // informational only
+  flags: string[];                  // informational flags for logging
 
   // Details
   largestInsiderPercent: number;    // Largest single insider holding
@@ -403,7 +404,9 @@ export class BundleDetector {
     }
 
     return {
-      isBundled: riskScore >= 30,
+      // INFORMATIONAL ONLY: isBundled is always false - bundle data never blocks signals.
+      // Risk score is still calculated and reported for logging/diagnostics.
+      isBundled: false,
       bundleConfidence,
       sameBlockBuyers: buyerAnalysis.sameBlockBuyers,
       firstBlockBuyers: buyerAnalysis.firstBlockBuyers,

@@ -18,37 +18,37 @@ import {
 // Based on analysis of tokens that reached $5M+ MC within 2 weeks
 
 const MOONSHOT_PATTERNS = {
-  // Volume patterns - successful tokens show strong early volume
+  // Volume patterns - loosened for early memecoin entries
   VOLUME: {
     IDEAL_VOLUME_MCAP_RATIO: 0.5,      // 50% volume/mcap in first day is bullish
-    MIN_VOLUME_FOR_SCORE: 10000,        // $10k minimum 24h volume
+    MIN_VOLUME_FOR_SCORE: 2000,         // $2k minimum 24h volume (was $10k)
     EXCELLENT_VOLUME_MCAP: 1.0,         // 100%+ ratio is exceptional
   },
 
-  // Holder growth - rapid organic acquisition
+  // Holder growth - loosened dramatically for early entries
   HOLDERS: {
-    IDEAL_GROWTH_PER_HOUR: 50,          // 50+ new holders/hour is strong
-    MIN_HOLDERS_EARLY: 100,             // Need at least 100 holders
-    IDEAL_HOLDERS_1H: 200,              // 200+ holders in first hour is bullish
-    MAX_TOP10_CONCENTRATION: 40,        // <40% top 10 is healthy
-    IDEAL_TOP10_CONCENTRATION: 25,      // <25% is excellent
+    IDEAL_GROWTH_PER_HOUR: 10,          // 10+ new holders/hour (was 50)
+    MIN_HOLDERS_EARLY: 15,              // 15 holders minimum (was 100)
+    IDEAL_HOLDERS_1H: 40,               // 40+ holders in first hour (was 200)
+    MAX_TOP10_CONCENTRATION: 70,        // <70% top 10 (was 40% - memecoins are concentrated)
+    IDEAL_TOP10_CONCENTRATION: 40,      // <40% is excellent (was 25%)
   },
 
-  // Liquidity health
+  // Liquidity health - loosened for early gems
   LIQUIDITY: {
     IDEAL_RATIO: 0.10,                  // 10% of mcap in liquidity is healthy
-    MIN_RATIO: 0.03,                    // <3% is concerning
+    MIN_RATIO: 0.01,                    // <1% is concerning (was 3%)
     MAX_RATIO: 0.25,                    // >25% might indicate manipulation
-    MIN_ABSOLUTE: 15000,                // $15k minimum liquidity
+    MIN_ABSOLUTE: 1000,                 // $1k minimum liquidity (was $15k)
   },
 
-  // Token age sweet spots
+  // Token age sweet spots - wider window
   AGE: {
-    TOO_EARLY_MINS: 15,                 // <15 min = very risky, might dump
-    OPTIMAL_MIN_MINS: 30,               // 30 min+ = had time to stabilize
-    OPTIMAL_MAX_MINS: 240,              // <4 hours = still early
-    LATE_MINS: 720,                     // >12 hours = might have missed pump
-    TOO_LATE_MINS: 1440,                // >24 hours = probably too late for moonshot
+    TOO_EARLY_MINS: 2,                  // <2 min = very risky (was 15)
+    OPTIMAL_MIN_MINS: 5,                // 5 min+ = tradeable (was 30)
+    OPTIMAL_MAX_MINS: 720,              // <12 hours = still early (was 4 hours)
+    LATE_MINS: 2160,                    // >36 hours = might have missed pump (was 12h)
+    TOO_LATE_MINS: 4320,               // >72 hours = probably too late (was 24h)
   },
 
   // Narrative/meta themes that perform well
@@ -423,10 +423,10 @@ export class MoonshotAssessor {
    * Convert score to letter grade
    */
   private scoreToGrade(score: number): 'A' | 'B' | 'C' | 'D' | 'F' {
-    if (score >= 80) return 'A';
-    if (score >= 65) return 'B';
-    if (score >= 50) return 'C';
-    if (score >= 35) return 'D';
+    if (score >= 70) return 'A';
+    if (score >= 50) return 'B';
+    if (score >= 35) return 'C';
+    if (score >= 20) return 'D';
     return 'F';
   }
 
@@ -516,18 +516,18 @@ export class MoonshotAssessor {
    * Check if token meets minimum moonshot threshold for discovery signal
    */
   meetsDiscoveryThreshold(assessment: MoonshotAssessment): boolean {
-    // Minimum score of 55 for discovery
-    if (assessment.score < 55) {
+    // Minimum score of 30 for discovery (was 55)
+    if (assessment.score < 30) {
       return false;
     }
 
-    // Must have at least C grade
-    if (assessment.grade === 'D' || assessment.grade === 'F') {
+    // Must have at least D grade (was C)
+    if (assessment.grade === 'F') {
       return false;
     }
 
-    // Contract safety is non-negotiable
-    if (assessment.factors.contractSafety < 50) {
+    // Contract safety - only reject extreme cases (was 50)
+    if (assessment.factors.contractSafety < 20) {
       return false;
     }
 

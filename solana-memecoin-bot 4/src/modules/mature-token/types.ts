@@ -75,47 +75,47 @@ export const TIER_CONFIG: Record<TokenTier, TierConfig> = {
   [TokenTier.MICRO]: {
     minMarketCap: 200_000,       // $200K - micro-cap opportunity zone
     maxMarketCap: 500_000,       // $500K - transition to RISING
-    minVolume24h: 15_000,        // $15K volume (lower for smaller tokens)
-    minHolderCount: 250,         // 250+ holders (per analysis showing 100% safety pass)
-    minTokenAgeHours: 72,        // 3 days minimum (same as RISING)
-    stopLoss: { initial: 30, timeDecay: 22 },  // Wider stops for higher volatility
-    signalAllocation: 0.15,      // 15% of signals (new tier, start conservative)
+    minVolume24h: 3_000,         // $3K volume (was $15K)
+    minHolderCount: 50,          // 50+ holders (was 250)
+    minTokenAgeHours: 12,        // 12 hours minimum (was 72h)
+    stopLoss: { initial: 30, timeDecay: 22 },
+    signalAllocation: 0.15,
   },
   [TokenTier.RISING]: {
-    minMarketCap: 500_000,       // $500K (seamless transition from MICRO)
-    maxMarketCap: 8_000_000,     // $8M (closes gap with EMERGING)
-    minVolume24h: 25_000,        // $25K volume (lowered for bear market conditions)
-    minHolderCount: 300,         // 300+ holders (lowered from 500 for bear market)
-    minTokenAgeHours: 72,        // 3 days minimum
-    stopLoss: { initial: 25, timeDecay: 18 },  // Wider stops for volatility
-    signalAllocation: 0.35,      // 35% of signals (reduced to make room for MICRO)
+    minMarketCap: 500_000,
+    maxMarketCap: 8_000_000,
+    minVolume24h: 5_000,         // $5K volume (was $25K)
+    minHolderCount: 75,          // 75+ holders (was 300)
+    minTokenAgeHours: 12,        // 12 hours minimum (was 72h)
+    stopLoss: { initial: 25, timeDecay: 18 },
+    signalAllocation: 0.35,
   },
   [TokenTier.EMERGING]: {
-    minMarketCap: 8_000_000,     // Seamless transition from RISING
+    minMarketCap: 8_000_000,
     maxMarketCap: 20_000_000,
-    minVolume24h: 300_000,
-    minHolderCount: 100,
-    minTokenAgeHours: 504,       // 21 days
+    minVolume24h: 25_000,        // $25K volume (was $300K)
+    minHolderCount: 50,          // 50+ holders (was 100)
+    minTokenAgeHours: 48,        // 2 days (was 21 days)
     stopLoss: { initial: 20, timeDecay: 15 },
-    signalAllocation: 0,         // DISABLED: 11% WR, -72% avg return in bear market
+    signalAllocation: 0.20,      // RE-ENABLED (was 0% disabled)
   },
   [TokenTier.GRADUATED]: {
     minMarketCap: 20_000_000,
     maxMarketCap: 50_000_000,
-    minVolume24h: 500_000,
-    minHolderCount: 100,
-    minTokenAgeHours: 504,       // 21 days
+    minVolume24h: 50_000,        // $50K volume (was $500K)
+    minHolderCount: 50,          // 50+ holders (was 100)
+    minTokenAgeHours: 48,        // 2 days (was 21 days)
     stopLoss: { initial: 18, timeDecay: 12 },
-    signalAllocation: 0.30,      // Reduced from 0.40
+    signalAllocation: 0.15,      // Reduced to make room for EMERGING
   },
   [TokenTier.ESTABLISHED]: {
     minMarketCap: 50_000_000,
     maxMarketCap: 150_000_000,
-    minVolume24h: 1_000_000,
-    minHolderCount: 100,
-    minTokenAgeHours: 504,       // 21 days
+    minVolume24h: 100_000,       // $100K volume (was $1M)
+    minHolderCount: 50,          // 50+ holders (was 100)
+    minTokenAgeHours: 72,        // 3 days (was 21 days)
     stopLoss: { initial: 15, timeDecay: 10 },
-    signalAllocation: 0.20,
+    signalAllocation: 0.15,      // Reduced to make room for EMERGING
   },
 };
 
@@ -584,22 +584,22 @@ export const VOLUME_THRESHOLDS = {
 
 export const SIGNAL_THRESHOLDS = {
   STRONG_BUY: {
-    compositeScore: 75,
-    minAccumulation: 60,
-    minBreakout: 50,
-    minSafety: 70,
+    compositeScore: 60,    // Lowered from 75
+    minAccumulation: 40,   // Lowered from 60
+    minBreakout: 35,       // Lowered from 50
+    minSafety: 40,         // Lowered from 70
   },
   BUY: {
-    compositeScore: 50,   // Lowered from 60 for more signals
-    minAccumulation: 40,  // Lowered from 45
-    minBreakout: 35,      // Lowered from 40
-    minSafety: 55,        // Lowered from 60
+    compositeScore: 40,    // Lowered from 50
+    minAccumulation: 25,   // Lowered from 40
+    minBreakout: 20,       // Lowered from 35
+    minSafety: 30,         // Lowered from 55
   },
   WATCH: {
-    compositeScore: 45,
-    minAccumulation: 30,
-    minBreakout: 30,
-    minSafety: 50,
+    compositeScore: 30,    // Lowered from 45
+    minAccumulation: 15,   // Lowered from 30
+    minBreakout: 15,       // Lowered from 30
+    minSafety: 20,         // Lowered from 50
   },
 } as const;
 
@@ -648,9 +648,9 @@ export const DEFAULT_MATURE_TOKEN_CONFIG: MatureTokenConfig = {
   },
 
   thresholds: {
-    strongBuy: 80,  // Updated from 75
-    buy: 65,        // Updated from 60
-    watch: 50,      // Updated from 45
+    strongBuy: 60,  // Lowered from 80
+    buy: 40,        // Lowered from 65
+    watch: 30,      // Lowered from 50
   },
 
   riskLimits: {
@@ -671,25 +671,25 @@ export const DEFAULT_MATURE_TOKEN_CONFIG: MatureTokenConfig = {
 // ============ ELIGIBILITY DEFAULTS ============
 
 export const DEFAULT_ELIGIBILITY: MatureTokenEligibility = {
-  // Age requirements - 3 days minimum (RISING tier), tier-specific checks applied later
-  minTokenAgeHours: 72,       // 3 days for RISING tier (other tiers require 21 days via TIER_CONFIG)
+  // Age requirements - loosened for more opportunities
+  minTokenAgeHours: 12,       // 12 hours minimum (was 72h / 3 days)
   maxTokenAgeDays: 365,       // No practical upper limit
 
   // Market cap range: $200K - $150M (MICRO tier starts at $200K)
   minMarketCap: 200_000,      // $200K for MICRO tier
   maxMarketCap: 150_000_000,  // $150M
 
-  // Liquidity requirements (lowered for bear market conditions)
-  minLiquidity: 15_000,       // $15K minimum (lowered from $25K for bear market)
-  minLiquidityRatio: 0.015,   // 1.5% of mcap (lowered from 2%)
+  // Liquidity requirements - loosened
+  minLiquidity: 3_000,        // $3K minimum (was $15K)
+  minLiquidityRatio: 0.01,    // 1% of mcap (was 1.5%)
 
-  // Volume requirements (lowest tier minimum - RISING tier)
-  min24hVolume: 25_000,       // $25K for RISING tier (lowered from $50K)
-  minVolumeMarketCapRatio: 0.02,  // 2%
+  // Volume requirements - loosened
+  min24hVolume: 3_000,        // $3K minimum (was $25K)
+  minVolumeMarketCapRatio: 0.01,  // 1% (was 2%)
 
-  // Holder requirements (tier-specific via TIER_CONFIG)
-  minHolderCount: 100,        // Base requirement, RISING tier requires 300+
-  maxTop10Concentration: 75,  // Max 75% in top 10 (relaxed for memecoins)
+  // Holder requirements - loosened
+  minHolderCount: 50,         // 50 minimum (was 100)
+  maxTop10Concentration: 90,  // 90% max (was 75%)
 
   // Safety requirements
   mintAuthorityDisabled: true,

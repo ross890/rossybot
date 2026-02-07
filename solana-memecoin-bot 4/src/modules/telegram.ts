@@ -474,6 +474,10 @@ export class TelegramAlertBot {
       { command: 'removewallet', description: 'Remove tracked wallet' },
       { command: 'pause', description: 'Pause signal scanning' },
       { command: 'resume', description: 'Resume signal scanning' },
+      { command: 'devs', description: 'List tracked pump.fun devs' },
+      { command: 'adddev', description: 'Track dev: /adddev <wallet> [alias]' },
+      { command: 'removedev', description: 'Remove tracked dev' },
+      { command: 'devstats', description: 'Dev stats: /devstats <wallet>' },
       { command: 'help', description: 'Show all commands' },
     ];
 
@@ -1825,6 +1829,191 @@ export class TelegramAlertBot {
         const errorMessage = error instanceof Error ? error.message : 'Unknown error';
         logger.error({ error, chatId }, 'Failed to get learning info');
         await this.bot!.sendMessage(chatId, `Failed to get learning info: ${errorMessage}`);
+      }
+    });
+
+    // ============ PUMP.FUN DEV TRACKER COMMANDS ============
+
+    // /devs - List all tracked devs and their stats
+    this.bot.onText(/\/devs/, async (msg) => {
+      const chatId = msg.chat.id;
+
+      try {
+        const { pumpfunDevMonitor } = await import('./pumpfun/dev-monitor.js');
+        const devs = pumpfunDevMonitor.getTrackedDevs();
+
+        if (devs.length === 0) {
+          await this.bot!.sendMessage(chatId,
+            '*🏗️ Pump.fun Dev Tracker*\n\nNo devs currently tracked.\nUse /adddev <wallet> [alias] to add one.');
+          return;
+        }
+
+        let message = '*🏗️ TRACKED PUMP.FUN DEVS*\n\n';
+
+        // Sort by success rate descending
+        const sortedDevs = [...devs].sort((a, b) => b.successRate - a.successRate);
+
+        for (const dev of sortedDevs.slice(0, 15)) {
+          const walletShort = dev.walletAddress.slice(0, 6) + '...' + dev.walletAddress.slice(-4);
+          const alias = dev.alias ? ` (${dev.alias})` : '';
+          const successPct = (dev.successRate * 100).toFixed(1);
+          const bestMc = dev.bestPeakMc >= 1_000_000
+            ? `$${(dev.bestPeakMc / 1_000_000).toFixed(1)}M`
+            : `$${(dev.bestPeakMc / 1_000).toFixed(0)}K`;
+
+          message += `\`${walletShort}\`${alias}\n`;
+          message += `  Launches: ${dev.totalLaunches} · Hit $200K+: ${dev.successfulLaunches} (${successPct}%)\n`;
+          message += `  Best: ${bestMc} · Rugs: ${dev.rugCount}\n\n`;
+        }
+
+        if (devs.length > 15) {
+          message += `_...and ${devs.length - 15} more_`;
+        }
+
+        await this.bot!.sendMessage(chatId, message, { parse_mode: 'Markdown' });
+      } catch (error) {
+        logger.error({ error }, 'Failed to list devs');
+        await this.bot!.sendMessage(chatId, 'Failed to list tracked devs.');
+      }
+    });
+
+    // /adddev <wallet> [alias] - Manually add a dev wallet to track
+    this.bot.onText(/\/adddev\s+(\S+)(?:\s+(.+))?/, async (msg, match) => {
+      const chatId = msg.chat.id;
+      const walletAddress = match?.[1];
+      const alias = match?.[2]?.trim();
+
+      if (!walletAddress || walletAddress.length < 32 || walletAddress.length > 44) {
+        await this.bot!.sendMessage(chatId, '❌ Invalid wallet address. Usage: /adddev <wallet> [alias]');
+        return;
+      }
+
+      try {
+        const { devBootstrapper } = await import('./pumpfun/dev-bootstrapper.js');
+        const result = await devBootstrapper.addDevManually(walletAddress, alias);
+
+        if (result.success) {
+          // Reload the dev monitor's tracked devs
+          const { pumpfunDevMonitor } = await import('./pumpfun/dev-monitor.js');
+          await pumpfunDevMonitor.loadTrackedDevs();
+
+          await this.bot!.sendMessage(chatId,
+            `✅ *Dev Wallet Added*\n\n` +
+            `Wallet: \`${walletAddress.slice(0, 8)}...${walletAddress.slice(-4)}\`\n` +
+            (alias ? `Alias: ${alias}\n` : '') +
+            `\n_Scanning history in background..._`,
+            { parse_mode: 'Markdown' }
+          );
+        } else {
+          await this.bot!.sendMessage(chatId, `❌ ${result.message}`);
+        }
+      } catch (error) {
+        logger.error({ error, walletAddress }, 'Failed to add dev');
+        await this.bot!.sendMessage(chatId, '❌ Failed to add dev wallet.');
+      }
+    });
+
+    // /removedev <wallet> - Stop tracking a dev
+    this.bot.onText(/\/removedev\s+(\S+)/, async (msg, match) => {
+      const chatId = msg.chat.id;
+      const walletAddress = match?.[1];
+
+      if (!walletAddress) {
+        await this.bot!.sendMessage(chatId, '❌ Usage: /removedev <wallet>');
+        return;
+      }
+
+      try {
+        const { pumpfunDevMonitor } = await import('./pumpfun/dev-monitor.js');
+        const success = await pumpfunDevMonitor.removeDev(walletAddress);
+
+        if (success) {
+          await this.bot!.sendMessage(chatId,
+            `✅ Dev wallet \`${walletAddress.slice(0, 8)}...\` removed from tracking.`,
+            { parse_mode: 'Markdown' }
+          );
+        } else {
+          await this.bot!.sendMessage(chatId, '❌ Failed to remove dev wallet.');
+        }
+      } catch (error) {
+        logger.error({ error, walletAddress }, 'Failed to remove dev');
+        await this.bot!.sendMessage(chatId, '❌ Failed to remove dev wallet.');
+      }
+    });
+
+    // /devstats <wallet> - Show detailed stats for a specific dev
+    this.bot.onText(/\/devstats\s+(\S+)/, async (msg, match) => {
+      const chatId = msg.chat.id;
+      const walletAddress = match?.[1];
+
+      if (!walletAddress) {
+        await this.bot!.sendMessage(chatId, '❌ Usage: /devstats <wallet>');
+        return;
+      }
+
+      try {
+        const result = await pool.query(
+          'SELECT * FROM pumpfun_devs WHERE wallet_address = $1',
+          [walletAddress]
+        );
+
+        if (result.rows.length === 0) {
+          await this.bot!.sendMessage(chatId,
+            `❌ Dev wallet \`${walletAddress.slice(0, 8)}...\` not found.\nUse /adddev to add it.`,
+            { parse_mode: 'Markdown' }
+          );
+          return;
+        }
+
+        const dev = result.rows[0];
+        const walletShort = walletAddress.slice(0, 6) + '...' + walletAddress.slice(-4);
+        const alias = dev.alias ? ` (${dev.alias})` : '';
+        const successPct = dev.total_launches > 0
+          ? ((dev.successful_launches / dev.total_launches) * 100).toFixed(1)
+          : '0.0';
+        const rugPct = dev.total_launches > 0
+          ? ((dev.rug_count / dev.total_launches) * 100).toFixed(0)
+          : '0';
+        const bestMc = parseFloat(dev.best_peak_mc || '0');
+        const avgMc = parseFloat(dev.avg_peak_mc || '0');
+
+        // Get recent tokens
+        const tokensResult = await pool.query(
+          `SELECT token_name, token_symbol, peak_mc, hit_200k, is_rugged, launched_at
+           FROM pumpfun_dev_tokens WHERE dev_id = $1
+           ORDER BY launched_at DESC LIMIT 5`,
+          [dev.id]
+        );
+
+        let message = `*🏗️ DEV STATS: \`${walletShort}\`${alias}*\n\n`;
+        message += `*Performance*\n`;
+        message += `├─ Total Launches: ${dev.total_launches}\n`;
+        message += `├─ Hit $200K+: ${dev.successful_launches} (${successPct}%)\n`;
+        message += `├─ Best Peak MC: ${bestMc >= 1_000_000 ? `$${(bestMc / 1_000_000).toFixed(1)}M` : `$${(bestMc / 1_000).toFixed(0)}K`}\n`;
+        message += `├─ Avg Peak MC: ${avgMc >= 1_000_000 ? `$${(avgMc / 1_000_000).toFixed(1)}M` : `$${(avgMc / 1_000).toFixed(0)}K`}\n`;
+        message += `├─ Rug Rate: ${rugPct}%\n`;
+        message += `├─ Active: ${dev.is_active ? '✅' : '❌'}\n`;
+        message += `└─ Tracked Since: ${new Date(dev.tracked_since).toLocaleDateString()}\n`;
+
+        if (tokensResult.rows.length > 0) {
+          message += `\n*Recent Tokens*\n`;
+          for (const token of tokensResult.rows) {
+            const mc = parseFloat(token.peak_mc || '0');
+            const mcStr = mc >= 1_000_000 ? `$${(mc / 1_000_000).toFixed(1)}M` : `$${(mc / 1_000).toFixed(0)}K`;
+            const status = token.is_rugged ? '💀' : token.hit_200k ? '✅' : '⏳';
+            message += `${status} \`$${token.token_symbol || '???'}\` · Peak: ${mcStr}\n`;
+          }
+        }
+
+        message += `\n[View on Solscan](https://solscan.io/account/${walletAddress})`;
+
+        await this.bot!.sendMessage(chatId, message, {
+          parse_mode: 'Markdown',
+          disable_web_page_preview: true,
+        });
+      } catch (error) {
+        logger.error({ error, walletAddress }, 'Failed to get dev stats');
+        await this.bot!.sendMessage(chatId, '❌ Failed to get dev stats.');
       }
     });
 
@@ -3386,6 +3575,37 @@ export class TelegramAlertBot {
       return true;
     } catch (error) {
       logger.error({ error, signal: signal.tokenAddress }, 'Failed to send discovery signal');
+      return false;
+    }
+  }
+
+  /**
+   * Send a dev signal alert (pump.fun dev tracker)
+   */
+  async sendDevSignal(formattedMessage: string, tokenMint: string): Promise<boolean> {
+    if (!this.bot) {
+      logger.warn('Bot not initialized - cannot send dev signal');
+      return false;
+    }
+
+    try {
+      await this.bot.sendMessage(this.chatId, formattedMessage, {
+        parse_mode: 'Markdown',
+        disable_web_page_preview: true,
+      });
+
+      // Log the signal
+      await Database.logSignal(
+        tokenMint,
+        'DEV_SIGNAL' as any,
+        0,
+        'DEV_TRACKER'
+      );
+
+      logger.info({ tokenMint }, 'Dev signal sent to Telegram');
+      return true;
+    } catch (error) {
+      logger.error({ error, tokenMint }, 'Failed to send dev signal');
       return false;
     }
   }

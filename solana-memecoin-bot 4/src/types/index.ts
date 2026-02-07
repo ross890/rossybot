@@ -568,6 +568,8 @@ export interface AppConfig {
   telegramChatId: string;
   nodeEnv: string;
   logLevel: string;
+  solscanApiKey: string;
+  devTracker: PumpfunDevTrackerConfig;
 }
 
 // ============ API RESPONSE TYPES ============
@@ -887,4 +889,88 @@ export interface DiscoverySignal {
   // For tracking KOL follow-up
   discoveredAt: Date;
   kolValidatedAt: Date | null;
+}
+
+// ============ PUMP.FUN DEV TRACKER TYPES ============
+
+export interface PumpfunDev {
+  id: number;
+  walletAddress: string;
+  alias: string | null;
+  totalLaunches: number;
+  successfulLaunches: number;
+  bestPeakMc: number;
+  avgPeakMc: number;
+  rugCount: number;
+  successRate: number;
+  lastLaunchAt: Date | null;
+  trackedSince: Date;
+  isActive: boolean;
+  notes: string | null;
+  createdAt: Date;
+  updatedAt: Date;
+}
+
+export interface PumpfunDevToken {
+  id: number;
+  devId: number;
+  tokenMint: string;
+  tokenName: string | null;
+  tokenSymbol: string | null;
+  launchedAt: Date | null;
+  peakMc: number;
+  currentMc: number;
+  hit200k: boolean;
+  hit1m: boolean;
+  isRugged: boolean;
+  migratedToRaydium: boolean;
+  platform: string;
+  signalSent: boolean;
+  signalSentAt: Date | null;
+  createdAt: Date;
+  updatedAt: Date;
+}
+
+export type DevSignalPriority = 'HIGH' | 'MEDIUM';
+
+export interface DevSignal {
+  type: 'DEV_SIGNAL';
+  priority: DevSignalPriority;
+  dev: {
+    walletAddress: string;
+    alias: string | null;
+    totalLaunches: number;
+    successRate: number;
+    bestPeakMc: number;
+    avgPeakMc: number;
+    rugRate: number;
+    lastLaunchAge: string;
+  };
+  token: {
+    mint: string;
+    name: string;
+    symbol: string;
+    platform: string;
+    launchedAt: Date;
+    bondingCurveProgress?: number;
+  };
+  timestamp: Date;
+}
+
+export interface DevQualificationCriteria {
+  minTotalLaunches: number;
+  minSuccessRate: number;
+  maxRugRate: number;
+  minBestPeakMc: number;
+}
+
+export interface PumpfunDevTrackerConfig {
+  enabled: boolean;
+  minLaunches: number;
+  minSuccessRate: number;
+  maxRugRate: number;
+  minBestPeakMc: number;
+  statsUpdateIntervalMs: number;
+  discoveryIntervalMs: number;
+  signalCooldownMs: number;
 }

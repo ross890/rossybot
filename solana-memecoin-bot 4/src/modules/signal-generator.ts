@@ -49,6 +49,10 @@ import { probabilitySignalModule } from './probability-signal.js';
 // RugCheck integration — hard-gate for DANGER tokens
 import { rugCheckClient } from './rugcheck.js';
 
+// Pump.fun Dev Tracker — third signal pathway
+import { pumpfunDevMonitor } from './pumpfun/dev-monitor.js';
+import { formatDevKolValidation } from './pumpfun/dev-signal.js';
+
 import {
   TokenMetrics,
   SocialMetrics,
@@ -899,6 +903,37 @@ export class SignalGenerator {
         if (conviction.isHighConviction) {
           await telegramBot.sendConvictionAlert(conviction);
         }
+      }
+
+      // Check if this token was launched by a tracked dev — send KOL validation if so
+      try {
+        const devTokenResult = await import('../utils/database.js').then(db =>
+          db.pool.query(
+            `SELECT dt.token_mint, dt.token_symbol, d.wallet_address
+             FROM pumpfun_dev_tokens dt
+             JOIN pumpfun_devs d ON d.id = dt.dev_id
+             WHERE dt.token_mint = $1 AND d.is_active = true
+             LIMIT 1`,
+            [tokenAddress]
+          )
+        );
+        if (devTokenResult.rows.length > 0) {
+          const devToken = devTokenResult.rows[0];
+          const kolHandle = kolActivities[0]?.kol?.handle || 'Unknown';
+          const validationMsg = formatDevKolValidation(
+            tokenAddress,
+            devToken.token_symbol || metrics.ticker,
+            kolHandle,
+          );
+          await telegramBot.sendDevSignal(validationMsg, tokenAddress);
+          logger.info({
+            tokenAddress,
+            kolHandle,
+            devWallet: devToken.wallet_address,
+          }, 'Dev token KOL validation sent');
+        }
+      } catch (devCheckErr) {
+        logger.debug({ devCheckErr }, 'Dev KOL cross-reference check failed (non-blocking)');
       }
 
       // Check if this was previously discovered - if so, send KOL_VALIDATION signal

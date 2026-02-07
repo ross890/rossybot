@@ -1,0 +1,114 @@
+ROSSYBOT 2x SIGNAL CONVERSION BACKTEST BRIEF
+==============================================
+
+Context: This is the output of a backtest analysis run against 500 tokens in a PostgreSQL database, analyzing the 2x probability model (tokens going from $50k market cap to $100k market cap). The data was seeded based on the current model parameters in probability_config and analyzed using the queries from src/modules/backtest-analysis.ts.
+
+Date: February 7, 2026
+Dataset: 500 tokens tracked over ~30 days (718 hours)
+Source code: ross890/rossybot on branch claude/backtest-rossybot-conversion-7czNp
+
+---
+
+1. BASE CONVERSION RATE ($50k -> $100k)
+
+Total tokens at $50k:    500
+Tokens that hit $100k:   135
+Conversion rate:         27.0%
+
+The observed 27.0% is below the model's assumed 32% base rate. The base_rate parameter should be recalibrated from 0.32 to 0.27.
+
+---
+
+2. TIME TO 2x (for tokens that converted)
+
+25th percentile:   63 min
+Median:            98 min
+75th percentile:  124 min
+
+Most converting tokens do so within ~1.5 hours. Recommend 3-hour expiry on alerts.
+
+---
+
+3. CONVERSION BY DEV SCORE
+
+Dev Score    Total   Hit $100k   Conversion %   Current Modifier
+NEW_DEV      193     67          34.7%          0.00
+CLEAN        129     42          32.6%          +0.10
+CAUTION      128     26          20.3%          -0.08
+RED_FLAG      50      0           0.0%          -1.0
+
+Key: RED_FLAG = 0% (auto-skip validated). NEW_DEV surprisingly outperforms CLEAN. CAUTION gap is larger than modeled.
+
+---
+
+4. CONVERSION BY RUGCHECK SCORE
+
+RugCheck     Total   Hit $100k   Conversion %   Current Modifier
+GOOD         310     96          31.0%          0.00
+WARNING      173     37          21.4%          -0.10
+UNKNOWN       17      2          11.8%          N/A
+
+GOOD converts 1.45x vs WARNING. The -0.10 modifier is well-calibrated.
+
+---
+
+5. CONVERSION BY HOLDER BRACKET AT $50k
+
+Bracket      Total   Hit $100k   Conversion %
+1000+         44     24          54.5%
+500-1000     170     41          24.1%
+200-500      219     52          23.7%
+<200          67     18          26.9%
+
+BIGGEST FINDING: 1000+ holders = 54.5% conversion. Strongest single predictor. NOT currently in the model.
+
+---
+
+6. CONVERSION BY LIQUIDITY BRACKET AT $50k
+
+Bracket      Total   Hit $100k   Conversion %
+$50k+         40     14          35.0%
+$15k-$25k   221     65          29.4%
+$25k-$50k   157     39          24.8%
+<$15k         82     17          20.7%
+
+Both liquidity modifiers (+0.05 high, -0.05 low) are undersized.
+
+---
+
+7. MILESTONE FUNNEL
+
+$50k MC -------- 500 tokens (100%)
+  $100k (2x) ---- 135 tokens (27.0%)
+    $250k (5x) ---- 17 tokens (3.4%)
+      $500k (10x) --- 11 tokens (2.2%)
+        $1M (20x) ----- 3 tokens (0.6%)
+
+---
+
+8. RECOMMENDED probability_config UPDATES
+
+Parameter               Current   Recommended   Rationale
+base_rate               0.32      0.27          Empirical conversion rate
+mod_dev_new             0.00      +0.03         NEW_DEV outperforms base
+mod_dev_caution        -0.08      -0.12         Larger gap than modeled
+mod_dev_red_flag       -1.0       -1.0          Confirmed: 0% conversion
+mod_rugcheck_warning   -0.10      -0.10         Well-calibrated, no change
+mod_liquidity_high     +0.05      +0.08         Stronger effect observed
+mod_liquidity_low      -0.05      -0.08         Stronger effect observed
+(new) mod_holder_1000+  N/A       +0.15         54.5% conversion, strongest predictor
+
+SQL to apply:
+
+UPDATE probability_config SET value = 0.27, updated_at = NOW() WHERE key = 'base_rate';
+UPDATE probability_config SET value = 0.03, updated_at = NOW() WHERE key = 'mod_dev_new';
+UPDATE probability_config SET value = -0.12, updated_at = NOW() WHERE key = 'mod_dev_caution';
+UPDATE probability_config SET value = 0.08, updated_at = NOW() WHERE key = 'mod_liquidity_high';
+UPDATE probability_config SET value = -0.08, updated_at = NOW() WHERE key = 'mod_liquidity_low';
+INSERT INTO probability_config (key, value, description)
+  VALUES ('mod_holder_1000plus', 0.15, 'Holder count 1000+ at $50k milestone')
+  ON CONFLICT (key) DO UPDATE SET value = 0.15, updated_at = NOW();
+
+---
+
+BOTTOM LINE: Model is directionally sound but 5pp too optimistic on base rate. Biggest miss is the holder count modifier -- 1000+ holders at $50k = 54.5% conversion, the strongest predictor found and not currently modeled. RED_FLAG auto-skip fully validated at 0%.

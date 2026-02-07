@@ -626,8 +626,19 @@ export interface DexScreenerPair {
 
 export interface DexScreenerTokenInfo {
   tokenAddress: string;
+  /**
+   * Profile claimed = the token owner has claimed ownership of the profile
+   * on DexScreener (added socials, image, header, etc).
+   * This is DIFFERENT from boosting. A claimed profile indicates someone
+   * is actively managing the token's presence.
+   */
+  hasClaimedProfile: boolean;
+  /** @deprecated Use hasClaimedProfile instead. Kept for backwards compat. */
   hasPaidDexscreener: boolean;
+  /** Number of active DexScreener boosts (paid advertising) */
   boostCount: number;
+  /** Whether the token has boosts active (paid advertising, distinct from profile claim) */
+  isBoosted: boolean;
   hasTokenProfile: boolean;
   hasTokenAds: boolean;
   socialLinks: {

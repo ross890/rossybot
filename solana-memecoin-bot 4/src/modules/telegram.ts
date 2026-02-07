@@ -4203,15 +4203,17 @@ export class TelegramAlertBot {
   ): string {
     let status = '';
 
-    // DexScreener Payment Status
+    // DexScreener Profile & Boost Status (separate concepts)
     if (dexInfo) {
-      if (dexInfo.hasPaidDexscreener) {
-        status += `*DEX:* 💰 PAID`;
-        if (dexInfo.boostCount > 0) {
-          status += ` (${dexInfo.boostCount} boost${dexInfo.boostCount > 1 ? 's' : ''})`;
-        }
+      // Profile claimed = owner has claimed the token page (added socials, image, etc)
+      if (dexInfo.hasClaimedProfile) {
+        status += `*DEX Profile:* 💰 Claimed`;
       } else {
-        status += `*DEX:* ⚪ Not Paid`;
+        status += `*DEX Profile:* ⚪ Unclaimed`;
+      }
+      // Boosts = paid advertising (separate from profile claim)
+      if (dexInfo.isBoosted) {
+        status += ` | *Boosted:* 🚀 ${dexInfo.boostCount}x`;
       }
     } else {
       status += `*DEX:* ⚪ Unknown`;

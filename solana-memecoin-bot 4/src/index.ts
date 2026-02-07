@@ -9,6 +9,7 @@ import { signalGenerator } from './modules/signal-generator.js';
 import { telegramBot } from './modules/telegram.js';
 import { matureTokenScanner, matureTokenTelegram } from './modules/mature-token/index.js';
 import { dailyAutoOptimizer, thresholdOptimizer } from './modules/performance/index.js';
+import { probabilitySignalModule } from './modules/probability-signal.js';
 
 // ============ STARTUP ============
 
@@ -57,6 +58,8 @@ function printStartupDiagnostics(): void {
     logger.info(`   Helius (RPC): ${appConfig.heliusApiKey ? '✅ Configured' : '❌ MISSING - on-chain analysis disabled'}`);
   }
   logger.info('   DexScreener: ✅ Free (no API key needed)');
+  logger.info('   RugCheck: ✅ Free (contract safety)');
+  logger.info('   SolanaFM: ✅ Free (dev wallet history)');
   logger.info('   Jupiter: ✅ Free (no API key needed)');
   logger.info(`   Telegram: ${appConfig.telegramBotToken ? '✅ Configured' : '❌ MISSING - alerts disabled'}`);
 
@@ -131,6 +134,10 @@ function printStartupDiagnostics(): void {
   logger.info('   ✅ Scam Filter');
   logger.info('   ✅ Moonshot Assessor');
   logger.info('   ✅ Discovery Scanners');
+  logger.info('   ✅ RugCheck Integration (Layer 1 - Contract Safety)');
+  logger.info('   ✅ Dev Wallet Scorer (Layer 2 - Serial Launcher Detection)');
+  logger.info('   ✅ 2x Probability Calculator');
+  logger.info('   ✅ Token Data Crawler (DexScreener → Backtest)');
 
   logger.info('');
   logger.info(divider);
@@ -173,6 +180,14 @@ async function main(): Promise<void> {
     logger.info('Mature token strategy DISABLED');
   }
 
+  // Initialize 2x probability signal module (RugCheck, Dev Scoring, Token Crawler)
+  try {
+    await probabilitySignalModule.initialize();
+    logger.info('2x probability signal module initialized');
+  } catch (error) {
+    logger.warn({ error }, 'Failed to initialize probability module - 2x signals disabled');
+  }
+
   // Load saved thresholds from database
   await thresholdOptimizer.loadThresholds();
   logger.info('Threshold optimizer loaded saved thresholds');
@@ -198,6 +213,14 @@ async function main(): Promise<void> {
     logger.info('Mature token scanner started - scanning for 21+ day survivor tokens');
   }
 
+  // Start 2x probability module (token crawler + backtest scheduler)
+  try {
+    probabilitySignalModule.start();
+    logger.info('2x probability module started (crawler + backtest scheduler)');
+  } catch (error) {
+    logger.warn({ error }, 'Failed to start probability module');
+  }
+
   logger.info('Bot is running! Press Ctrl+C to stop.');
   
   // Handle graceful shutdown
@@ -210,6 +233,7 @@ async function main(): Promise<void> {
     if (appConfig.trading.enableMatureStrategy) {
       matureTokenScanner.stop();
     }
+    probabilitySignalModule.stop();
     dailyAutoOptimizer.stop();
     await telegramBot.stop();
     await pool.end();

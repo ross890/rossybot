@@ -545,10 +545,141 @@ export class TelegramAlertBot {
         '/removewallet <addr> - Remove\n\n' +
         '*ML:*\n' +
         '/learning - Prediction info\n\n' +
+        '*2x Probability:*\n' +
+        '/backtest - Conversion analysis\n' +
+        '/devscore <token> - Dev wallet score\n' +
+        '/rugcheck <token> - RugCheck safety\n\n' +
         '_Auto-alerts: 2x, 3x, stop-loss_\n' +
         'DYOR. Not financial advice.',
         { parse_mode: 'Markdown' }
       );
+    });
+
+    // /backtest command - Show 2x probability backtest analysis
+    this.bot.onText(/\/backtest/, async (msg) => {
+      const chatId = msg.chat.id;
+      try {
+        const { probabilitySignalModule } = await import('./probability-signal.js');
+        await this.bot!.sendMessage(chatId, 'Running backtest analysis...', { parse_mode: 'Markdown' });
+
+        const stats = await probabilitySignalModule.runBacktest();
+        const formatted = probabilitySignalModule.getFormattedStats();
+        const crawlerStats = probabilitySignalModule.getCrawlerStats();
+
+        const message = formatted + '\n\n' +
+          `🕷️ Crawler: ${crawlerStats.active} active, ${crawlerStats.candidate} candidate, ${crawlerStats.background} background (${crawlerStats.total} total)`;
+
+        await this.bot!.sendMessage(chatId, message, {
+          parse_mode: 'Markdown',
+          disable_web_page_preview: true,
+        });
+      } catch (error) {
+        const errorMessage = error instanceof Error ? error.message : 'Unknown error';
+        logger.error({ error, chatId }, 'Failed to run backtest');
+        await this.bot!.sendMessage(chatId, `Failed to run backtest: ${errorMessage}`);
+      }
+    });
+
+    // /devscore <token> command - Check dev wallet score for a token
+    this.bot.onText(/\/devscore\s+(\S+)/, async (msg, match) => {
+      const chatId = msg.chat.id;
+      const tokenAddress = match?.[1];
+
+      if (!tokenAddress) {
+        await this.bot!.sendMessage(chatId, 'Usage: /devscore <token_address>');
+        return;
+      }
+
+      try {
+        await this.bot!.sendMessage(chatId, `Analyzing deployer for \`${tokenAddress.slice(0, 8)}...\``, { parse_mode: 'Markdown' });
+
+        const { devWalletScorer } = await import('./dev-scorer.js');
+        const deployerWallet = await devWalletScorer.discoverDeployer(tokenAddress);
+
+        if (!deployerWallet) {
+          await this.bot!.sendMessage(chatId, 'Could not determine deployer wallet for this token.');
+          return;
+        }
+
+        const score = await devWalletScorer.scoreDevWallet(deployerWallet);
+        const emoji = score.score === 'CLEAN' ? '✅' :
+                      score.score === 'NEW_DEV' ? '🆕' :
+                      score.score === 'CAUTION' ? '⚠️' : '🚫';
+
+        let message = `👨‍💻 Dev Wallet Score\n\n`;
+        message += `Token: \`${tokenAddress.slice(0, 8)}...\`\n`;
+        message += `Deployer: \`${deployerWallet.slice(0, 8)}...\`\n\n`;
+        message += `${emoji} Score: *${score.score}*\n`;
+        message += `├─ Total launches: ${score.totalLaunches}\n`;
+        message += `├─ Over $100k MC: ${score.launchesOver100k}\n`;
+        message += `└─ Success ratio: ${(score.successRatio * 100).toFixed(1)}%\n`;
+
+        if (score.knownTokens.length > 0) {
+          message += `\nKnown tokens:\n`;
+          for (const token of score.knownTokens.slice(0, 5)) {
+            const mcStr = token.peakMc >= 1000000 ? `$${(token.peakMc / 1000000).toFixed(1)}M` :
+                          token.peakMc >= 1000 ? `$${(token.peakMc / 1000).toFixed(1)}k` :
+                          `$${token.peakMc.toFixed(0)}`;
+            message += `├─ $${token.ticker}: peak ${mcStr}\n`;
+          }
+        }
+
+        await this.bot!.sendMessage(chatId, message, { parse_mode: 'Markdown' });
+      } catch (error) {
+        const errorMessage = error instanceof Error ? error.message : 'Unknown error';
+        logger.error({ error, chatId, tokenAddress }, 'Failed to check dev score');
+        await this.bot!.sendMessage(chatId, `Failed to check dev score: ${errorMessage}`);
+      }
+    });
+
+    // /rugcheck <token> command - Run RugCheck on a token
+    this.bot.onText(/\/rugcheck\s+(\S+)/, async (msg, match) => {
+      const chatId = msg.chat.id;
+      const tokenAddress = match?.[1];
+
+      if (!tokenAddress) {
+        await this.bot!.sendMessage(chatId, 'Usage: /rugcheck <token_address>');
+        return;
+      }
+
+      try {
+        await this.bot!.sendMessage(chatId, `Running RugCheck on \`${tokenAddress.slice(0, 8)}...\``, { parse_mode: 'Markdown' });
+
+        const { rugCheckClient } = await import('./rugcheck.js');
+        const result = await rugCheckClient.checkToken(tokenAddress);
+        const decision = rugCheckClient.getDecision(result);
+
+        const scoreEmoji = result.score === 'GOOD' ? '✅' :
+                           result.score === 'WARNING' ? '⚠️' : '🚫';
+
+        let message = `🛡️ RugCheck Report\n\n`;
+        message += `Token: \`${tokenAddress.slice(0, 8)}...\`\n`;
+        message += `${scoreEmoji} Score: *${result.score}*\n\n`;
+        message += `├─ Mint Authority: ${result.mintAuthorityRevoked ? '✅ Revoked' : '❌ Active'}\n`;
+        message += `├─ Freeze Authority: ${result.freezeAuthorityRevoked ? '✅ Revoked' : '❌ Active'}\n`;
+        message += `├─ LP Locked: ${result.lpLocked ? '✅ Yes' : '❌ No'}\n`;
+        message += `└─ Top 10 Holders: ${result.top10HolderPct.toFixed(1)}%\n`;
+
+        if (result.risks.length > 0) {
+          message += `\n⚠️ Risks:\n`;
+          for (const risk of result.risks.slice(0, 5)) {
+            message += `├─ ${risk}\n`;
+          }
+        }
+
+        message += `\n🎯 Action: *${decision.action}*\n`;
+        message += `└─ ${decision.reason}\n`;
+        message += `\n🔗 https://rugcheck.xyz/tokens/${tokenAddress}`;
+
+        await this.bot!.sendMessage(chatId, message, {
+          parse_mode: 'Markdown',
+          disable_web_page_preview: true,
+        });
+      } catch (error) {
+        const errorMessage = error instanceof Error ? error.message : 'Unknown error';
+        logger.error({ error, chatId, tokenAddress }, 'Failed to run rugcheck');
+        await this.bot!.sendMessage(chatId, `Failed to run rugcheck: ${errorMessage}`);
+      }
     });
 
     // /funnel command - Show token filtering funnel stats
@@ -4241,6 +4372,51 @@ export class TelegramAlertBot {
     message += `_Use /tweaks for AI-suggested optimizations_`;
 
     return message;
+  }
+
+  /**
+   * Send a 2x probability signal alert
+   */
+  async sendTwoXSignal(formattedMessage: string, tokenAddress: string): Promise<boolean> {
+    if (!this.bot) {
+      logger.warn('Bot not initialized - cannot send 2x signal');
+      return false;
+    }
+
+    // RACE CONDITION PROTECTION
+    const twoXKey = `twox_${tokenAddress}`;
+    if (this.signalsInProgress.has(twoXKey)) {
+      logger.debug({ tokenAddress }, '2x signal already in progress');
+      return false;
+    }
+    this.signalsInProgress.add(twoXKey);
+
+    try {
+      const chatId = appConfig.telegramChatId;
+
+      await this.bot.sendMessage(chatId, formattedMessage, {
+        disable_web_page_preview: true,
+      });
+
+      // Log the signal
+      try {
+        await pool.query(
+          `INSERT INTO signal_log (token_address, signal_type, sent_at)
+           VALUES ($1, 'TWO_X', NOW())`,
+          [tokenAddress]
+        );
+      } catch (err) {
+        logger.debug({ err }, 'Failed to log 2x signal');
+      }
+
+      logger.info({ tokenAddress: tokenAddress.slice(0, 8) }, '2x probability signal sent');
+      return true;
+    } catch (error) {
+      logger.error({ error, tokenAddress }, 'Failed to send 2x signal');
+      return false;
+    } finally {
+      this.signalsInProgress.delete(twoXKey);
+    }
   }
 
   /**

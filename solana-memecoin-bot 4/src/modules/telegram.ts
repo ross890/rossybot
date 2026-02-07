@@ -3612,11 +3612,13 @@ export class TelegramAlertBot {
     }
 
     // Check DexScreener
+    // Use a lighter endpoint and accept 429 (rate limited) as "connected"
     try {
       const response = await fetch('https://api.dexscreener.com/latest/dex/tokens/So11111111111111111111111111111111111111112', {
-        signal: AbortSignal.timeout(5000),
+        signal: AbortSignal.timeout(10000),
       });
-      results.dexscreener = response.ok;
+      // 200 = OK, 429 = rate limited but reachable — both mean "connected"
+      results.dexscreener = response.ok || response.status === 429;
     } catch {
       results.dexscreener = false;
     }

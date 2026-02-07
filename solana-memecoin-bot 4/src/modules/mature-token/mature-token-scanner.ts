@@ -173,6 +173,29 @@ export class MatureTokenScanner {
     lastScanTime: '',
   };
 
+  // Track recently rejected tokens for /funnel_debug command
+  private recentRejections: Array<{
+    ticker: string;
+    address: string;
+    marketCap: number;
+    tier: string | null;
+    checks: {
+      excluded: { passed: boolean; reason?: string };
+      marketCap: { passed: boolean; value: number; min: number; max: number };
+      tier: { passed: boolean; tier: string | null };
+      volume: { passed: boolean; value: number; required: number };
+      holders: { passed: boolean; value: number; required: number };
+      age: { passed: boolean; value: number; required: number };
+      liquidity: { passed: boolean; value: number; required: number };
+      liquidityRatio: { passed: boolean; value: number; required: number };
+      concentration: { passed: boolean; value: number; max: number };
+      cooldown: { passed: boolean };
+    };
+    failedCount: number;
+    passedCount: number;
+    timestamp: Date;
+  }> = [];
+
   // Track micro-cap tokens ($200K-$500K) that are rejected - for opportunity analysis
   private microCapTracker: {
     total: number;
@@ -266,6 +289,38 @@ export class MatureTokenScanner {
    */
   getFunnelStats() {
     return { ...this.funnelStats };
+  }
+
+  /**
+   * Get recent rejected tokens with per-criteria details for /funnel_debug
+   */
+  getRecentRejections(limit: number = 10) {
+    return this.recentRejections.slice(-limit).reverse();
+  }
+
+  /**
+   * Get the top blocker criteria from recent rejections
+   */
+  getTopBlocker(): { criteria: string; count: number; total: number } | null {
+    if (this.recentRejections.length === 0) return null;
+
+    const criteriaFailCounts: Record<string, number> = {};
+    for (const rej of this.recentRejections) {
+      for (const [name, check] of Object.entries(rej.checks)) {
+        if (!check.passed) {
+          criteriaFailCounts[name] = (criteriaFailCounts[name] || 0) + 1;
+        }
+      }
+    }
+
+    const sorted = Object.entries(criteriaFailCounts).sort(([, a], [, b]) => b - a);
+    if (sorted.length === 0) return null;
+
+    return {
+      criteria: sorted[0][0],
+      count: sorted[0][1],
+      total: this.recentRejections.length,
+    };
   }
 
   /**
@@ -485,69 +540,155 @@ export class MatureTokenScanner {
         this.trackMicroCapToken(token);
       }
 
-      // Market cap check (must be in one of our tiers)
-      if (token.marketCap < this.eligibility.minMarketCap ||
-          token.marketCap > this.eligibility.maxMarketCap) {
+      // === Per-token check tracking for /funnel_debug ===
+      const tier = getTokenTier(token.marketCap);
+      const tierConfig = tier ? TIER_CONFIG[tier] : null;
+      const cooldown = this.signalCooldowns.get(token.address);
+      const liquidityRatio = token.marketCap > 0 ? token.liquidityPool / token.marketCap : 0;
+
+      // Apply tier-specific threshold multiplier for soft gates
+      // multiplier < 1 = more lenient (EMERGING at 0.8 = 20% easier)
+      // multiplier > 1 = stricter (GRADUATED at 1.2 = 20% harder)
+      const multiplier = tierConfig?.thresholdMultiplier ?? 1.0;
+      const tierEnabled = tierConfig?.enabled ?? true;
+
+      // Apply multiplier: for min thresholds, multiply required value
+      // For max thresholds (concentration), divide the max by multiplier
+      const adjustedMinVolume = tierConfig ? tierConfig.minVolume24h * multiplier : 0;
+      const adjustedMinHolders = tierConfig ? Math.round(tierConfig.minHolderCount * multiplier) : 0;
+      const adjustedMinLiquidity = this.eligibility.minLiquidity * multiplier;
+      const adjustedMaxConcentration = this.eligibility.maxTop10Concentration / multiplier;
+
+      const checks = {
+        excluded: { passed: true } as { passed: boolean; reason?: string },
+        marketCap: {
+          passed: token.marketCap >= this.eligibility.minMarketCap && token.marketCap <= this.eligibility.maxMarketCap,
+          value: token.marketCap,
+          min: this.eligibility.minMarketCap,
+          max: this.eligibility.maxMarketCap,
+        },
+        tier: {
+          passed: tier !== null && tierEnabled,
+          tier: tier,
+        },
+        volume: {
+          passed: tierConfig ? token.volume24h >= adjustedMinVolume : false,
+          value: token.volume24h,
+          required: adjustedMinVolume,
+        },
+        holders: {
+          passed: tierConfig ? token.holderCount >= adjustedMinHolders : false,
+          value: token.holderCount,
+          required: adjustedMinHolders,
+        },
+        age: {
+          passed: tierConfig ? (!token.tokenAge || token.tokenAge >= tierConfig.minTokenAgeHours) : false,
+          value: token.tokenAge || 0,
+          required: tierConfig?.minTokenAgeHours ?? 0,
+        },
+        liquidity: {
+          passed: token.liquidityPool >= adjustedMinLiquidity,
+          value: token.liquidityPool,
+          required: adjustedMinLiquidity,
+        },
+        liquidityRatio: {
+          passed: liquidityRatio >= this.eligibility.minLiquidityRatio,
+          value: liquidityRatio,
+          required: this.eligibility.minLiquidityRatio,
+        },
+        concentration: {
+          passed: token.top10Concentration <= adjustedMaxConcentration,
+          value: token.top10Concentration,
+          max: adjustedMaxConcentration,
+        },
+        cooldown: {
+          passed: !cooldown || Date.now() - cooldown >= this.config.rateLimits.tokenCooldownHours * 60 * 60 * 1000,
+        },
+      };
+
+      const failedChecks = Object.values(checks).filter(c => !c.passed);
+      const passedChecks = Object.values(checks).filter(c => c.passed);
+
+      // Track rejection stats (count all failures, not just first)
+      if (!checks.marketCap.passed) {
         rejections.marketCapOutOfRange++;
         rejectedMcaps.push(`${token.ticker}=$${(token.marketCap / 1_000_000).toFixed(1)}M`);
-        continue;
       }
-
-      // Determine tier and check tier-specific volume requirement
-      const tier = getTokenTier(token.marketCap);
-      if (!tier) {
+      if (checks.marketCap.passed && !checks.tier.passed) {
         rejections.noTierMatch++;
-        continue;  // Outside all tiers (gap between $5M-$8M)
       }
-
-      tierCounts[tier]++;
-      const tierConfig = TIER_CONFIG[tier];
-
-      // Tier-specific volume check
-      if (token.volume24h < tierConfig.minVolume24h) {
-        rejections.volumeTooLow++;
-        continue;
-      }
-
-      // Tier-specific holder count check
-      if (token.holderCount < tierConfig.minHolderCount) {
-        rejections.holdersTooLow++;
-        continue;
-      }
-
-      // Tier-specific token age check
-      if (token.tokenAge && token.tokenAge < tierConfig.minTokenAgeHours) {
-        rejections.ageTooYoung++;
-        continue;
-      }
-
-      // Liquidity check
-      if (token.liquidityPool < this.eligibility.minLiquidity) {
-        rejections.liquidityTooLow++;
-        continue;
-      }
-
-      const liquidityRatio = token.liquidityPool / token.marketCap;
-      if (liquidityRatio < this.eligibility.minLiquidityRatio) {
-        rejections.liquidityRatioTooLow++;
-        continue;
-      }
-
-      // Concentration check
-      if (token.top10Concentration > this.eligibility.maxTop10Concentration) {
+      if (tier) tierCounts[tier] = (tierCounts[tier] || 0) + 1;
+      if (!checks.volume.passed && checks.tier.passed) rejections.volumeTooLow++;
+      if (!checks.holders.passed && checks.tier.passed) rejections.holdersTooLow++;
+      if (!checks.age.passed && checks.tier.passed) rejections.ageTooYoung++;
+      if (!checks.liquidity.passed) rejections.liquidityTooLow++;
+      if (!checks.liquidityRatio.passed) rejections.liquidityRatioTooLow++;
+      if (!checks.concentration.passed) {
         rejections.concentrationTooHigh++;
         rejectedConcentrations.push(`${token.ticker}=${token.top10Concentration.toFixed(0)}%`);
-        continue;
+      }
+      if (!checks.cooldown.passed) rejections.onCooldown++;
+
+      // === GRADUATED THRESHOLD RELAXATION ===
+      // Hard gates: marketCap, tier, and cooldown MUST pass (non-negotiable)
+      const hardGatesFailed = !checks.marketCap.passed || !checks.tier.passed || !checks.cooldown.passed;
+
+      // Soft gates: volume, holders, age, liquidity, liquidityRatio, concentration
+      // A token can fail up to 2 soft gates and still pass if it scores well overall
+      const softChecks = [
+        { name: 'volume', passed: checks.volume.passed, weight: 1.0 },
+        { name: 'holders', passed: checks.holders.passed, weight: 1.0 },
+        { name: 'age', passed: checks.age.passed, weight: 0.5 },        // Minor - less important
+        { name: 'liquidity', passed: checks.liquidity.passed, weight: 1.5 },   // Important for tradability
+        { name: 'liquidityRatio', passed: checks.liquidityRatio.passed, weight: 0.5 }, // Minor
+        { name: 'concentration', passed: checks.concentration.passed, weight: 1.0 },
+      ];
+
+      const softFailCount = softChecks.filter(c => !c.passed).length;
+      const softFailWeight = softChecks.filter(c => !c.passed).reduce((sum, c) => sum + c.weight, 0);
+      const MAX_SOFT_FAILS = 2;          // Max number of soft criteria that can fail
+      const MAX_SOFT_FAIL_WEIGHT = 2.0;  // Max total weight of failed soft criteria
+
+      let isEligible: boolean;
+      if (hardGatesFailed) {
+        isEligible = false;
+      } else if (softFailCount === 0) {
+        isEligible = true;  // All checks pass
+      } else if (softFailCount <= MAX_SOFT_FAILS && softFailWeight <= MAX_SOFT_FAIL_WEIGHT) {
+        isEligible = true;  // Minor failures tolerated
+        logger.info(`📊 FUNNEL: ${token.ticker} passed with ${softFailCount} soft gate failures (weight: ${softFailWeight.toFixed(1)}): ${softChecks.filter(c => !c.passed).map(c => c.name).join(', ')}`);
+      } else {
+        isEligible = false;
       }
 
-      // Check cooldown
-      const cooldown = this.signalCooldowns.get(token.address);
-      if (cooldown && Date.now() - cooldown < this.config.rateLimits.tokenCooldownHours * 60 * 60 * 1000) {
-        rejections.onCooldown++;
-        continue;
+      // Store per-token rejection details for /funnel_debug
+      if (!isEligible) {
+        this.recentRejections.push({
+          ticker: token.ticker,
+          address: token.address,
+          marketCap: token.marketCap,
+          tier: tier,
+          checks,
+          failedCount: failedChecks.length,
+          passedCount: passedChecks.length,
+          timestamp: new Date(),
+        });
+
+        // Log per-token details for debugging
+        const failedNames = Object.entries(checks)
+          .filter(([, c]) => !c.passed)
+          .map(([name]) => name);
+        logger.debug(`📊 FUNNEL REJECT: ${token.ticker} (MC: $${(token.marketCap / 1_000_000).toFixed(2)}M, ${tier || 'NO_TIER'}) - Failed ${failedChecks.length}/${Object.keys(checks).length}: ${failedNames.join(', ')}`);
       }
 
-      eligible.push(token);
+      if (isEligible) {
+        eligible.push(token);
+      }
+    }
+
+    // Keep only the last 50 rejections for the /funnel_debug command
+    if (this.recentRejections.length > 50) {
+      this.recentRejections = this.recentRejections.slice(-50);
     }
 
     // Update funnel stats
@@ -787,6 +928,7 @@ export class MatureTokenScanner {
 
     // Determine token tier
     const tier = getTokenTier(metrics.marketCap) || TokenTier.EMERGING;
+    const tierCfg = TIER_CONFIG[tier];
 
     // Get tier-specific stop loss
     const stopLossPercent = getStopLossForTier(tier, 0);  // Initial stop loss
@@ -818,6 +960,8 @@ export class MatureTokenScanner {
 
       // Token tier for this signal
       tier,
+      tierAlertTag: tierCfg.alertTag,
+      tierAutoTrade: tierCfg.autoTrade,
 
       tokenAgeHours: Math.round(metrics.tokenAge / 60),
       tokenAgeDays: Math.round(metrics.tokenAge / 60 / 24),

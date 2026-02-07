@@ -124,21 +124,23 @@ export class MatureTokenTelegramFormatter {
     // Signal type emoji and label
     const signalTypeInfo = this.getSignalTypeInfo(signal.signalType);
 
-    // Get tier label for display
+    // Get tier label for display - use tier alert tag if available
     const tierLabel = this.getTierLabel(signal.tier);
     const tierEmoji = this.getTierEmoji(signal.tier);
+    const alertTag = signal.tierAlertTag || `${tierEmoji} ${tierLabel}`;
+    const autoTradeLabel = signal.tierAutoTrade === false ? ' [MONITOR ONLY]' : '';
 
     // Build the message with clear visual hierarchy
     let msg = `\n`;
     msg += `═══════════════════════════════\n`;
-    msg += `${signalTypeInfo.emoji}  *ESTABLISHED TOKEN SIGNAL*\n`;
-    msg += `    ${tierEmoji} ${tierLabel} · Score: *${score.compositeScore}/100*\n`;
+    msg += `${signalTypeInfo.emoji}  *ESTABLISHED TOKEN SIGNAL*${autoTradeLabel}\n`;
+    msg += `    ${alertTag} · Score: *${score.compositeScore}/100*\n`;
     msg += `═══════════════════════════════\n\n`;
 
     // Token info
     msg += `*Token:* \`$${signal.tokenTicker}\`\n`;
     msg += `*Address:* \`${signal.tokenAddress}\`\n`;
-    msg += `*Tier:* ${tierEmoji} *${tierLabel}*\n`;
+    msg += `*Tier:* ${alertTag}\n`;
     msg += `*Chain:* Solana\n\n`;
 
     msg += `───────────────────────────────\n`;

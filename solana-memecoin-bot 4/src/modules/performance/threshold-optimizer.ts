@@ -57,16 +57,17 @@ export interface FactorAnalysis {
 
 // ============ CONSTANTS ============
 
-// Default thresholds (LOOSENED for memecoin signal generation)
-// Strategy: Let more signals through, use position sizing to manage risk
-// The bot is an alert system, not a gatekeeper
+// Default thresholds — Phase 1 moderate loosening (Feb 2026)
+// Previous values created an impossible combined filter (0 tokens passing).
+// Strategy: Let more signals through, use position sizing to manage risk.
+// The bot is an alert system, not a gatekeeper.
 const DEFAULT_THRESHOLDS: ThresholdSet = {
-  minMomentumScore: 10,      // Loosened from 25 - let scoring handle quality
-  minOnChainScore: 20,       // Loosened from 35 - let more signals through
-  minSafetyScore: 15,        // Loosened from 45 - only reject clearly dangerous tokens
-  maxBundleRiskScore: 80,    // Raised from 55 - bundle activity is normal on pump.fun
-  minLiquidity: 1000,        // Lowered from 8000 - early gems start with tiny liquidity
-  maxTop10Concentration: 85, // Raised from 60 - memecoins are concentrated by nature
+  minMomentumScore: 25,      // Still 2.5x the old minimum (10), but down from 35
+  minOnChainScore: 35,       // Above old default (20), down from 45
+  minSafetyScore: 50,        // Major bottleneck at 63 — now 50 (still 3.3x old 15)
+  maxBundleRiskScore: 50,    // Allow moderate bundle activity (was 38, default was 80)
+  minLiquidity: 8000,        // Still 8x the old minimum ($1K), down from $16K
+  maxTop10Concentration: 60, // Allow slightly more concentrated tokens (was 50%, default 85%)
 };
 
 // Target performance
@@ -509,10 +510,10 @@ export class ThresholdOptimizer {
         )
       `);
 
-      // One-time migration: Reset to TIGHTENED defaults (v3 - Feb 2026)
-      // Updated for 50% win rate target with stricter thresholds
-      // Performance data showed scoring inversion - tighter filters needed
-      const migrationKey = 'threshold_migration_v3_tightened_50pct';
+      // One-time migration: Reset to PHASE 1 loosened defaults (v4 - Feb 2026)
+      // Previous v3 thresholds created impossible combined filter (0 tokens passing)
+      // Phase 1: Moderate loosening to unblock the funnel while keeping quality
+      const migrationKey = 'threshold_migration_v4_phase1_unblock';
       const migrationCheck = await pool.query(`
         SELECT 1 FROM threshold_history
         WHERE thresholds->>'_migration' = $1
@@ -521,14 +522,14 @@ export class ThresholdOptimizer {
 
       if (migrationCheck.rows.length === 0) {
         // Migration not applied - reset to new defaults
-        logger.info('Applying threshold migration v2: resetting to moderate defaults');
+        logger.info('Applying threshold migration v4: Phase 1 loosened defaults to unblock funnel');
         await pool.query('DELETE FROM threshold_history');
         await pool.query(`
           INSERT INTO threshold_history (thresholds)
           VALUES ($1)
         `, [JSON.stringify({ ...DEFAULT_THRESHOLDS, _migration: migrationKey })]);
         this.currentThresholds = { ...DEFAULT_THRESHOLDS };
-        logger.info({ thresholds: this.currentThresholds }, 'Migration complete: moderate thresholds applied');
+        logger.info({ thresholds: this.currentThresholds }, 'Migration complete: Phase 1 loosened thresholds applied');
         return;
       }
 

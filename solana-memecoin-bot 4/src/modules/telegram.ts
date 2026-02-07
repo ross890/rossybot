@@ -3643,7 +3643,6 @@ export class TelegramAlertBot {
         classification: followUpContext.classification,
         narrative: followUpContext.narrative,
         followUpMomentumScore: followUpContext.momentumScore,
-        weakeningSignalCount: followUpContext.classification === 'DETERIORATING' ? (weakeningCount + 1) : weakeningCount,
       }, followUpContext.isFollowUp ? `On-chain follow-up sent (${followUpContext.classification})` : 'On-chain momentum signal sent');
 
       return true;

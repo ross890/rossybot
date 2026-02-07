@@ -2,9 +2,10 @@
 // MODULE: PUMP.FUN DEV WALLET MONITOR
 // Real-time monitoring of tracked dev wallets
 // for new token deployments
+// Uses Solscan Pro API v2.0 for all on-chain queries
 // ===========================================
 
-import { Connection, PublicKey } from '@solana/web3.js';
+import axios from 'axios';
 import { appConfig } from '../../config/index.js';
 import { logger } from '../../utils/logger.js';
 import { pool } from '../../utils/database.js';
@@ -15,14 +16,47 @@ import type { PumpfunDev, DevSignal } from '../../types/index.js';
 
 const PUMPFUN_PROGRAM_ID = '6EF8rrecthR5Dkzon8Nwu78hRvfCKubJ14M5uBEwF6P';
 
+// Solscan Pro API v2.0
+const SOLSCAN_BASE = 'https://pro-api.solscan.io/v2.0';
+
 // Poll interval for checking dev wallet activity
-// Using polling approach consistent with existing KOL monitor pattern
 const POLL_INTERVAL_MS = 15 * 1000; // 15 seconds — fast enough for bonding curve speed
+
+// ============ SOLSCAN CLIENT ============
+
+async function solscanGet(path: string, params?: Record<string, string>): Promise<any> {
+  const apiKey = appConfig.solscanApiKey;
+  if (!apiKey) {
+    return null;
+  }
+
+  try {
+    const url = new URL(`${SOLSCAN_BASE}${path}`);
+    if (params) {
+      for (const [key, value] of Object.entries(params)) {
+        url.searchParams.set(key, value);
+      }
+    }
+
+    const response = await axios.get(url.toString(), {
+      headers: { 'token': apiKey },
+      timeout: 10000,
+    });
+
+    return response.data;
+  } catch (error: any) {
+    if (error?.response?.status === 429) {
+      logger.warn('Solscan rate limited in dev monitor');
+    } else {
+      logger.debug({ error: error?.message, path }, 'Solscan dev monitor request failed');
+    }
+    return null;
+  }
+}
 
 // ============ DEV MONITOR CLASS ============
 
 export class PumpfunDevMonitor {
-  private connection: Connection;
   private trackedDevs: Map<string, PumpfunDev> = new Map(); // wallet → dev record
   private pollTimer: NodeJS.Timeout | null = null;
   private isRunning = false;
@@ -38,10 +72,6 @@ export class PumpfunDevMonitor {
   // Callback for sending signals to Telegram
   private signalCallback: ((signal: DevSignal, formattedMessage: string) => Promise<void>) | null = null;
 
-  constructor() {
-    this.connection = new Connection(appConfig.heliusRpcUrl, 'confirmed');
-  }
-
   // ============ INITIALIZATION ============
 
   /**
@@ -50,7 +80,11 @@ export class PumpfunDevMonitor {
   async initialize(): Promise<void> {
     if (this.initialized) return;
 
-    logger.info('Initializing Pump.fun Dev Monitor...');
+    logger.info('Initializing Pump.fun Dev Monitor (Solscan)...');
+
+    if (!appConfig.solscanApiKey) {
+      logger.warn('SOLSCAN_API_KEY not set — Dev Monitor will be limited');
+    }
 
     await this.loadTrackedDevs();
 
@@ -87,7 +121,7 @@ export class PumpfunDevMonitor {
     // Immediate first poll
     this.pollDevWallets();
 
-    logger.info({ devCount: this.trackedDevs.size }, 'Pump.fun Dev Monitor started');
+    logger.info({ devCount: this.trackedDevs.size }, 'Pump.fun Dev Monitor started (Solscan)');
   }
 
   /**
@@ -196,34 +230,33 @@ export class PumpfunDevMonitor {
     return this.trackedDevs.has(walletAddress);
   }
 
-  // ============ POLLING ============
+  // ============ POLLING VIA SOLSCAN ============
 
   /**
-   * Poll all tracked dev wallets for new transactions
+   * Poll all tracked dev wallets for new transactions via Solscan
    * Check for token creation transactions
    */
   private async pollDevWallets(): Promise<void> {
     if (!this.isRunning || this.trackedDevs.size === 0) return;
 
-    // Skip if Helius is disabled
-    if (appConfig.heliusDisabled) return;
+    if (!appConfig.solscanApiKey) return;
 
     const wallets = Array.from(this.trackedDevs.keys());
 
-    // Process wallets in batches to respect rate limits
-    const batchSize = 5;
+    // Process wallets in batches to respect Solscan rate limits
+    const batchSize = 3;
     for (let i = 0; i < wallets.length; i += batchSize) {
       const batch = wallets.slice(i, i + batchSize);
 
       await Promise.all(
-        batch.map(wallet => this.checkDevWallet(wallet).catch(error => {
-          logger.debug({ error, wallet }, 'Error checking dev wallet');
+        batch.map(wallet => this.checkDevWalletViaSolscan(wallet).catch(error => {
+          logger.debug({ error, wallet }, 'Error checking dev wallet via Solscan');
         }))
       );
 
-      // Brief pause between batches to avoid rate limiting
+      // Pause between batches to avoid Solscan rate limiting
       if (i + batchSize < wallets.length) {
-        await this.sleep(500);
+        await this.sleep(1000);
       }
     }
 
@@ -238,61 +271,250 @@ export class PumpfunDevMonitor {
   }
 
   /**
-   * Check a single dev wallet for recent token creation transactions
+   * Check a single dev wallet for recent transactions via Solscan
+   * Uses GET /account/transactions to get recent activity
    */
-  private async checkDevWallet(walletAddress: string): Promise<void> {
+  private async checkDevWalletViaSolscan(walletAddress: string): Promise<void> {
     try {
-      const pubkey = new PublicKey(walletAddress);
+      // Fetch recent transactions for this wallet from Solscan
+      const txData = await solscanGet('/account/transactions', {
+        address: walletAddress,
+        page_size: '5',
+        page: '1',
+      });
 
-      // Get recent transactions (last few)
-      const signatures = await this.connection.getSignaturesForAddress(
-        pubkey,
-        { limit: 5 },
-        'confirmed'
-      );
+      if (!txData?.data || !Array.isArray(txData.data)) return;
 
-      for (const sigInfo of signatures) {
+      for (const tx of txData.data) {
+        const txHash = tx.tx_hash || tx.txHash || tx.signature;
+        if (!txHash) continue;
+
         // Skip already-processed transactions
-        if (this.recentTxSignatures.has(sigInfo.signature)) continue;
-        this.recentTxSignatures.add(sigInfo.signature);
+        if (this.recentTxSignatures.has(txHash)) continue;
+        this.recentTxSignatures.add(txHash);
 
         // Skip failed transactions
-        if (sigInfo.err) continue;
+        if (tx.status === 'Fail' || tx.err) continue;
 
-        // Check if this is a Pump.fun token creation
-        await this.handleDevTransaction(walletAddress, sigInfo.signature);
+        // Check if this transaction involves the Pump.fun program
+        const isPumpfun = this.isPumpfunTxFromSolscan(tx);
+        if (!isPumpfun) continue;
+
+        // Check if this looks like a token creation (not just a buy/sell)
+        const tokenMint = this.extractTokenMintFromSolscanTx(tx);
+        if (!tokenMint) continue;
+
+        // Verify this token isn't already known (i.e., it's a NEW launch)
+        const alreadyKnown = await this.isTokenAlreadyRecorded(tokenMint);
+        if (alreadyKnown) continue;
+
+        // Process as a new dev launch
+        await this.handleNewDevLaunch(walletAddress, tokenMint);
       }
     } catch (error) {
-      logger.debug({ error, walletAddress }, 'Error checking dev wallet transactions');
+      logger.debug({ error, walletAddress }, 'Error checking dev wallet via Solscan');
     }
   }
 
-  // ============ TRANSACTION PROCESSING ============
+  /**
+   * Check if a Solscan transaction involves the Pump.fun program
+   */
+  private isPumpfunTxFromSolscan(tx: any): boolean {
+    // Solscan transaction data includes program IDs in different formats
+    // Check parsed_instructions, program_invocations, or programs array
+    const programs = tx.program_ids || tx.programs || [];
+    if (Array.isArray(programs) && programs.includes(PUMPFUN_PROGRAM_ID)) {
+      return true;
+    }
+
+    // Check parsed instructions
+    const instructions = tx.parsed_instructions || tx.parsedInstructions || [];
+    if (Array.isArray(instructions)) {
+      for (const ix of instructions) {
+        const programId = ix.program_id || ix.programId || ix.program;
+        if (programId === PUMPFUN_PROGRAM_ID) {
+          return true;
+        }
+      }
+    }
+
+    // Check if program is mentioned in the transaction type/signer
+    const txType = tx.type || '';
+    if (typeof txType === 'string' && txType.toLowerCase().includes('pump')) {
+      return true;
+    }
+
+    return false;
+  }
 
   /**
-   * Called when a tracked dev makes a transaction
-   * Determine if it's a new token launch
+   * Extract token mint from a Solscan transaction that looks like a token creation
+   * Distinguishes "create" from "buy/sell" by looking at activity type and token transfers
    */
-  async handleDevTransaction(walletAddress: string, txSignature: string): Promise<void> {
+  private extractTokenMintFromSolscanTx(tx: any): string | null {
+    // Solscan parsed instructions may contain the action type
+    const instructions = tx.parsed_instructions || tx.parsedInstructions || [];
+
+    for (const ix of instructions) {
+      const ixType = (ix.type || ix.activity_type || '').toLowerCase();
+      const programId = ix.program_id || ix.programId || ix.program;
+
+      // Look for create/deploy/init patterns from Pump.fun
+      if (programId === PUMPFUN_PROGRAM_ID) {
+        // "create" instruction on Pump.fun — the new token mint is in the params
+        if (ixType === 'create' || ixType === 'initialize' || ixType === 'init') {
+          // Token mint is usually the first token in the params
+          const mint = ix.params?.mint || ix.params?.token_address || ix.params?.tokenMint;
+          if (mint) return mint;
+        }
+      }
+
+      // Check for initializeMint from Token program (inner instruction)
+      if (ixType === 'initializemint' || ixType === 'initializemint2') {
+        const mint = ix.params?.mint || ix.params?.account;
+        if (mint) return mint;
+      }
+    }
+
+    // Fallback: check token balance changes
+    // A token creation will show a new mint appearing in the post-balances
+    // with the full supply going to the creator's associated token account
+    const tokenBalanceChanges = tx.token_balance_changes || tx.tokenBalanceChanges || [];
+    if (Array.isArray(tokenBalanceChanges)) {
+      for (const change of tokenBalanceChanges) {
+        const changeAmount = parseFloat(change.amount || change.change_amount || '0');
+        // Large positive token balance change suggests a new mint
+        if (changeAmount > 0 && change.token_address) {
+          return change.token_address;
+        }
+      }
+    }
+
+    // Fallback: check SPL token activities from Solscan
+    const activities = tx.activities || tx.spl_activities || [];
+    if (Array.isArray(activities)) {
+      for (const activity of activities) {
+        if (activity.activity_type === 'SPL_CREATE_ACCOUNT' ||
+            activity.activity_type === 'SPL_INIT_MINT') {
+          const mint = activity.token_address || activity.mint;
+          if (mint) return mint;
+        }
+      }
+    }
+
+    return null;
+  }
+
+  /**
+   * Additionally, use Solscan's DeFi activities endpoint as a second detection method.
+   * This catches token launches that the transaction parsing might miss.
+   * GET /account/defi/activities?address={wallet}&activity_type[]=ACTIVITY_SPL_MINT
+   */
+  async checkDevDefiActivities(walletAddress: string): Promise<string[]> {
+    const newTokenMints: string[] = [];
+
+    try {
+      const data = await solscanGet('/account/defi/activities', {
+        address: walletAddress,
+        page_size: '10',
+        page: '1',
+      });
+
+      if (!data?.data || !Array.isArray(data.data)) return [];
+
+      for (const activity of data.data) {
+        const activityType = activity.activity_type || '';
+        const platform = activity.platform || '';
+
+        // Look for mint/create activities on Pump.fun
+        if ((activityType.includes('MINT') || activityType.includes('CREATE')) &&
+            platform.toLowerCase().includes('pump')) {
+          const tokenMint = activity.token1 || activity.token_address;
+          if (tokenMint && !this.recentTxSignatures.has(`defi-${tokenMint}`)) {
+            this.recentTxSignatures.add(`defi-${tokenMint}`);
+            newTokenMints.push(tokenMint);
+          }
+        }
+      }
+    } catch (error) {
+      logger.debug({ error, walletAddress }, 'Error checking dev DeFi activities');
+    }
+
+    return newTokenMints;
+  }
+
+  // ============ TOKEN LOOKUP VIA SOLSCAN ============
+
+  /**
+   * Check if a token is already recorded in our database
+   */
+  private async isTokenAlreadyRecorded(tokenMint: string): Promise<boolean> {
+    try {
+      const result = await pool.query(
+        'SELECT id FROM pumpfun_dev_tokens WHERE token_mint = $1 LIMIT 1',
+        [tokenMint]
+      );
+      return result.rows.length > 0;
+    } catch {
+      return false;
+    }
+  }
+
+  /**
+   * Get token metadata — try Pump.fun API first, then Solscan fallback
+   */
+  private async getTokenMeta(tokenMint: string): Promise<{
+    name: string;
+    symbol: string;
+    bondingProgress?: number;
+  }> {
+    // Try Pump.fun API first (fastest, most accurate for pumpfun tokens)
+    try {
+      const response = await fetch(`https://frontend-api.pump.fun/coins/${tokenMint}`, {
+        signal: AbortSignal.timeout(5000),
+      });
+
+      if (response.ok) {
+        const data = await response.json() as any;
+        const marketCap = data.usd_market_cap || 0;
+        const bondingProgress = Math.min(100, (marketCap / 69000) * 100);
+
+        return {
+          name: data.name || 'Unknown',
+          symbol: data.symbol || 'UNKNOWN',
+          bondingProgress,
+        };
+      }
+    } catch (error) {
+      logger.debug({ error, tokenMint }, 'Failed to fetch from Pump.fun API');
+    }
+
+    // Fallback: Solscan token meta
+    try {
+      const solscanData = await solscanGet('/token/meta', { address: tokenMint });
+      if (solscanData?.data) {
+        return {
+          name: solscanData.data.name || 'Unknown',
+          symbol: solscanData.data.symbol || 'UNKNOWN',
+        };
+      }
+    } catch (error) {
+      logger.debug({ error, tokenMint }, 'Failed to fetch from Solscan token meta');
+    }
+
+    return { name: 'Unknown', symbol: 'UNKNOWN' };
+  }
+
+  // ============ NEW LAUNCH PROCESSING ============
+
+  /**
+   * Handle a newly detected dev launch
+   */
+  private async handleNewDevLaunch(walletAddress: string, tokenMint: string): Promise<void> {
     const dev = this.trackedDevs.get(walletAddress);
     if (!dev) return;
 
     try {
-      // Parse transaction
-      const parsedTx = await this.connection.getParsedTransaction(
-        txSignature,
-        { maxSupportedTransactionVersion: 0 }
-      );
-
-      if (!parsedTx) return;
-
-      // Check if this is a Pump.fun token creation
-      if (!this.isPumpfunTokenCreation(parsedTx)) return;
-
-      // Extract the new token mint address
-      const tokenMint = this.extractTokenMint(parsedTx);
-      if (!tokenMint) return;
-
       // Check cooldown — prevent spam if dev launches rapid-fire
       const cooldownMs = appConfig.devTracker.signalCooldownMs;
       const lastSignal = this.lastSignalTime.get(walletAddress) || 0;
@@ -301,13 +523,13 @@ export class PumpfunDevMonitor {
         return;
       }
 
-      // Get basic token info from Pump.fun API
+      // Get basic token info
       const tokenMeta = await this.getTokenMeta(tokenMint);
 
       // Record new launch in database
       await this.recordNewLaunch(dev, tokenMint, tokenMeta);
 
-      // Run basic safety checks (lightweight — honeypot + mint authority only)
+      // Run basic safety checks (lightweight — honeypot only for speed)
       const safetyOk = await this.runLightweightSafetyCheck(tokenMint);
       if (!safetyOk) {
         logger.info({ tokenMint, walletAddress }, 'Dev token failed lightweight safety check');
@@ -317,135 +539,7 @@ export class PumpfunDevMonitor {
       // Fire the dev signal
       await this.emitDevSignal(dev, tokenMint, tokenMeta);
     } catch (error) {
-      logger.debug({ error, txSignature, walletAddress }, 'Error processing dev transaction');
-    }
-  }
-
-  /**
-   * Check if a parsed transaction is a Pump.fun token creation
-   */
-  private isPumpfunTokenCreation(tx: any): boolean {
-    try {
-      const accountKeys = tx.transaction.message.accountKeys;
-
-      // Check if Pump.fun program is in the transaction
-      const hasPumpfun = accountKeys.some((key: any) => {
-        const address = typeof key === 'string' ? key : key.pubkey?.toString();
-        return address === PUMPFUN_PROGRAM_ID;
-      });
-
-      if (!hasPumpfun) return false;
-
-      // Look for token creation patterns in the instructions
-      // Pump.fun create instruction typically involves:
-      // 1. System program create account
-      // 2. Token program initialize mint
-      // 3. Pump.fun program create instruction
-      const instructions = tx.transaction.message.instructions || [];
-      const innerInstructions = tx.meta?.innerInstructions || [];
-
-      // Check main instructions for Pump.fun program
-      const hasPumpfunInstruction = instructions.some((ix: any) => {
-        const programId = typeof ix.programId === 'string'
-          ? ix.programId
-          : ix.programId?.toString();
-        return programId === PUMPFUN_PROGRAM_ID;
-      });
-
-      if (!hasPumpfunInstruction) return false;
-
-      // Check for token mint initialization in inner instructions
-      // This distinguishes "create" from "buy/sell" operations
-      const hasInitMint = innerInstructions.some((group: any) =>
-        group.instructions?.some((ix: any) => {
-          if (ix.parsed?.type === 'initializeMint' || ix.parsed?.type === 'initializeMint2') {
-            return true;
-          }
-          return false;
-        })
-      );
-
-      // Also check if there's a createAccount instruction in inner instructions
-      const hasCreateAccount = innerInstructions.some((group: any) =>
-        group.instructions?.some((ix: any) => {
-          if (ix.parsed?.type === 'createAccount') {
-            return true;
-          }
-          return false;
-        })
-      );
-
-      return hasInitMint || hasCreateAccount;
-    } catch (error) {
-      logger.debug({ error }, 'Error checking if Pump.fun token creation');
-      return false;
-    }
-  }
-
-  /**
-   * Extract the token mint address from a Pump.fun create transaction
-   */
-  private extractTokenMint(tx: any): string | null {
-    try {
-      const innerInstructions = tx.meta?.innerInstructions || [];
-
-      // Look for initializeMint instruction — the mint address is the account being initialized
-      for (const group of innerInstructions) {
-        for (const ix of group.instructions || []) {
-          if (ix.parsed?.type === 'initializeMint' || ix.parsed?.type === 'initializeMint2') {
-            // The mint address is in the info
-            const mint = ix.parsed?.info?.mint;
-            if (mint) return mint;
-          }
-        }
-      }
-
-      // Fallback: look at post-token balances for new mints
-      const postTokenBalances = tx.meta?.postTokenBalances || [];
-      if (postTokenBalances.length > 0) {
-        // The first token balance entry often has the new mint
-        return postTokenBalances[0]?.mint || null;
-      }
-
-      return null;
-    } catch (error) {
-      logger.debug({ error }, 'Error extracting token mint');
-      return null;
-    }
-  }
-
-  // ============ TOKEN METADATA ============
-
-  /**
-   * Get basic token metadata from Pump.fun API
-   */
-  private async getTokenMeta(tokenMint: string): Promise<{
-    name: string;
-    symbol: string;
-    bondingProgress?: number;
-  }> {
-    try {
-      const response = await fetch(`https://frontend-api.pump.fun/coins/${tokenMint}`, {
-        signal: AbortSignal.timeout(5000),
-      });
-
-      if (!response.ok) {
-        return { name: 'Unknown', symbol: 'UNKNOWN' };
-      }
-
-      const data = await response.json() as any;
-
-      const marketCap = data.usd_market_cap || 0;
-      const bondingProgress = Math.min(100, (marketCap / 69000) * 100);
-
-      return {
-        name: data.name || 'Unknown',
-        symbol: data.symbol || 'UNKNOWN',
-        bondingProgress,
-      };
-    } catch (error) {
-      logger.debug({ error, tokenMint }, 'Failed to fetch token meta from Pump.fun');
-      return { name: 'Unknown', symbol: 'UNKNOWN' };
+      logger.debug({ error, tokenMint, walletAddress }, 'Error processing new dev launch');
     }
   }
 

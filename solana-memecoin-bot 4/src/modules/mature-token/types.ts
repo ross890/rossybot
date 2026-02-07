@@ -69,6 +69,10 @@ export interface TierConfig {
     timeDecay: number;  // Stop loss after 8h (tighter)
   };
   signalAllocation: number;  // What % of signals should be this tier
+  thresholdMultiplier: number; // 1.0 = standard, 0.8 = 20% more lenient for min thresholds
+  enabled: boolean;            // Whether to generate signals for this tier
+  alertTag: string;            // Tag shown in Telegram alerts
+  autoTrade: boolean;          // Whether to auto-trade this tier
 }
 
 export const TIER_CONFIG: Record<TokenTier, TierConfig> = {
@@ -80,6 +84,10 @@ export const TIER_CONFIG: Record<TokenTier, TierConfig> = {
     minTokenAgeHours: 12,        // 12 hours minimum (was 72h)
     stopLoss: { initial: 30, timeDecay: 22 },
     signalAllocation: 0.15,
+    thresholdMultiplier: 1.0,    // Standard thresholds
+    enabled: true,
+    alertTag: '🔬',
+    autoTrade: true,
   },
   [TokenTier.RISING]: {
     minMarketCap: 500_000,
@@ -89,6 +97,10 @@ export const TIER_CONFIG: Record<TokenTier, TierConfig> = {
     minTokenAgeHours: 12,        // 12 hours minimum (was 72h)
     stopLoss: { initial: 25, timeDecay: 18 },
     signalAllocation: 0.35,
+    thresholdMultiplier: 1.0,    // Standard thresholds (41% win rate)
+    enabled: true,
+    alertTag: '🚀',
+    autoTrade: true,
   },
   [TokenTier.EMERGING]: {
     minMarketCap: 8_000_000,
@@ -97,7 +109,11 @@ export const TIER_CONFIG: Record<TokenTier, TierConfig> = {
     minHolderCount: 50,          // 50+ holders (was 100)
     minTokenAgeHours: 48,        // 2 days (was 21 days)
     stopLoss: { initial: 20, timeDecay: 15 },
-    signalAllocation: 0.20,      // RE-ENABLED (was 0% disabled)
+    signalAllocation: 0.20,
+    thresholdMultiplier: 0.8,    // 20% more lenient (69% win rate — PRIORITY tier)
+    enabled: true,
+    alertTag: '🟢 PRIORITY',
+    autoTrade: true,
   },
   [TokenTier.GRADUATED]: {
     minMarketCap: 20_000_000,
@@ -106,7 +122,11 @@ export const TIER_CONFIG: Record<TokenTier, TierConfig> = {
     minHolderCount: 50,          // 50+ holders (was 100)
     minTokenAgeHours: 48,        // 2 days (was 21 days)
     stopLoss: { initial: 18, timeDecay: 12 },
-    signalAllocation: 0.15,      // Reduced to make room for EMERGING
+    signalAllocation: 0.15,
+    thresholdMultiplier: 1.2,    // 20% stricter (no data yet — monitor only)
+    enabled: true,
+    alertTag: '🔍 MONITOR',
+    autoTrade: false,            // Don't auto-trade, just track
   },
   [TokenTier.ESTABLISHED]: {
     minMarketCap: 50_000_000,
@@ -115,7 +135,11 @@ export const TIER_CONFIG: Record<TokenTier, TierConfig> = {
     minHolderCount: 50,          // 50+ holders (was 100)
     minTokenAgeHours: 72,        // 3 days (was 21 days)
     stopLoss: { initial: 15, timeDecay: 10 },
-    signalAllocation: 0.15,      // Reduced to make room for EMERGING
+    signalAllocation: 0.0,       // Disabled — 0% win rate, -43% avg return
+    thresholdMultiplier: 1.0,
+    enabled: false,              // DISABLED: 0% win rate on 2 signals
+    alertTag: '🏛',
+    autoTrade: false,
   },
 };
 
@@ -380,6 +404,8 @@ export interface MatureTokenSignal {
 
   // Token tier (determines TP/SL levels)
   tier: TokenTier;
+  tierAlertTag: string;    // Display tag for Telegram alerts
+  tierAutoTrade: boolean;  // Whether this tier should auto-trade
 
   // Token age info
   tokenAgeHours: number;

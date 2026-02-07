@@ -137,9 +137,9 @@ const TIER_CONFIGS: Record<MarketCapTier, TierConfig> = {
   ESTABLISHED: {
     minMcap: 50_000_000,
     maxMcap: 150_000_000,
-    enabled: true,
-    minLiquidity: 30000,         // Was $100K
-    minSafetyScore: 35,          // Was 55
+    enabled: false,              // DISABLED: 0% win rate, -43% avg return on 2 signals
+    minLiquidity: 30000,
+    minSafetyScore: 35,
     positionSizeMultiplier: 0.5,
   },
   UNKNOWN: {

@@ -718,6 +718,298 @@ export class TelegramAlertBot {
       }
     });
 
+    // /funnel_debug command - Show last 10 rejected tokens with per-criteria scores
+    this.bot.onText(/\/funnel_debug/, async (msg) => {
+      const chatId = msg.chat.id;
+      try {
+        const { matureTokenScanner } = await import('./mature-token/index.js');
+        const rejections = matureTokenScanner.getRecentRejections(10);
+
+        if (rejections.length === 0) {
+          await this.bot!.sendMessage(chatId,
+            '*🔍 Funnel Debug*\n\nNo rejected tokens recorded yet.\nWait for the next scan cycle.',
+            { parse_mode: 'Markdown' }
+          );
+          return;
+        }
+
+        let message = '*🔍 Funnel Debug — Last Rejected Tokens*\n\n';
+
+        for (const rej of rejections) {
+          const mcStr = rej.marketCap >= 1_000_000
+            ? `$${(rej.marketCap / 1_000_000).toFixed(1)}M`
+            : `$${(rej.marketCap / 1_000).toFixed(0)}K`;
+
+          message += `*$${rej.ticker}* (MC: ${mcStr}):\n`;
+
+          // Market cap
+          const mcEmoji = rej.checks.marketCap.passed ? '✅' : '❌';
+          message += `${mcEmoji} MarketCap: ${mcStr} (range: $${(rej.checks.marketCap.min / 1_000).toFixed(0)}K-$${(rej.checks.marketCap.max / 1_000_000).toFixed(0)}M)\n`;
+
+          // Tier
+          const tierEmoji = rej.checks.tier.passed ? '✅' : '❌';
+          message += `${tierEmoji} Tier: ${rej.checks.tier.tier || 'NONE'}\n`;
+
+          if (rej.checks.tier.passed) {
+            // Volume
+            const volEmoji = rej.checks.volume.passed ? '✅' : '❌';
+            message += `${volEmoji} Volume: $${rej.checks.volume.value.toLocaleString(undefined, {maximumFractionDigits: 0})} (min: $${rej.checks.volume.required.toLocaleString(undefined, {maximumFractionDigits: 0})})\n`;
+
+            // Holders
+            const holdEmoji = rej.checks.holders.passed ? '✅' : '❌';
+            message += `${holdEmoji} Holders: ${rej.checks.holders.value} (min: ${rej.checks.holders.required})\n`;
+
+            // Age
+            const ageEmoji = rej.checks.age.passed ? '✅' : '❌';
+            const ageHrs = (rej.checks.age.value / 60).toFixed(1);
+            message += `${ageEmoji} Age: ${ageHrs}h (min: ${rej.checks.age.required}h)\n`;
+          }
+
+          // Liquidity
+          const liqEmoji = rej.checks.liquidity.passed ? '✅' : '❌';
+          message += `${liqEmoji} Liquidity: $${rej.checks.liquidity.value.toLocaleString(undefined, {maximumFractionDigits: 0})} (min: $${rej.checks.liquidity.required.toLocaleString(undefined, {maximumFractionDigits: 0})})\n`;
+
+          // Liq ratio
+          const lrEmoji = rej.checks.liquidityRatio.passed ? '✅' : '❌';
+          message += `${lrEmoji} Liq Ratio: ${(rej.checks.liquidityRatio.value * 100).toFixed(2)}% (min: ${(rej.checks.liquidityRatio.required * 100).toFixed(1)}%)\n`;
+
+          // Concentration
+          const concEmoji = rej.checks.concentration.passed ? '✅' : '❌';
+          message += `${concEmoji} Top10: ${rej.checks.concentration.value.toFixed(0)}% (max: ${rej.checks.concentration.max}%)\n`;
+
+          // Cooldown
+          if (!rej.checks.cooldown.passed) {
+            message += `❌ On cooldown\n`;
+          }
+
+          message += `Result: Failed ${rej.failedCount}/${rej.failedCount + rej.passedCount} criteria\n\n`;
+        }
+
+        // Telegram message limit is 4096 chars - split if needed
+        if (message.length > 4000) {
+          message = message.slice(0, 3950) + '\n\n_...truncated. Use logs for full details._';
+        }
+
+        await this.bot!.sendMessage(chatId, message, { parse_mode: 'Markdown' });
+      } catch (error) {
+        logger.error({ error }, 'Failed to get funnel debug');
+        await this.bot!.sendMessage(chatId, 'Failed to get funnel debug data.');
+      }
+    });
+
+    // /set_threshold command - Set individual threshold values
+    this.bot.onText(/\/set_threshold\s+(\S+)\s+(\S+)/, async (msg, match) => {
+      const chatId = msg.chat.id;
+      const name = match?.[1]?.toLowerCase();
+      const value = parseFloat(match?.[2] || '');
+
+      if (!name || isNaN(value)) {
+        await this.bot!.sendMessage(chatId,
+          '*Usage:* `/set_threshold <name> <value>`\n\n' +
+          '*Available thresholds:*\n' +
+          '• `momentum` - Min Momentum Score\n' +
+          '• `onchain` - Min OnChain Score\n' +
+          '• `safety` - Min Safety Score\n' +
+          '• `bundle` - Max Bundle Risk Score\n' +
+          '• `liquidity` - Min Liquidity ($)\n' +
+          '• `concentration` - Max Top10 Concentration (%)',
+          { parse_mode: 'Markdown' }
+        );
+        return;
+      }
+
+      try {
+        const { thresholdOptimizer } = await import('./performance/index.js');
+        const current = thresholdOptimizer.getCurrentThresholds();
+
+        const nameMap: Record<string, string> = {
+          momentum: 'minMomentumScore',
+          onchain: 'minOnChainScore',
+          safety: 'minSafetyScore',
+          bundle: 'maxBundleRiskScore',
+          liquidity: 'minLiquidity',
+          concentration: 'maxTop10Concentration',
+        };
+
+        const thresholdKey = nameMap[name];
+        if (!thresholdKey) {
+          await this.bot!.sendMessage(chatId, `Unknown threshold: ${name}. Use /set_threshold for usage.`);
+          return;
+        }
+
+        const oldValue = (current as any)[thresholdKey];
+        thresholdOptimizer.setThresholds({ [thresholdKey]: value } as any);
+
+        await this.bot!.sendMessage(chatId,
+          `✅ *Threshold Updated*\n\n` +
+          `• ${name}: ${oldValue} → ${value}\n\n` +
+          `_Changes take effect on next scan cycle._`,
+          { parse_mode: 'Markdown' }
+        );
+
+        logger.info({ threshold: name, oldValue, newValue: value }, 'Threshold updated via Telegram');
+      } catch (error) {
+        logger.error({ error }, 'Failed to set threshold');
+        await this.bot!.sendMessage(chatId, 'Failed to set threshold.');
+      }
+    });
+
+    // /score_analysis command - Win rate by score brackets
+    this.bot.onText(/\/score_analysis/, async (msg) => {
+      const chatId = msg.chat.id;
+      try {
+        const { pool } = await import('../utils/database.js');
+
+        // Query win rate by score bracket
+        const result = await pool.query(`
+          SELECT
+            CASE
+              WHEN COALESCE(onchain_score, 0) >= 90 THEN '90+'
+              WHEN COALESCE(onchain_score, 0) >= 80 THEN '80-89'
+              WHEN COALESCE(onchain_score, 0) >= 70 THEN '70-79'
+              WHEN COALESCE(onchain_score, 0) >= 60 THEN '60-69'
+              WHEN COALESCE(onchain_score, 0) >= 50 THEN '50-59'
+              WHEN COALESCE(onchain_score, 0) >= 40 THEN '40-49'
+              WHEN COALESCE(onchain_score, 0) >= 30 THEN '30-39'
+              ELSE '<30'
+            END as bracket,
+            COUNT(*) as total,
+            COUNT(*) FILTER (WHERE final_outcome = 'WIN') as wins,
+            COUNT(*) FILTER (WHERE final_outcome = 'LOSS') as losses,
+            ROUND(AVG(CASE WHEN final_outcome = 'WIN' THEN peak_return_pct ELSE NULL END)::numeric, 1) as avg_win_return,
+            ROUND(AVG(CASE WHEN final_outcome = 'LOSS' THEN peak_return_pct ELSE NULL END)::numeric, 1) as avg_loss_return
+          FROM signal_performance
+          WHERE final_outcome IN ('WIN', 'LOSS')
+          GROUP BY bracket
+          ORDER BY bracket DESC
+        `);
+
+        if (result.rows.length === 0) {
+          await this.bot!.sendMessage(chatId,
+            '*📊 Score Analysis*\n\nNo completed signals yet. Need WIN/LOSS data to analyze.',
+            { parse_mode: 'Markdown' }
+          );
+          return;
+        }
+
+        let message = '*📊 Score Analysis — Win Rate by Score Bracket*\n\n';
+        message += '```\n';
+        message += 'Score   | Signals | Win%  | Avg W  | Avg L\n';
+        message += '--------|---------|-------|--------|------\n';
+
+        let bestBracket = '';
+        let bestWinRate = 0;
+
+        for (const row of result.rows) {
+          const total = parseInt(row.total);
+          const wins = parseInt(row.wins);
+          const winRate = total > 0 ? (wins / total * 100) : 0;
+          const avgWin = row.avg_win_return ? `+${row.avg_win_return}%` : 'N/A';
+          const avgLoss = row.avg_loss_return ? `${row.avg_loss_return}%` : 'N/A';
+
+          if (winRate > bestWinRate && total >= 5) {
+            bestWinRate = winRate;
+            bestBracket = row.bracket;
+          }
+
+          message += `${row.bracket.padEnd(7)} | ${String(total).padEnd(7)} | ${winRate.toFixed(0).padStart(3)}%  | ${avgWin.padEnd(6)} | ${avgLoss}\n`;
+        }
+        message += '```\n\n';
+
+        if (bestBracket) {
+          message += `*Best bracket:* ${bestBracket} (${bestWinRate.toFixed(0)}% win rate)\n`;
+        }
+
+        message += '\n_Lower scores outperforming higher? May indicate buying tops._';
+
+        await this.bot!.sendMessage(chatId, message, { parse_mode: 'Markdown' });
+      } catch (error) {
+        logger.error({ error }, 'Failed to run score analysis');
+        await this.bot!.sendMessage(chatId, 'Failed to run score analysis. Check database connection.');
+      }
+    });
+
+    // /bot_status command - Comprehensive health check
+    this.bot.onText(/\/bot_status/, async (msg) => {
+      const chatId = msg.chat.id;
+      try {
+        const { matureTokenScanner } = await import('./mature-token/index.js');
+        const { pool } = await import('../utils/database.js');
+        const { thresholdOptimizer } = await import('./performance/index.js');
+
+        const stats = matureTokenScanner.getFunnelStats();
+        const scannerStats = matureTokenScanner.getStats();
+        const topBlocker = matureTokenScanner.getTopBlocker();
+        const thresholds = thresholdOptimizer.getCurrentThresholds();
+        const defaults = thresholdOptimizer.getDefaultThresholds();
+
+        // Count non-default thresholds
+        let nonDefaultCount = 0;
+        if (thresholds.minMomentumScore !== defaults.minMomentumScore) nonDefaultCount++;
+        if (thresholds.minOnChainScore !== defaults.minOnChainScore) nonDefaultCount++;
+        if (thresholds.minSafetyScore !== defaults.minSafetyScore) nonDefaultCount++;
+        if (thresholds.maxBundleRiskScore !== defaults.maxBundleRiskScore) nonDefaultCount++;
+        if (thresholds.minLiquidity !== defaults.minLiquidity) nonDefaultCount++;
+        if (thresholds.maxTop10Concentration !== defaults.maxTop10Concentration) nonDefaultCount++;
+
+        let message = '*🤖 Rossybot Status*\n\n';
+
+        // Pipeline status
+        const pipelineEmoji = scannerStats.isRunning ? '✅' : '❌';
+        message += `Pipeline: ${pipelineEmoji} ${scannerStats.isRunning ? 'Running' : 'Stopped'}\n`;
+        message += `Last scan: ${stats.lastScanTime || 'Not yet'}\n`;
+        message += `Tokens in funnel: ${stats.fetched} fetched → ${stats.passedAge} age → ${stats.eligible} eligible → ${stats.evaluated} scored → ${stats.signalsSent} signalled\n\n`;
+
+        // Thresholds
+        const thresholdStatus = nonDefaultCount > 0 ? `Modified (${nonDefaultCount}/6 non-default)` : 'Default';
+        message += `Thresholds: ${thresholdStatus}\n`;
+        if (topBlocker) {
+          message += `Top blocker: ${topBlocker.criteria} (rejected ${topBlocker.count}/${topBlocker.total} tokens)\n`;
+        }
+        message += '\n';
+
+        // Active tiers (from the tier config)
+        const { TIER_CONFIG, TokenTier } = await import('./mature-token/types.js');
+        const risingEnabled = TIER_CONFIG[TokenTier.RISING].enabled;
+        const emergingEnabled = TIER_CONFIG[TokenTier.EMERGING].enabled;
+        const graduatedEnabled = TIER_CONFIG[TokenTier.GRADUATED].enabled;
+        const establishedEnabled = TIER_CONFIG[TokenTier.ESTABLISHED].enabled;
+        message += `Active tiers: 🚀 RISING ${risingEnabled ? '✅' : '❌'} | ${TIER_CONFIG[TokenTier.EMERGING].alertTag} ${emergingEnabled ? '✅' : '❌'} | ${TIER_CONFIG[TokenTier.GRADUATED].alertTag} ${graduatedEnabled ? '✅' : '❌'} | 🏛 ESTABLISHED ${establishedEnabled ? '❌ (disabled)' : '❌'}\n\n`;
+
+        // Recent signals
+        message += `Signals this hour: ${scannerStats.signalsThisHour}\n`;
+        message += `Signals today: ${scannerStats.signalsToday}\n`;
+        message += `Active signals: ${scannerStats.activeSignals}\n`;
+        message += `Watchlist: ${scannerStats.watchlistSize}\n\n`;
+
+        // Database check
+        let dbOk = false;
+        let tradingTablesOk = false;
+        try {
+          await pool.query('SELECT 1');
+          dbOk = true;
+          const tableCheck = await pool.query(`
+            SELECT COUNT(*) as cnt FROM information_schema.tables
+            WHERE table_schema = 'public' AND table_name = 'trade_history'
+          `);
+          tradingTablesOk = parseInt(tableCheck.rows[0].cnt) > 0;
+        } catch { /* db check failed */ }
+
+        message += `DB: ${dbOk ? '✅ Connected' : '❌ Disconnected'}\n`;
+        message += `Trading tables: ${tradingTablesOk ? '✅' : '❌ Not migrated'}\n`;
+
+        // API health (check if source stats have data)
+        const dexOk = (stats.sourceStats as any)?.dexscreenerTrending > 0 || (stats.sourceStats as any)?.dexscreener > 0;
+        const jupOk = (stats.sourceStats as any)?.jupiter > 0;
+        message += `APIs: DexScreener ${dexOk ? '✅' : '❌'} | Jupiter ${jupOk ? '✅' : '❌'}`;
+
+        await this.bot!.sendMessage(chatId, message, { parse_mode: 'Markdown' });
+      } catch (error) {
+        logger.error({ error }, 'Failed to get bot status');
+        await this.bot!.sendMessage(chatId, 'Failed to get bot status.');
+      }
+    });
+
     // /sources command - Show discovery source health status
     this.bot.onText(/\/sources/, async (msg) => {
       const chatId = msg.chat.id;

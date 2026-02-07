@@ -40,9 +40,13 @@ export const BOT_COMMANDS: TelegramBot.BotCommand[] = [
 
   // Discovery & Analysis
   { command: 'funnel', description: 'Token filtering funnel stats' },
+  { command: 'funnel_debug', description: 'Last 10 rejected tokens with scores' },
   { command: 'sources', description: 'Discovery source health' },
   { command: 'safety', description: 'Safety check: /safety <token>' },
   { command: 'thresholds', description: 'View scoring thresholds' },
+  { command: 'set_threshold', description: 'Set threshold: /set_threshold <name> <value>' },
+  { command: 'score_analysis', description: 'Win rate by score brackets' },
+  { command: 'bot_status', description: 'Comprehensive health check' },
 
   // Wallet Tracking
   { command: 'addwallet', description: 'Track wallet: /addwallet <address>' },

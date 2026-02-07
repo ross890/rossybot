@@ -21,21 +21,22 @@ import {
 
 // ============ SCORING WEIGHTS ============
 
-// Original weights (used for KOL-validated signals)
+// KOL-validated signal weights
+// NOTE: socialMomentum uses on-chain proxy (no Twitter connected) — kept at reduced weight
 const FACTOR_WEIGHTS = {
-  onChainHealth: 0.20,
-  socialMomentum: 0.15,
+  onChainHealth: 0.25,
+  socialMomentum: 0.10,     // On-chain proxy only, capped at 0.6
   kolConvictionMain: 0.25,
   kolConvictionSide: 0.15,
   scamRiskInverse: 0.25,
 } as const;
 
-// Discovery weights (used for metrics-only signals without KOL)
-// Redistributes KOL weight to other factors
+// Discovery weights (metrics-only, no KOL)
+// NOTE: socialMomentum uses on-chain proxy (no Twitter connected)
 const DISCOVERY_WEIGHTS = {
-  onChainHealth: 0.35,      // Increased from 0.20
-  socialMomentum: 0.25,     // Increased from 0.15
-  scamRiskInverse: 0.40,    // Increased from 0.25
+  onChainHealth: 0.40,
+  socialMomentum: 0.15,     // On-chain proxy only, capped at 0.6
+  scamRiskInverse: 0.45,
 } as const;
 
 // KOL multiplier configuration

@@ -42,108 +42,51 @@ function printStartupDiagnostics(): void {
 
   // Environment & Mode
   logger.info('');
-  logger.info('📋 ENVIRONMENT');
+  logger.info('ENVIRONMENT');
   logger.info(`   Mode: ${appConfig.nodeEnv.toUpperCase()}`);
-  logger.info(`   Learning Mode: ${appConfig.trading.learningMode ? '✅ ENABLED (relaxed filters)' : '❌ DISABLED (strict filters)'}`);
+  logger.info(`   Learning Mode: ${appConfig.trading.learningMode ? 'ENABLED (relaxed filters)' : 'DISABLED (strict filters)'}`);
   logger.info(`   Log Level: ${appConfig.logLevel}`);
 
-  // API Connections
+  // API Connections — only list what's actually called
   logger.info('');
-  logger.info('🔌 API CONNECTIONS');
+  logger.info('API CONNECTIONS');
   if (appConfig.heliusDisabled) {
-    logger.info('   Helius (RPC): ⚠️ DISABLED (rate limit mode)');
-    logger.info('      → Security checks return permissive defaults');
-    logger.info('      → Top 10 concentration defaulting to 50%');
-    logger.info('      → Bundle analysis disabled');
-    logger.info('      → Set HELIUS_DISABLED=false when quota resets');
+    logger.info('   Helius (RPC): DISABLED (rate limit mode)');
+    logger.info('      -> Security checks return permissive defaults');
+    logger.info('      -> Top 10 concentration defaulting to 50%');
+    logger.info('      -> KOL wallet tracking inactive');
   } else {
-    logger.info(`   Helius (RPC): ${appConfig.heliusApiKey ? '✅ Configured' : '❌ MISSING - on-chain analysis disabled'}`);
+    logger.info(`   Helius (RPC): ${appConfig.heliusApiKey ? 'CONFIGURED' : 'MISSING - holder analysis disabled'}`);
   }
-  logger.info('   DexScreener: ✅ Free (no API key needed)');
-  logger.info('   RugCheck: ✅ Free (contract safety)');
-  logger.info('   SolanaFM: ✅ Free (dev wallet history)');
-  logger.info('   Jupiter: ✅ Free (no API key needed)');
-  logger.info(`   Telegram: ${appConfig.telegramBotToken ? '✅ Configured' : '❌ MISSING - alerts disabled'}`);
-
-  // Twitter/X Status - Critical for social analysis
-  logger.info('');
-  logger.info('🐦 TWITTER/X INTEGRATION');
-  if (!appConfig.twitterEnabled) {
-    logger.info('   Status: ❌ DISABLED (TWITTER_ENABLED=false)');
-    logger.info('   Impact: Social metrics will return empty data');
-    logger.info('   Fix: Set TWITTER_ENABLED=true in .env');
-  } else {
-    const hasTwitterCreds = appConfig.twitterBearerToken ||
-      (appConfig.twitterConsumerKey && appConfig.twitterConsumerSecret);
-    if (hasTwitterCreds) {
-      logger.info('   Status: ✅ ENABLED');
-      logger.info(`   Auth: ${appConfig.twitterBearerToken ? 'Bearer Token' : 'Consumer Key/Secret'}`);
-    } else {
-      logger.info('   Status: ⚠️ ENABLED but NO CREDENTIALS');
-      logger.info('   Impact: Twitter API calls will fail');
-      logger.info('   Fix: Set TWITTER_BEARER_TOKEN in .env');
-    }
-  }
+  logger.info('   DexScreener: FREE (token discovery, metrics, boost status)');
+  logger.info('   Jupiter: FREE (recent tokens, verified list)');
+  logger.info('   RugCheck: FREE (contract safety hard gate)');
+  logger.info(`   Solscan Pro: ${appConfig.solscanApiKey ? 'CONFIGURED (dev wallet monitoring)' : 'NOT SET - dev tracker limited'}`);
+  logger.info(`   Telegram: ${appConfig.telegramBotToken ? 'CONFIGURED' : 'MISSING - alerts disabled'}`);
+  logger.info('   Twitter/X: NOT CONNECTED (social metrics use on-chain proxy)');
 
   // Strategy Configuration
   logger.info('');
-  logger.info('🎯 STRATEGY CONFIGURATION');
-  logger.info(`   Early Token Strategy: ${appConfig.trading.enableEarlyStrategy ? '✅ ENABLED (5min-90min tokens)' : '❌ DISABLED'}`);
-  logger.info(`   Mature Token Strategy: ${appConfig.trading.enableMatureStrategy ? '✅ ENABLED (21+ day tokens)' : '❌ DISABLED'}`);
-  logger.info(`   Pump.fun Dev Tracker: ${appConfig.devTracker.enabled ? '✅ ENABLED (dev wallet monitoring)' : '❌ DISABLED'}`);
+  logger.info('STRATEGIES');
+  logger.info(`   Early Token (5min-90min): ${appConfig.trading.enableEarlyStrategy ? 'ENABLED - 20s scan cycle' : 'DISABLED'}`);
+  logger.info(`   Mature Token (21+ days): ${appConfig.trading.enableMatureStrategy ? 'ENABLED - 5min scan cycle' : 'DISABLED'}`);
+  logger.info(`   Pump.fun Dev Tracker: ${appConfig.devTracker.enabled ? 'ENABLED - 15s poll cycle' : 'DISABLED'}`);
 
-  // Signal Generation Settings
+  // Signal Limits
   logger.info('');
-  logger.info('📡 SIGNAL GENERATION');
-  if (appConfig.trading.enableEarlyStrategy) {
-    logger.info(`   Early Strategy Scan Interval: 20 seconds`);
-  }
-  if (appConfig.trading.enableMatureStrategy) {
-    logger.info(`   Mature Strategy Scan Interval: 5 minutes`);
-  }
+  logger.info('SIGNAL LIMITS');
   logger.info(`   Max Signals/Hour: ${appConfig.trading.maxSignalsPerHour}`);
   logger.info(`   Max Signals/Day: ${appConfig.trading.maxSignalsPerDay}`);
   logger.info(`   Min Score (Buy): ${appConfig.trading.minScoreBuySignal}`);
   logger.info(`   Min Score (Watch): ${appConfig.trading.minScoreWatchSignal}`);
 
-  // Token Screening Thresholds
+  // Screening
   logger.info('');
-  logger.info('🔍 TOKEN SCREENING THRESHOLDS');
+  logger.info('SCREENING');
   logger.info(`   Market Cap: $${appConfig.screening.minMarketCap.toLocaleString()} - $${appConfig.screening.maxMarketCap.toLocaleString()}`);
-  logger.info(`   Min 24h Volume: $${appConfig.screening.min24hVolume.toLocaleString()}`);
-  logger.info(`   Min Holders: ${appConfig.screening.minHolderCount}`);
-  logger.info(`   Max Top10 Concentration: ${appConfig.screening.maxTop10Concentration}%`);
-  logger.info(`   Min Liquidity: $${appConfig.screening.minLiquidityPool.toLocaleString()}`);
+  logger.info(`   Min Volume: $${appConfig.screening.min24hVolume.toLocaleString()} | Min Holders: ${appConfig.screening.minHolderCount}`);
+  logger.info(`   Max Top10: ${appConfig.screening.maxTop10Concentration}% | Min Liquidity: $${appConfig.screening.minLiquidityPool.toLocaleString()}`);
   logger.info(`   Min Token Age: ${appConfig.screening.minTokenAgeMinutes} minutes`);
-
-  // Discovery Sources
-  logger.info('');
-  logger.info('🔎 TOKEN DISCOVERY SOURCES');
-  logger.info('   ✅ DexScreener New Pairs');
-  logger.info('   ✅ DexScreener Trending');
-  logger.info('   ✅ Jupiter Recent Tokens');
-  logger.info('   ✅ Volume Anomaly Scanner');
-  logger.info('   ✅ Holder Growth Scanner');
-  logger.info('   ✅ Narrative Scanner');
-  logger.info('   ✅ KOL Wallet Tracker');
-  if (appConfig.devTracker.enabled) {
-    logger.info('   ✅ Pump.fun Dev Signal Tracker');
-  }
-
-  // Analysis Modules
-  logger.info('');
-  logger.info('📊 ANALYSIS MODULES');
-  logger.info('   ✅ On-Chain Scoring Engine');
-  logger.info('   ✅ Momentum Analyzer');
-  logger.info('   ✅ Bundle Detector (informational)');
-  logger.info('   ✅ Token Safety Checker');
-  logger.info('   ✅ Scam Filter');
-  logger.info('   ✅ Moonshot Assessor');
-  logger.info('   ✅ Discovery Scanners');
-  logger.info('   ✅ RugCheck Integration (Layer 1 - Contract Safety)');
-  logger.info('   ✅ Dev Wallet Scorer (Layer 2 - Serial Launcher Detection)');
-  logger.info('   ✅ 2x Probability Calculator');
-  logger.info('   ✅ Token Data Crawler (DexScreener → Backtest)');
 
   logger.info('');
   logger.info(divider);

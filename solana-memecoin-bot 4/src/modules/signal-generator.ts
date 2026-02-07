@@ -43,6 +43,9 @@ import { autoTrader } from './trading/index.js';
 // Multi-source token discovery
 import { discoveryEngine } from './discovery/index.js';
 
+// 2x Probability & Dev Scoring
+import { probabilitySignalModule } from './probability-signal.js';
+
 import {
   TokenMetrics,
   SocialMetrics,
@@ -707,6 +710,12 @@ export class SignalGenerator {
 
     logger.info({ tokenAddress: shortAddr, ticker: metrics.ticker }, 'EVAL: Passed scam filter, getting additional data');
 
+    // 2x PROBABILITY CHECK: Run in parallel with existing pipeline
+    // This fires a separate 2x probability alert when conditions are met
+    this.runTwoXProbabilityCheck(tokenAddress, metrics, null).catch(err => {
+      logger.debug({ err, tokenAddress: shortAddr }, '2x probability check failed (non-blocking)');
+    });
+
     // Get social metrics
     const socialMetrics = await this.getSocialMetrics(tokenAddress, metrics);
 
@@ -751,6 +760,11 @@ export class SignalGenerator {
     // ============ PATH A: KOL ACTIVITY DETECTED ============
     if (kolActivities.length > 0) {
       logger.info({ tokenAddress, kolCount: kolActivities.length }, 'KOL activity detected');
+
+      // 2x PROBABILITY: Re-run with KOL activity data (higher probability expected)
+      this.runTwoXProbabilityCheck(tokenAddress, metrics, kolActivities[0]).catch(err => {
+        logger.debug({ err, tokenAddress: shortAddr }, '2x probability check with KOL failed (non-blocking)');
+      });
 
       // FEATURE 2: Track conviction - record all KOL buys
       for (const activity of kolActivities) {
@@ -1754,6 +1768,48 @@ export class SignalGenerator {
       discoveredAt: new Date(),
       kolValidatedAt: null,
     };
+  }
+
+  /**
+   * Run 2x probability check and send alert if conditions are met.
+   * This runs as a fire-and-forget parallel check — does NOT block the main pipeline.
+   */
+  private async runTwoXProbabilityCheck(
+    tokenAddress: string,
+    metrics: TokenMetrics,
+    kolActivity: KolWalletActivity | null
+  ): Promise<void> {
+    // Only check tokens at $50k+ MC
+    if (metrics.marketCap < 50000) return;
+
+    try {
+      // Get holder data from 30 minutes ago (approximate from holderChange1h)
+      const holders30minAgo = metrics.holderChange1h > 0
+        ? Math.max(1, Math.round(metrics.holderCount / (1 + metrics.holderChange1h / 100 / 2)))
+        : metrics.holderCount;
+
+      // Approximate volume rolling average from 24h volume
+      const volumeRollingAvg = metrics.volume24h > 0 ? metrics.volume24h : 1;
+
+      const result = await probabilitySignalModule.checkToken(
+        metrics,
+        kolActivity,
+        holders30minAgo,
+        volumeRollingAvg
+      );
+
+      if (result.shouldSignal && result.formattedAlert) {
+        await telegramBot.sendTwoXSignal(result.formattedAlert, tokenAddress);
+        logger.info({
+          tokenAddress: tokenAddress.slice(0, 8),
+          ticker: metrics.ticker,
+          probability: (result.twoXSignal.adjustedProbability * 100).toFixed(1) + '%',
+          confidence: result.twoXSignal.confidence,
+        }, '2x probability signal fired');
+      }
+    } catch (error) {
+      logger.debug({ error, tokenAddress: tokenAddress.slice(0, 8) }, '2x probability check error');
+    }
   }
 
   /**

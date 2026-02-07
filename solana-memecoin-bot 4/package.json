@@ -13,7 +13,8 @@
     "db:migrate:trading": "tsx scripts/migrate-trading.ts",
     "db:seed": "tsx scripts/seed-kols.ts",
     "wallet:generate": "tsx scripts/generate-wallet.ts",
-    "test:telegram": "tsx scripts/test-telegram.ts"
+    "test:telegram": "tsx scripts/test-telegram.ts",
+    "db:migrate:probability": "tsx scripts/migrate-probability.ts"
   },
   "dependencies": {
     "@solana/web3.js": "^1.87.6",

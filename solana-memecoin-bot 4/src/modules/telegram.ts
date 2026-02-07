@@ -2021,6 +2021,23 @@ export class TelegramAlertBot {
         return false;
       }
 
+      // FOLLOW-UP FILTER: Only send follow-ups with strong positive momentum
+      // Kill DETERIORATING, MIXED_SIGNALS - only allow MOMENTUM_CONFIRMED and NEW_CATALYST
+      if (followUpContext.isFollowUp &&
+          followUpContext.classification !== 'MOMENTUM_CONFIRMED' &&
+          followUpContext.classification !== 'NEW_CATALYST') {
+        logger.info({
+          tokenAddress: signal.tokenAddress,
+          ticker: signal.tokenTicker,
+          classification: followUpContext.classification,
+          positiveChanges: followUpContext.positiveChanges,
+          negativeChanges: followUpContext.negativeChanges,
+        }, `KOL follow-up SUPPRESSED - only sending strong positive momentum (was ${followUpContext.classification})`);
+
+        this.recordSignalHistory(signal, prediction);
+        return false;
+      }
+
       const message = this.formatBuySignal(signal, followUpContext);
 
       await this.bot.sendMessage(this.chatId, message, {
@@ -3581,20 +3598,19 @@ export class TelegramAlertBot {
         return false;
       }
 
-      // WEAKENING SIGNAL LIMIT: After 3 weakening signals, only allow BUY signals (positive momentum)
-      const weakeningCount = previousSnapshot?.weakeningSignalCount || 0;
+      // FOLLOW-UP FILTER: Only send follow-ups with strong positive momentum
+      // Kill DETERIORATING, MIXED_SIGNALS - only allow MOMENTUM_CONFIRMED and NEW_CATALYST
       if (followUpContext.isFollowUp &&
-          followUpContext.classification === 'DETERIORATING' &&
-          weakeningCount >= this.MAX_WEAKENING_SIGNALS) {
+          followUpContext.classification !== 'MOMENTUM_CONFIRMED' &&
+          followUpContext.classification !== 'NEW_CATALYST') {
         logger.info({
           tokenAddress: signal.tokenAddress,
           ticker: signal.tokenTicker,
-          weakeningCount,
-          maxAllowed: this.MAX_WEAKENING_SIGNALS,
           classification: followUpContext.classification,
-        }, 'Weakening signal SUPPRESSED - max weakening signals reached (only buy signals allowed now)');
+          positiveChanges: followUpContext.positiveChanges,
+          negativeChanges: followUpContext.negativeChanges,
+        }, `On-chain follow-up SUPPRESSED - only sending strong positive momentum (was ${followUpContext.classification})`);
 
-        // Record but don't send
         this.recordOnChainSignalHistory(signal, followUpContext.classification);
         return false;
       }

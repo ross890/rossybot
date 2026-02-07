@@ -32,37 +32,27 @@ export interface PendingConfirmation {
 // ============ COMMAND MENU ============
 
 export const BOT_COMMANDS: TelegramBot.BotCommand[] = [
-  // Positions
-  { command: 'positions', description: 'View all open positions with P&L' },
-  { command: 'close', description: 'Close a position: /close <token>' },
-  { command: 'close_all', description: 'Emergency close all positions' },
+  // Signal & Performance
+  { command: 'status', description: 'Bot status & strategy info' },
+  { command: 'stats', description: 'Signal performance dashboard' },
+  { command: 'recent', description: 'Recent signals & outcomes' },
+  { command: 'tierperf', description: 'Win rate by signal tier' },
 
-  // Settings
-  { command: 'settings', description: 'View current bot settings' },
-  { command: 'set_max_trade', description: 'Set max SOL per trade' },
-  { command: 'set_slippage', description: 'Set slippage tolerance %' },
-  { command: 'toggle_autobuys', description: 'Enable/disable auto-buying' },
-  { command: 'toggle_autosells', description: 'Enable/disable auto TP/SL' },
+  // Discovery & Analysis
+  { command: 'funnel', description: 'Token filtering funnel stats' },
+  { command: 'sources', description: 'Discovery source health' },
+  { command: 'safety', description: 'Safety check: /safety <token>' },
+  { command: 'thresholds', description: 'View scoring thresholds' },
 
-  // Blacklist
-  { command: 'blacklist', description: 'View or add to blacklist' },
-  { command: 'unblacklist', description: 'Remove from blacklist' },
-
-  // Wallet
-  { command: 'wallet', description: 'View wallet balance' },
-  { command: 'withdraw', description: 'Withdraw SOL: /withdraw <amount> <address>' },
-
-  // Performance
-  { command: 'stats', description: 'Trading stats (win rate, P&L)' },
-  { command: 'history', description: 'Recent trade history' },
-  { command: 'thresholds', description: 'View signal thresholds' },
-  { command: 'reset_thresholds', description: 'Reset thresholds to defaults' },
+  // Wallet Tracking
+  { command: 'addwallet', description: 'Track wallet: /addwallet <address>' },
+  { command: 'wallets', description: 'List tracked wallets' },
+  { command: 'removewallet', description: 'Remove tracked wallet' },
 
   // System
-  { command: 'status', description: 'Bot status' },
-  { command: 'pause', description: 'Pause all trading' },
-  { command: 'resume', description: 'Resume trading' },
-  { command: 'help', description: 'Show help' },
+  { command: 'pause', description: 'Pause signal scanning' },
+  { command: 'resume', description: 'Resume signal scanning' },
+  { command: 'help', description: 'Show all commands' },
 ];
 
 // ============ TRADING COMMANDS CLASS ============

@@ -1395,7 +1395,16 @@ export class SignalGenerator {
           // Suggest entry at 10-20% below current price based on pump intensity
           const pullbackPercent = h1Change > 50 ? 0.20 : h1Change > 25 ? 0.15 : 0.10;
           suggestedEntryPrice = metrics.price * (1 - pullbackPercent);
-          suggestedEntryReason = `Price near ATH (1h: +${h1Change.toFixed(0)}%${h6Change > 10 ? `, 6h: +${h6Change.toFixed(0)}%` : ''}). Wait for ${(pullbackPercent * 100).toFixed(0)}% pullback.`;
+          // Build reason with only timeframes the token has actually existed for
+          const reasonParts: string[] = [];
+          if (isNewToken) {
+            reasonParts.push(`since launch: +${h1Change.toFixed(0)}%`);
+          } else {
+            if (metrics.tokenAge >= 60) reasonParts.push(`1h: +${h1Change.toFixed(0)}%`);
+            if (metrics.tokenAge >= 360 && h6Change > 10) reasonParts.push(`6h: +${h6Change.toFixed(0)}%`);
+            if (metrics.tokenAge >= 1440 && h24Change > 10) reasonParts.push(`24h: +${h24Change.toFixed(0)}%`);
+          }
+          suggestedEntryReason = `Price near ATH (${reasonParts.join(', ')}). Wait for ${(pullbackPercent * 100).toFixed(0)}% pullback.`;
           riskWarnings.push(`AT/NEAR ATH: ${suggestedEntryReason}`);
         }
       }

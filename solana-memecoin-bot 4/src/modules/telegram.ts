@@ -462,18 +462,18 @@ export class TelegramAlertBot {
     // Updated for Mature Token Strategy V2 with new features
     const SIGNAL_BOT_COMMANDS: TelegramBot.BotCommand[] = [
       { command: 'status', description: 'Bot status & strategy info' },
-      { command: 'stats', description: 'Historical performance dashboard' },
-      { command: 'recent', description: 'Recent signals & performance' },
-      { command: 'tierperf', description: 'Win rate by tier' },
-      { command: 'microcap', description: '$200K-$500K opportunity analysis' },
+      { command: 'stats', description: 'Signal performance dashboard' },
+      { command: 'recent', description: 'Recent signals & outcomes' },
+      { command: 'tierperf', description: 'Win rate by signal tier' },
       { command: 'funnel', description: 'Token filtering funnel stats' },
       { command: 'sources', description: 'Discovery source health' },
-      { command: 'volumespikes', description: 'Volume anomaly scanner' },
-      { command: 'tiers', description: 'Tier requirements' },
       { command: 'safety', description: 'Safety check: /safety <token>' },
       { command: 'thresholds', description: 'View scoring thresholds' },
       { command: 'addwallet', description: 'Track wallet: /addwallet <address>' },
       { command: 'wallets', description: 'List tracked wallets' },
+      { command: 'removewallet', description: 'Remove tracked wallet' },
+      { command: 'pause', description: 'Pause signal scanning' },
+      { command: 'resume', description: 'Resume signal scanning' },
       { command: 'help', description: 'Show all commands' },
     ];
 
@@ -487,18 +487,17 @@ export class TelegramAlertBot {
     this.bot.onText(/\/start/, async (msg) => {
       const chatId = msg.chat.id;
       await this.bot!.sendMessage(chatId,
-        '*🤖 rossybot V2 - Mature Token Strategy*\n\n' +
-        'Scanning for established tokens:\n' +
-        '• 🚀 RISING: $500K-$8M, 500+ holders, 3+ days\n' +
-        '• 🌱 EMERGING: $8-20M, 21+ days\n' +
-        '• 🎓 GRADUATED: $20-50M, 21+ days\n' +
-        '• 🏛️ ESTABLISHED: $50-150M, 21+ days\n\n' +
+        '*🤖 rossybot - On-Chain Signal Scanner*\n\n' +
+        'Scanning for momentum signals:\n' +
+        '• On-chain momentum analysis\n' +
+        '• KOL wallet tracking\n' +
+        '• Safety & scam filtering\n' +
+        '• Social signal detection\n\n' +
         '*Quick Commands:*\n' +
-        '/status - Bot status\n' +
-        '/funnel - Filtering funnel\n' +
-        '/sources - API health\n' +
-        '/performance - Win rates\n\n' +
-        '/help - Show all commands',
+        '/status - Bot status & strategy\n' +
+        '/stats - Performance dashboard\n' +
+        '/recent - Recent signals\n' +
+        '/help - All commands',
         { parse_mode: 'Markdown' }
       );
 
@@ -522,35 +521,27 @@ export class TelegramAlertBot {
     this.bot.onText(/\/help/, async (msg) => {
       const chatId = msg.chat.id;
       await this.bot!.sendMessage(chatId,
-        '*🤖 rossybot V2 Help*\n\n' +
-        '*Performance:*\n' +
-        '/stats - Historical dashboard\n' +
-        '/recent - Recent signals\n' +
-        '/tierperf - Win rate by tier\n' +
-        '/performance - Signal stats\n' +
-        '/report - AI analysis\n\n' +
-        '*Discovery:*\n' +
-        '/funnel - Filtering funnel\n' +
-        '/sources - API health\n' +
-        '/volumespikes - Volume anomalies\n' +
-        '/microcap - $200K-$500K analysis\n' +
-        '/tiers - Tier requirements\n\n' +
-        '*Analysis:*\n' +
+        '*🤖 rossybot Help*\n\n' +
+        '*Signal Performance:*\n' +
+        '/status - Bot status & strategy\n' +
+        '/stats - Performance dashboard\n' +
+        '/recent - Recent signals & outcomes\n' +
+        '/tierperf - Win rate by tier\n\n' +
+        '*Discovery & Analysis:*\n' +
+        '/funnel - Filtering funnel stats\n' +
+        '/sources - Discovery source health\n' +
         '/safety <token> - Safety check\n' +
-        '/thresholds - View thresholds\n' +
-        '/optimize - Run optimization\n\n' +
-        '*Wallets:*\n' +
-        '/addwallet <addr> - Track wallet\n' +
-        '/wallets - List wallets\n' +
-        '/removewallet <addr> - Remove\n\n' +
-        '*ML:*\n' +
-        '/learning - Prediction info\n\n' +
-        '*2x Probability:*\n' +
-        '/backtest - Conversion analysis\n' +
+        '/thresholds - Scoring thresholds\n' +
         '/devscore <token> - Dev wallet score\n' +
         '/rugcheck <token> - RugCheck safety\n\n' +
-        '_Auto-alerts: 2x, 3x, stop-loss_\n' +
-        'DYOR. Not financial advice.',
+        '*Wallet Tracking:*\n' +
+        '/addwallet <addr> - Track wallet\n' +
+        '/wallets - List tracked wallets\n' +
+        '/removewallet <addr> - Remove wallet\n\n' +
+        '*System:*\n' +
+        '/pause - Pause scanning\n' +
+        '/resume - Resume scanning\n\n' +
+        '_Signals are auto-delivered. DYOR._',
         { parse_mode: 'Markdown' }
       );
     });
@@ -3853,38 +3844,46 @@ export class TelegramAlertBot {
     // Social/X Indicators Section
     const socialMetrics = signal.socialMetrics;
     if (socialMetrics) {
-      msg += `───────────────────────────────\n`;
-      msg += `𝕏 *SOCIAL SIGNALS*\n`;
-
-      // Mention velocity with visual indicator
       const velocity = socialMetrics.mentionVelocity1h || 0;
-      const velocityEmoji = velocity >= 50 ? '🔥' : velocity >= 20 ? '📈' : velocity >= 5 ? '📊' : '📉';
-      const velocityLabel = velocity >= 50 ? 'VIRAL' : velocity >= 20 ? 'HIGH' : velocity >= 5 ? 'MODERATE' : 'LOW';
-      msg += `├─ Velocity: ${velocityEmoji} *${velocity}* mentions/hr (${velocityLabel})\n`;
-
-      // Engagement quality score
       const engagementPercent = Math.round((socialMetrics.engagementQuality || 0) * 100);
-      const engagementEmoji = engagementPercent >= 70 ? '🟢' : engagementPercent >= 40 ? '🟡' : '🔴';
-      msg += `├─ Engagement: ${engagementEmoji} ${engagementPercent}/100\n`;
-
-      // Account authenticity
       const authPercent = Math.round((socialMetrics.accountAuthenticity || 0) * 100);
-      const authEmoji = authPercent >= 70 ? '✅' : authPercent >= 40 ? '⚠️' : '🚨';
-      msg += `├─ Authenticity: ${authEmoji} ${authPercent}/100\n`;
+      const hasKolMentions = socialMetrics.kolMentions && socialMetrics.kolMentions.length > 0;
+      const hasSocialData = velocity > 0 || engagementPercent > 0 || authPercent > 0 || hasKolMentions;
 
-      // KOL mentions with tiers (if any)
-      if (socialMetrics.kolMentions && socialMetrics.kolMentions.length > 0) {
-        const kolDisplay = socialMetrics.kolMentions.slice(0, 3).map((k: any) => {
-          const tierBadge = k.tier ? `[${k.tier}]` : '';
-          return `@${k.handle}${tierBadge}`;
-        }).join(', ');
-        msg += `├─ KOL Mentions: 👑 ${kolDisplay}\n`;
+      if (hasSocialData) {
+        msg += `───────────────────────────────\n`;
+        msg += `𝕏 *SOCIAL SIGNALS*\n`;
+
+        // Mention velocity with visual indicator
+        const velocityEmoji = velocity >= 50 ? '🔥' : velocity >= 20 ? '📈' : velocity >= 5 ? '📊' : '📉';
+        const velocityLabel = velocity >= 50 ? 'VIRAL' : velocity >= 20 ? 'HIGH' : velocity >= 5 ? 'MODERATE' : 'LOW';
+        msg += `├─ Velocity: ${velocityEmoji} *${velocity}* mentions/hr (${velocityLabel})\n`;
+
+        // Engagement quality score
+        const engagementEmoji = engagementPercent >= 70 ? '🟢' : engagementPercent >= 40 ? '🟡' : '🔴';
+        msg += `├─ Engagement: ${engagementEmoji} ${engagementPercent}/100\n`;
+
+        // Account authenticity
+        const authEmoji = authPercent >= 70 ? '✅' : authPercent >= 40 ? '⚠️' : '🚨';
+        msg += `├─ Authenticity: ${authEmoji} ${authPercent}/100\n`;
+
+        // KOL mentions with tiers (if any)
+        if (hasKolMentions) {
+          const kolDisplay = socialMetrics.kolMentions.slice(0, 3).map((k: any) => {
+            const tierBadge = k.tier ? `[${k.tier}]` : '';
+            return `@${k.handle}${tierBadge}`;
+          }).join(', ');
+          msg += `├─ KOL Mentions: 👑 ${kolDisplay}\n`;
+        }
+
+        // Sentiment
+        const sentiment = socialMetrics.sentimentPolarity || 0;
+        const sentimentLabel = sentiment > 0.3 ? '🟢 POSITIVE' : sentiment > -0.3 ? '🟡 NEUTRAL' : '🔴 NEGATIVE';
+        msg += `└─ Sentiment: ${sentimentLabel}\n\n`;
+      } else {
+        msg += `───────────────────────────────\n`;
+        msg += `𝕏 *Social:* No data yet\n\n`;
       }
-
-      // Sentiment
-      const sentiment = socialMetrics.sentimentPolarity || 0;
-      const sentimentLabel = sentiment > 0.3 ? '🟢 POSITIVE' : sentiment > -0.3 ? '🟡 NEUTRAL' : '🔴 NEGATIVE';
-      msg += `└─ Sentiment: ${sentimentLabel}\n\n`;
     }
 
     msg += `───────────────────────────────\n`;
@@ -3931,9 +3930,24 @@ export class TelegramAlertBot {
       msg += `├─ Suggested Entry: \`$${signal.suggestedEntryPrice.toFixed(8)}\`\n`;
       if (signal.priceChangeData) {
         const changes: string[] = [];
-        if (signal.priceChangeData.h1) changes.push(`1h: +${signal.priceChangeData.h1.toFixed(0)}%`);
-        if (signal.priceChangeData.h6) changes.push(`6h: +${signal.priceChangeData.h6.toFixed(0)}%`);
-        if (signal.priceChangeData.h24) changes.push(`24h: +${signal.priceChangeData.h24.toFixed(0)}%`);
+        // Only show timeframes the token has actually existed for
+        const tokenAgeMin = ageMinutes;
+        if (signal.priceChangeData.h1 && tokenAgeMin >= 60) {
+          changes.push(`1h: ${signal.priceChangeData.h1 >= 0 ? '+' : ''}${signal.priceChangeData.h1.toFixed(0)}%`);
+        }
+        if (signal.priceChangeData.h6 && tokenAgeMin >= 360) {
+          changes.push(`6h: ${signal.priceChangeData.h6 >= 0 ? '+' : ''}${signal.priceChangeData.h6.toFixed(0)}%`);
+        }
+        if (signal.priceChangeData.h24 && tokenAgeMin >= 1440) {
+          changes.push(`24h: ${signal.priceChangeData.h24 >= 0 ? '+' : ''}${signal.priceChangeData.h24.toFixed(0)}%`);
+        }
+        // For very new tokens, show 5m change or "since launch"
+        if (tokenAgeMin < 60 && signal.priceChangeData.m5) {
+          changes.push(`5m: ${signal.priceChangeData.m5 >= 0 ? '+' : ''}${signal.priceChangeData.m5.toFixed(0)}%`);
+        }
+        if (tokenAgeMin < 60 && signal.priceChangeData.h1) {
+          changes.push(`since launch: ${signal.priceChangeData.h1 >= 0 ? '+' : ''}${signal.priceChangeData.h1.toFixed(0)}%`);
+        }
         if (changes.length > 0) {
           msg += `├─ Price Change: ${changes.join(' · ')}\n`;
         }

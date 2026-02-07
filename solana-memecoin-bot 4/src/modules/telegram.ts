@@ -165,6 +165,12 @@ export class TelegramAlertBot {
    * Initialize the bot
    */
   async initialize(): Promise<void> {
+    // Guard against double initialization — signal-generator.ts also calls this
+    if (this.bot) {
+      logger.debug('Telegram bot already initialized, skipping duplicate init');
+      return;
+    }
+
     if (!appConfig.telegramBotToken) {
       logger.warn('Telegram bot token not configured - alerts disabled');
       return;

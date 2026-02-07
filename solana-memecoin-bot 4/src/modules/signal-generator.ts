@@ -67,7 +67,7 @@ import {
 // Analysis shows we're getting front-run by ~35-45 seconds
 // 10s scan cycle maximizes early entry opportunities
 // NOTE: Ensure API rate limits can handle this frequency
-const SCAN_INTERVAL_MS = 10 * 1000; // 10 seconds (was 20s, originally 60s)
+const SCAN_INTERVAL_MS = 20 * 1000; // 20 seconds - balanced for DexScreener rate limits
 const KOL_ACTIVITY_WINDOW_MS = 2 * 60 * 60 * 1000; // 2 hours
 const DISCOVERY_SIGNAL_EXPIRY_MS = 24 * 60 * 60 * 1000; // Track discovery for 24 hours
 

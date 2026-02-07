@@ -8,6 +8,7 @@ import axios from 'axios';
 import { logger } from '../utils/logger.js';
 import { pool } from '../utils/database.js';
 import { dexScreenerRateLimiter, TTLCache } from '../utils/rate-limiter.js';
+import { dexScreenerClient } from './onchain.js';
 import { rugCheckClient } from './rugcheck.js';
 import { devWalletScorer } from './dev-scorer.js';
 
@@ -189,19 +190,15 @@ class TokenCrawler {
   }
 
   /**
-   * Fetch latest token profiles from DexScreener (bulk, efficient)
+   * Fetch latest token profiles and boosted tokens from DexScreener
+   * Uses the shared DexScreenerClient to coordinate rate limiting with signal-generator
    */
   private async fetchTokenProfiles(): Promise<string[]> {
     try {
-      const response = await dexScreenerRateLimiter.execute(
-        () => axios.get('https://api.dexscreener.com/token-profiles/latest/v1', { timeout: 10000 }),
-        '/token-profiles/latest/v1'
-      );
-
-      const profiles = response.data || [];
-      return profiles
-        .filter((p: any) => p.chainId === 'solana')
-        .map((p: any) => p.tokenAddress)
+      // Reuse the shared DexScreener client's getNewSolanaPairs (already rate-limited)
+      const pairs = await dexScreenerClient.getNewSolanaPairs(50);
+      return pairs
+        .map((p: any) => p.tokenAddress || p.baseToken?.address)
         .filter(Boolean);
     } catch (error) {
       logger.debug({ error }, 'Failed to fetch token profiles');
@@ -210,20 +207,13 @@ class TokenCrawler {
   }
 
   /**
-   * Fetch boosted/trending tokens from DexScreener (bulk, efficient)
+   * Fetch boosted/trending tokens from DexScreener
+   * Uses the shared DexScreenerClient to coordinate rate limiting with signal-generator
    */
   private async fetchBoostedTokens(): Promise<string[]> {
     try {
-      const response = await dexScreenerRateLimiter.execute(
-        () => axios.get('https://api.dexscreener.com/token-boosts/latest/v1', { timeout: 10000 }),
-        '/token-boosts/latest/v1'
-      );
-
-      const boosts = response.data || [];
-      return boosts
-        .filter((b: any) => b.chainId === 'solana')
-        .map((b: any) => b.tokenAddress)
-        .filter(Boolean);
+      // Reuse the shared DexScreener client's getTrendingSolanaTokens (already rate-limited)
+      return await dexScreenerClient.getTrendingSolanaTokens(50);
     } catch (error) {
       logger.debug({ error }, 'Failed to fetch boosted tokens');
       return [];
@@ -232,6 +222,7 @@ class TokenCrawler {
 
   /**
    * Get pair data for a specific token
+   * Uses the shared DexScreenerClient which coordinates rate limiting system-wide
    */
   private async getTokenPairData(tokenAddress: string): Promise<DexScreenerPairData[] | null> {
     // Check cache
@@ -239,17 +230,13 @@ class TokenCrawler {
     if (cached) return cached;
 
     try {
-      const response = await dexScreenerRateLimiter.execute(
-        () => axios.get(`https://api.dexscreener.com/latest/dex/tokens/${tokenAddress}`, { timeout: 10000 }),
-        `/latest/dex/tokens/${tokenAddress.slice(0, 8)}`
-      );
-
-      const pairs = (response.data?.pairs || []).filter(
-        (p: any) => p.chainId === 'solana'
-      );
+      // Use shared client instead of separate rate limiter
+      const pairs = await dexScreenerClient.getTokenPairs(tokenAddress) as unknown as DexScreenerPairData[];
 
       // Cache the result
-      pairDataCache.set(tokenAddress, pairs, PAIR_CACHE_TTL_MS);
+      if (pairs && pairs.length > 0) {
+        pairDataCache.set(tokenAddress, pairs, PAIR_CACHE_TTL_MS);
+      }
 
       return pairs;
     } catch (error) {

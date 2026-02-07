@@ -493,8 +493,9 @@ class DexScreenerClient {
   private readonly MAX_CACHE_SIZE = 500; // Prevent memory bloat
 
   // Rate limiting - DexScreener free tier allows ~300 req/min (~5/sec)
+  // Reduced to 2/sec to share headroom with token-crawler and discovery modules
   private lastRequestTime = 0;
-  private readonly MIN_REQUEST_INTERVAL_MS = 250; // Max 4 requests/second
+  private readonly MIN_REQUEST_INTERVAL_MS = 500; // Max 2 requests/second
   private rateLimitBackoff = 0; // Additional backoff when rate limited
 
   // Rate limit logging throttling - avoid log spam
@@ -588,9 +589,10 @@ class DexScreenerClient {
       const ttl = pairs.length > 0 ? this.CACHE_TTL_MS : this.CACHE_TTL_EMPTY_MS;
       this.pairsCache.set(address, { data: pairs, expiry: requestTime + ttl });
 
-      // Successful request - reduce backoff
+      // Successful request - halve backoff for faster recovery
       if (this.rateLimitBackoff > 0) {
-        this.rateLimitBackoff = Math.max(0, this.rateLimitBackoff - 100);
+        this.rateLimitBackoff = Math.floor(this.rateLimitBackoff / 2);
+        if (this.rateLimitBackoff < 50) this.rateLimitBackoff = 0;
       }
 
       // Prevent cache from growing too large

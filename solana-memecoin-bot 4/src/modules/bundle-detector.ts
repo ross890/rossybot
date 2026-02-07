@@ -6,7 +6,7 @@
 // ===========================================
 
 import { logger } from '../utils/logger.js';
-import { heliusClient } from './onchain.js';
+import { heliusClient, solscanClient } from './onchain.js';
 import { appConfig } from '../config/index.js';
 
 // ============ TYPES ============
@@ -272,7 +272,22 @@ export class BundleDetector {
     largestInsiderPercent: number;
   }> {
     try {
-      const holderData = await heliusClient.getTokenHolders(tokenAddress);
+      // Use Solscan (accurate totals) with Helius fallback
+      let holderData: { total: number; topHolders: { address: string; amount: number; percentage: number }[] };
+      try {
+        holderData = solscanClient.isAvailable()
+          ? await solscanClient.getTokenHolders(tokenAddress)
+          : await heliusClient.getTokenHolders(tokenAddress);
+      } catch {
+        // If primary source fails, try fallback
+        try {
+          holderData = solscanClient.isAvailable()
+            ? await heliusClient.getTokenHolders(tokenAddress)
+            : { total: 0, topHolders: [] };
+        } catch {
+          holderData = { total: 0, topHolders: [] };
+        }
+      }
 
       if (!holderData || holderData.topHolders.length === 0) {
         return { insiderSupplyPercent: 0, largestInsiderPercent: 0 };

@@ -5,7 +5,7 @@
 // ===========================================
 
 import { logger } from '../utils/logger.js';
-import { heliusClient, dexScreenerClient } from './onchain.js';
+import { heliusClient, dexScreenerClient, solscanClient } from './onchain.js';
 import { appConfig } from '../config/index.js';
 
 // ============ TYPES ============
@@ -439,20 +439,26 @@ export class MomentumAnalyzer {
     newHolders5m: number;
     holderGrowthRate: number;
   } | null> {
-    // Skip when Helius is disabled - return null (will use fallback data)
-    if (appConfig.heliusDisabled) {
-      return null;
-    }
-
     try {
-      const holderData = await heliusClient.getTokenHolders(tokenAddress);
+      // Use Solscan (accurate totals) with Helius fallback
+      let holderData: { total: number; topHolders: any[] };
+      if (solscanClient.isAvailable()) {
+        try {
+          holderData = await solscanClient.getTokenHolders(tokenAddress);
+        } catch {
+          // Solscan failed, try Helius if not disabled
+          if (appConfig.heliusDisabled) return null;
+          holderData = await heliusClient.getTokenHolders(tokenAddress);
+        }
+      } else if (appConfig.heliusDisabled) {
+        return null;
+      } else {
+        holderData = await heliusClient.getTokenHolders(tokenAddress);
+      }
 
-      // Note: Getting new holders in last 5m requires historical tracking
-      // For now, we estimate based on recent transaction unique addresses
       const holderCount = holderData.total;
 
       // Estimate new holders from buy transactions
-      // In production, maintain a holder snapshot database
       const estimatedNewHolders = Math.floor(holderCount * 0.02); // 2% estimate
 
       return {

@@ -91,11 +91,12 @@ export class ScamFilter {
       }
     }
     
-    // Stage 4: Rug History Check (on top holders) - informational only, no hard reject
+    // Stage 4: Rug History Check (on top holders)
+    // 3+ rug wallets is now a REJECT — too many known bad actors
     const rugHistoryCount = await this.checkRugHistory(tokenAddress);
     if (rugHistoryCount >= THRESHOLDS.RUG_HISTORY_REJECT_COUNT) {
       flags.push(`RUG_HISTORY_HIGH: ${rugHistoryCount} wallets with prior rug involvement`);
-      result = ScamFilterResult.FLAG;
+      return this.buildOutput(ScamFilterResult.REJECT, flags, contractAnalysis, bundleAnalysis, devBehaviour, rugHistoryCount);
     } else if (rugHistoryCount >= THRESHOLDS.RUG_HISTORY_FLAG_COUNT) {
       flags.push(`RUG_HISTORY: ${rugHistoryCount} wallet(s) with prior rug involvement`);
       result = ScamFilterResult.FLAG;
@@ -156,10 +157,10 @@ export class ScamFilter {
     analysis: BundleAnalysis,
     flags: string[]
   ): ScamFilterResult {
-    // High risk with rug history - FLAG (informational warning, not a hard block)
+    // High risk with rug history - REJECT (strong rug signal)
     if (analysis.riskLevel === 'HIGH' && analysis.hasRugHistory) {
       flags.push(`BUNDLE_RUG: ${analysis.bundledSupplyPercent.toFixed(1)}% bundled supply with rug history wallets`);
-      return ScamFilterResult.FLAG;
+      return ScamFilterResult.REJECT;
     }
     
     // High bundled supply is a flag
@@ -187,30 +188,42 @@ export class ScamFilter {
     behaviour: DevWalletBehaviour,
     flags: string[]
   ): ScamFilterResult {
-    // Transfer to CEX - FLAG (informational warning, not a hard block)
+    // Transfer to CEX combined with high selling is a REJECT (clear rug pattern)
+    if (behaviour.transferredToCex && behaviour.soldPercent48h >= THRESHOLDS.DEV_SELL_HIGH_RISK_PERCENT) {
+      flags.push(`DEV_RUG_PATTERN: Dev sold ${behaviour.soldPercent48h.toFixed(1)}% AND transferred to CEX`);
+      return ScamFilterResult.REJECT;
+    }
+
+    // Transfer to CEX alone is a FLAG (could be legitimate but suspicious)
     if (behaviour.transferredToCex) {
       flags.push(`DEV_CEX_TRANSFER: Dev wallet transferred to CEX`);
       return ScamFilterResult.FLAG;
     }
 
-    // High sell percent - FLAG (informational warning, not a hard block)
+    // Very high sell percent (>30%) is a REJECT — dev is dumping
+    if (behaviour.soldPercent48h >= 30) {
+      flags.push(`DEV_DUMP_HARD: Dev sold ${behaviour.soldPercent48h.toFixed(1)}% within 48h - likely rug`);
+      return ScamFilterResult.REJECT;
+    }
+
+    // High sell percent - FLAG (informational warning)
     if (behaviour.soldPercent48h >= THRESHOLDS.DEV_SELL_HIGH_RISK_PERCENT) {
       flags.push(`DEV_DUMP: Dev sold ${behaviour.soldPercent48h.toFixed(1)}% within 48h`);
       return ScamFilterResult.FLAG;
     }
-    
+
     // Moderate sell is a flag
     if (behaviour.soldPercent48h >= THRESHOLDS.DEV_SELL_FLAG_PERCENT) {
       flags.push(`DEV_SELLING: Dev sold ${behaviour.soldPercent48h.toFixed(1)}% within 48h`);
       return ScamFilterResult.FLAG;
     }
-    
+
     // Bridge activity is suspicious
     if (behaviour.bridgeActivity) {
       flags.push(`DEV_BRIDGE: Dev wallet has bridge activity`);
       return ScamFilterResult.FLAG;
     }
-    
+
     return ScamFilterResult.PASS;
   }
   

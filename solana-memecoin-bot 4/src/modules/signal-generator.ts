@@ -46,6 +46,9 @@ import { discoveryEngine } from './discovery/index.js';
 // 2x Probability & Dev Scoring
 import { probabilitySignalModule } from './probability-signal.js';
 
+// RugCheck integration — hard-gate for DANGER tokens
+import { rugCheckClient } from './rugcheck.js';
+
 import {
   TokenMetrics,
   SocialMetrics,
@@ -428,6 +431,8 @@ export class SignalGenerator {
       let momentumFailed = 0;
       let bundleBlocked = 0;
       let tierBlocked = 0;
+      let rugcheckBlocked = 0;
+      let compoundRugBlocked = 0;
 
       for (const tokenAddress of preFiltered) {
         try {
@@ -446,6 +451,8 @@ export class SignalGenerator {
             case 'MOMENTUM_FAILED': momentumFailed++; break;
             case 'BUNDLE_BLOCKED': bundleBlocked++; break;
             case 'TIER_BLOCKED': tierBlocked++; break;
+            case 'RUGCHECK_BLOCKED': rugcheckBlocked++; break;
+            case 'COMPOUND_RUG_BLOCKED': compoundRugBlocked++; break;
             case 'SKIPPED': break; // Already have position
           }
         } catch (error) {
@@ -463,6 +470,8 @@ export class SignalGenerator {
         noMetrics,
         screeningFailed,
         scamRejected,
+        rugcheckBlocked,
+        compoundRugBlocked,
         scoringFailed,
         momentumFailed,
         bundleBlocked,
@@ -605,6 +614,8 @@ export class SignalGenerator {
     BUNDLE_BLOCKED: 'BUNDLE_BLOCKED',        // New: High bundle/insider risk
     TOO_EARLY: 'TOO_EARLY',                  // New: Token too young (< 30 min)
     TIER_BLOCKED: 'TIER_BLOCKED',            // New: Token in disabled tier (e.g., EMERGING)
+    RUGCHECK_BLOCKED: 'RUGCHECK_BLOCKED',    // RugCheck DANGER hard block
+    COMPOUND_RUG_BLOCKED: 'COMPOUND_RUG_BLOCKED', // Multiple rug indicators combined
   } as const;
 
   /**
@@ -708,7 +719,114 @@ export class SignalGenerator {
       return SignalGenerator.EVAL_RESULTS.SCAM_REJECTED;
     }
 
-    logger.info({ tokenAddress: shortAddr, ticker: metrics.ticker }, 'EVAL: Passed scam filter, getting additional data');
+    logger.info({ tokenAddress: shortAddr, ticker: metrics.ticker }, 'EVAL: Passed scam filter, running RugCheck hard gate');
+
+    // ============ RUGCHECK HARD GATE ============
+    // RugCheck DANGER is an absolute deal-breaker — even in learning mode.
+    // This catches tokens that the scam filter missed because the scam filter
+    // only checks contract basics, while RugCheck does deeper analysis.
+    try {
+      const rugCheckResult = await rugCheckClient.checkToken(tokenAddress);
+      const rugDecision = rugCheckClient.getDecision(rugCheckResult);
+
+      if (rugDecision.action === 'AUTO_SKIP') {
+        logger.info({
+          tokenAddress: shortAddr,
+          ticker: metrics.ticker,
+          rugCheckScore: rugCheckResult.score,
+          reason: rugDecision.reason,
+          risks: rugCheckResult.risks.slice(0, 5),
+        }, 'EVAL: BLOCKED by RugCheck - DANGER/critical risk');
+        return SignalGenerator.EVAL_RESULTS.RUGCHECK_BLOCKED;
+      }
+
+      if (rugDecision.action === 'NEGATIVE_MODIFIER') {
+        logger.info({
+          tokenAddress: shortAddr,
+          ticker: metrics.ticker,
+          rugCheckScore: rugCheckResult.score,
+          reason: rugDecision.reason,
+        }, 'EVAL: RugCheck WARNING - applying negative modifier');
+        // Warning is applied via the safety score; continue evaluation
+      }
+    } catch (error) {
+      logger.debug({ error, tokenAddress: shortAddr }, 'RugCheck hard gate check failed (non-blocking)');
+      // Fail open - don't block if RugCheck API is down
+    }
+
+    // ============ COMPOUND RUG SIGNAL DETECTION ============
+    // Individual flags are weak, but multiple flags together strongly indicate a rug.
+    // This catches tokens where each individual check passes but the combination is toxic.
+    {
+      let rugIndicatorCount = 0;
+      const rugIndicators: string[] = [];
+
+      // Scam filter flags (each flag is a weak signal)
+      if (scamResult.flags.length >= 2) {
+        rugIndicatorCount++;
+        rugIndicators.push(`${scamResult.flags.length} scam flags`);
+      }
+      if (scamResult.flags.length >= 4) {
+        rugIndicatorCount++; // Extra weight for many flags
+        rugIndicators.push('excessive scam flags');
+      }
+
+      // Bundle risk + rug history
+      if (scamResult.bundleAnalysis.hasRugHistory) {
+        rugIndicatorCount += 2; // Strong indicator
+        rugIndicators.push('bundle rug history');
+      }
+      if (scamResult.bundleAnalysis.bundledSupplyPercent > 25) {
+        rugIndicatorCount++;
+        rugIndicators.push(`${scamResult.bundleAnalysis.bundledSupplyPercent.toFixed(0)}% bundled supply`);
+      }
+
+      // Dev wallet red flags
+      if (scamResult.devBehaviour?.transferredToCex) {
+        rugIndicatorCount += 2; // Strong indicator
+        rugIndicators.push('dev CEX transfer');
+      }
+      if (scamResult.devBehaviour && scamResult.devBehaviour.soldPercent48h > 10) {
+        rugIndicatorCount++;
+        rugIndicators.push(`dev sold ${scamResult.devBehaviour.soldPercent48h.toFixed(0)}%`);
+      }
+
+      // Contract issues
+      if (!scamResult.contractAnalysis.mintAuthorityRevoked &&
+          !scamResult.contractAnalysis.freezeAuthorityRevoked) {
+        rugIndicatorCount++;
+        rugIndicators.push('both authorities enabled');
+      }
+
+      // Safety score integration
+      if (safetyResult.safetyScore < 40) {
+        rugIndicatorCount++;
+        rugIndicators.push(`low safety score (${safetyResult.safetyScore})`);
+      }
+
+      // THRESHOLD: 3+ compound indicators = likely rug
+      // This fires even in learning mode — compound rugs are too risky
+      const COMPOUND_RUG_THRESHOLD = 3;
+      if (rugIndicatorCount >= COMPOUND_RUG_THRESHOLD) {
+        logger.info({
+          tokenAddress: shortAddr,
+          ticker: metrics.ticker,
+          rugIndicatorCount,
+          rugIndicators,
+          threshold: COMPOUND_RUG_THRESHOLD,
+        }, 'EVAL: BLOCKED by compound rug detection - multiple red flags');
+        return SignalGenerator.EVAL_RESULTS.COMPOUND_RUG_BLOCKED;
+      }
+
+      if (rugIndicatorCount >= 2) {
+        logger.info({
+          tokenAddress: shortAddr,
+          ticker: metrics.ticker,
+          rugIndicatorCount,
+          rugIndicators,
+        }, 'EVAL: Elevated rug risk (below block threshold, proceeding with caution)');
+      }
+    }
 
     // 2x PROBABILITY CHECK: Run in parallel with existing pipeline
     // This fires a separate 2x probability alert when conditions are met
@@ -843,17 +961,19 @@ export class SignalGenerator {
     }, 'EVAL: On-chain + social scoring complete');
 
     // Step 2: Check if bundle/safety risk is too high
-    // Production mode: block both CRITICAL and HIGH risk (audit fix — HIGH risk was leaking through)
-    // Learning mode: only block CRITICAL (to collect more data)
+    // CRITICAL risk is ALWAYS blocked (non-negotiable, even in learning mode)
+    // HIGH risk is ALWAYS blocked — learning mode should NOT learn from rugs
+    // The RugCheck hard gate and compound rug detection above already catch most rugs,
+    // but HIGH on-chain risk is an additional safety net
     const isLearning = appConfig.trading.learningMode;
-    if (onChainScore.riskLevel === 'CRITICAL' || (!isLearning && onChainScore.riskLevel === 'HIGH')) {
+    if (onChainScore.riskLevel === 'CRITICAL' || onChainScore.riskLevel === 'HIGH') {
       logger.info({
         tokenAddress: shortAddr,
         ticker: metrics.ticker,
         riskLevel: onChainScore.riskLevel,
         learningMode: isLearning,
         warnings: onChainScore.warnings,
-      }, `EVAL: BLOCKED - ${onChainScore.riskLevel} risk level`);
+      }, `EVAL: BLOCKED - ${onChainScore.riskLevel} risk level (always blocked, even in learning mode)`);
       return SignalGenerator.EVAL_RESULTS.BUNDLE_BLOCKED;
     }
 
@@ -1873,17 +1993,19 @@ export class SignalGenerator {
       breakdown.push('Discord: +1');
     }
 
-    // Paid DexScreener profile is a strong legitimacy signal
-    if (dexScreenerInfo.hasPaidDexscreener) {
+    // Claimed DexScreener profile = owner manages the page (legitimacy signal)
+    if (dexScreenerInfo.hasClaimedProfile) {
       score += 5;
-      breakdown.push('Paid DexScreener: +5');
+      breakdown.push('Profile Claimed: +5');
     }
 
-    // Active boosts show marketing investment (could be pump, but shows commitment)
-    if (dexScreenerInfo.boostCount > 0) {
-      const boostPoints = Math.min(3, dexScreenerInfo.boostCount);
+    // Active boosts = paid advertising (marketing spend, but also common for rugs)
+    // Reduced from +3 to +1 per boost — boosts alone are NOT a trust signal
+    // Rugs frequently boost to attract victims
+    if (dexScreenerInfo.isBoosted) {
+      const boostPoints = Math.min(2, dexScreenerInfo.boostCount);
       score += boostPoints;
-      breakdown.push(`Boosts (${dexScreenerInfo.boostCount}): +${boostPoints}`);
+      breakdown.push(`Boosted (${dexScreenerInfo.boostCount}x): +${boostPoints}`);
     }
 
     // Has description shows effort put into project

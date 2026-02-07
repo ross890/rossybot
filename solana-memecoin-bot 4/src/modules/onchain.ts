@@ -750,8 +750,10 @@ class DexScreenerClient {
   async getTokenInfo(address: string): Promise<DexScreenerTokenInfo> {
     const defaultInfo: DexScreenerTokenInfo = {
       tokenAddress: address,
+      hasClaimedProfile: false,
       hasPaidDexscreener: false,
       boostCount: 0,
+      isBoosted: false,
       hasTokenProfile: false,
       hasTokenAds: false,
       socialLinks: {},
@@ -767,17 +769,26 @@ class DexScreenerClient {
 
       const primaryPair = pairs[0];
 
-      // Check for boosts (paid advertising)
+      // Check for boosts (paid advertising — distinct from profile claim)
       const boostCount = primaryPair.boosts?.active || 0;
-      const hasPaidDexscreener = boostCount > 0;
+      const isBoosted = boostCount > 0;
 
-      // Check for token profile (paid feature)
+      // Check for token profile (claimed/owned profile on DexScreener)
+      // A claimed profile means the token owner has set up their DexScreener page
+      // with image, header, social links, etc. This is DIFFERENT from boosting.
       const hasTokenProfile = !!(
         primaryPair.info?.imageUrl ||
         primaryPair.info?.header ||
         primaryPair.info?.websites?.length ||
         primaryPair.info?.socials?.length
       );
+
+      // hasClaimedProfile = the profile has been claimed and has an owner
+      // This is the correct meaning of "Dex Paid" — someone paid to claim the profile
+      const hasClaimedProfile = hasTokenProfile;
+
+      // hasPaidDexscreener kept for backwards compat, now means profile OR boosts
+      const hasPaidDexscreener = hasClaimedProfile || isBoosted;
 
       // Extract social links
       const socialLinks: DexScreenerTokenInfo['socialLinks'] = {};
@@ -793,12 +804,14 @@ class DexScreenerClient {
       }
 
       // Token ads are indicated by having both boosts AND a profile
-      const hasTokenAds = hasPaidDexscreener && hasTokenProfile;
+      const hasTokenAds = isBoosted && hasTokenProfile;
 
       const info: DexScreenerTokenInfo = {
         tokenAddress: address,
+        hasClaimedProfile,
         hasPaidDexscreener,
         boostCount,
+        isBoosted,
         hasTokenProfile,
         hasTokenAds,
         socialLinks,
@@ -806,9 +819,9 @@ class DexScreenerClient {
 
       logger.debug({
         address: address.slice(0, 8),
-        hasPaid: hasPaidDexscreener,
+        profileClaimed: hasClaimedProfile,
+        isBoosted,
         boosts: boostCount,
-        hasProfile: hasTokenProfile
       }, 'DexScreener token info fetched');
 
       return info;

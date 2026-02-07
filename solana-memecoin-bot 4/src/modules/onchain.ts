@@ -1086,33 +1086,274 @@ class JupiterClient {
   }
 }
 
+// ============ SOLSCAN CLIENT ============
+
+const SOLSCAN_BASE = 'https://pro-api.solscan.io/v2.0';
+
+class SolscanClient {
+  private apiKey: string;
+
+  // Cache for holder data (60 second TTL)
+  private holderCache: Map<string, { data: any; expiry: number }> = new Map();
+  private readonly HOLDER_CACHE_TTL_MS = 60 * 1000;
+
+  // In-flight request deduplication
+  private inflightRequests: Map<string, Promise<any>> = new Map();
+
+  // In-memory holder snapshots for 1h change calculation
+  // Maps token address -> array of { holderCount, timestamp }
+  private holderSnapshots: Map<string, { holderCount: number; timestamp: number }[]> = new Map();
+  private readonly SNAPSHOT_MAX_AGE_MS = 2 * 60 * 60 * 1000; // Keep 2h of snapshots
+
+  constructor() {
+    this.apiKey = appConfig.solscanApiKey;
+    if (!this.apiKey) {
+      logger.warn('SOLSCAN_API_KEY not configured - holder data will fall back to Helius');
+    } else {
+      logger.info('Solscan client initialized for holder data');
+    }
+
+    // Clean up old snapshots every 10 minutes
+    setInterval(() => this.cleanupSnapshots(), 10 * 60 * 1000);
+    // Clean up expired cache entries every 2 minutes
+    setInterval(() => this.cleanupCache(), 2 * 60 * 1000);
+  }
+
+  /**
+   * Check if Solscan is available (API key configured)
+   */
+  isAvailable(): boolean {
+    return !!this.apiKey;
+  }
+
+  /**
+   * Make a GET request to Solscan Pro API v2.0
+   */
+  private async solscanGet(path: string, params?: Record<string, string>): Promise<any> {
+    if (!this.apiKey) return null;
+
+    const url = new URL(`${SOLSCAN_BASE}${path}`);
+    if (params) {
+      for (const [key, value] of Object.entries(params)) {
+        url.searchParams.set(key, value);
+      }
+    }
+
+    const response = await axios.get(url.toString(), {
+      headers: { 'token': this.apiKey },
+      timeout: 10000,
+    });
+
+    return response.data;
+  }
+
+  /**
+   * Get token holder data from Solscan Pro API
+   * Returns accurate total holder count and top 10 holder concentration
+   */
+  async getTokenHolders(mintAddress: string): Promise<{
+    total: number;
+    topHolders: { address: string; amount: number; percentage: number }[];
+  }> {
+    // Check cache first
+    const cached = this.holderCache.get(mintAddress);
+    if (cached && cached.expiry > Date.now()) {
+      return cached.data;
+    }
+
+    // Check for in-flight request (deduplication)
+    const cacheKey = `solscan-holders:${mintAddress}`;
+    const inflight = this.inflightRequests.get(cacheKey);
+    if (inflight) {
+      return inflight;
+    }
+
+    const requestPromise = (async () => {
+      // Fetch top holders (page 1 with 40 items - max page size)
+      const holdersData = await this.solscanGet('/token/holders', {
+        address: mintAddress,
+        page: '1',
+        page_size: '40',
+      });
+
+      if (!holdersData?.data) {
+        throw new Error('No holder data returned from Solscan');
+      }
+
+      const total = holdersData.data.total || 0;
+      const items = holdersData.data.items || holdersData.data || [];
+
+      // Extract top 10 holders with percentage
+      const topHolders = (Array.isArray(items) ? items : [])
+        .slice(0, 10)
+        .map((item: any) => ({
+          address: item.owner || item.address || '',
+          amount: parseFloat(item.amount || '0'),
+          percentage: parseFloat(item.percentage || '0') * 100, // Solscan returns as decimal (0.xx)
+        }));
+
+      const result = { total, topHolders };
+
+      // Record snapshot for holderChange1h calculation
+      this.recordSnapshot(mintAddress, total);
+
+      return result;
+    })();
+
+    // Track in-flight request
+    this.inflightRequests.set(cacheKey, requestPromise);
+
+    try {
+      const result = await requestPromise;
+
+      // Cache the result
+      this.holderCache.set(mintAddress, {
+        data: result,
+        expiry: Date.now() + this.HOLDER_CACHE_TTL_MS,
+      });
+
+      return result;
+    } catch (error: any) {
+      const status = error?.response?.status;
+      if (status === 429) {
+        logger.warn('Solscan rate limited on holder data request');
+      } else {
+        logger.debug({ error: error?.message, mintAddress: mintAddress.slice(0, 8) }, 'Solscan holder request failed');
+      }
+      throw error;
+    } finally {
+      this.inflightRequests.delete(cacheKey);
+    }
+  }
+
+  /**
+   * Record a holder count snapshot for calculating holderChange1h
+   */
+  private recordSnapshot(mintAddress: string, holderCount: number): void {
+    if (!this.holderSnapshots.has(mintAddress)) {
+      this.holderSnapshots.set(mintAddress, []);
+    }
+    this.holderSnapshots.get(mintAddress)!.push({
+      holderCount,
+      timestamp: Date.now(),
+    });
+  }
+
+  /**
+   * Get the approximate holder change in the last hour as a percentage
+   * Uses recorded snapshots to calculate the delta
+   */
+  getHolderChange1h(mintAddress: string, currentHolderCount: number): number {
+    const snapshots = this.holderSnapshots.get(mintAddress);
+    if (!snapshots || snapshots.length === 0) return 0;
+
+    // Find the snapshot closest to 1 hour ago
+    const oneHourAgo = Date.now() - 60 * 60 * 1000;
+    let closestSnapshot: { holderCount: number; timestamp: number } | null = null;
+    let closestDiff = Infinity;
+
+    for (const snap of snapshots) {
+      const diff = Math.abs(snap.timestamp - oneHourAgo);
+      if (diff < closestDiff) {
+        closestDiff = diff;
+        closestSnapshot = snap;
+      }
+    }
+
+    // Only use the snapshot if it's within a reasonable window (30-90 min ago)
+    if (!closestSnapshot) return 0;
+    const ageMs = Date.now() - closestSnapshot.timestamp;
+    if (ageMs < 30 * 60 * 1000 || ageMs > 90 * 60 * 1000) {
+      // If we don't have a snapshot near 1h ago, use the oldest snapshot we have
+      // and scale proportionally
+      const oldestSnapshot = snapshots[0];
+      const oldestAgeMs = Date.now() - oldestSnapshot.timestamp;
+      if (oldestAgeMs < 5 * 60 * 1000) return 0; // Need at least 5 min of data
+
+      const previousCount = oldestSnapshot.holderCount;
+      if (previousCount <= 0) return 0;
+
+      // Scale the change to approximate a 1-hour rate
+      const changeRaw = ((currentHolderCount - previousCount) / previousCount) * 100;
+      const scaleFactor = (60 * 60 * 1000) / oldestAgeMs; // Scale to 1h
+      return Math.round(changeRaw * Math.min(scaleFactor, 3)); // Cap scaling at 3x to avoid wild extrapolation
+    }
+
+    const previousCount = closestSnapshot.holderCount;
+    if (previousCount <= 0) return 0;
+
+    return Math.round(((currentHolderCount - previousCount) / previousCount) * 100);
+  }
+
+  /**
+   * Clean up old snapshots to prevent memory leaks
+   */
+  private cleanupSnapshots(): void {
+    const cutoff = Date.now() - this.SNAPSHOT_MAX_AGE_MS;
+    for (const [address, snapshots] of this.holderSnapshots) {
+      const filtered = snapshots.filter(s => s.timestamp > cutoff);
+      if (filtered.length === 0) {
+        this.holderSnapshots.delete(address);
+      } else {
+        this.holderSnapshots.set(address, filtered);
+      }
+    }
+  }
+
+  /**
+   * Clean up expired cache entries
+   */
+  private cleanupCache(): void {
+    const now = Date.now();
+    for (const [key, entry] of this.holderCache) {
+      if (entry.expiry < now) {
+        this.holderCache.delete(key);
+      }
+    }
+  }
+}
+
 // ============ SINGLETON INSTANCES ============
 
 export const heliusClient = new HeliusClient();
 export const dexScreenerClient = new DexScreenerClient();
 export const jupiterClient = new JupiterClient();
+export const solscanClient = new SolscanClient();
 
 // ============ COMBINED DATA FETCHING ============
 
 export async function getTokenMetrics(address: string): Promise<TokenMetrics | null> {
   try {
-    // Uses DexScreener (FREE) + Helius (included in plan) only
     // DexScreener provides: price, volume, market cap, liquidity, token name/symbol, pair creation time
-    // Helius provides: holder distribution (top 10 concentration) - SKIPPED when HELIUS_DISABLED=true
+    // Solscan provides: accurate holder count + top 10 concentration (primary)
+    // Helius provides: holder distribution (fallback when Solscan unavailable)
 
-    // When Helius is disabled (rate limited), we skip holder distribution calls
-    // Top 10 concentration will default to 50% (conservative estimate)
     const heliusDisabled = appConfig.heliusDisabled;
+    const useSolscan = solscanClient.isAvailable();
 
+    // Fetch DexScreener + holder data in parallel
+    // Priority: Solscan (accurate total) > Helius (capped at 100) > defaults
     const [dexResult, holderResult] = await Promise.allSettled([
       dexScreenerClient.getTokenPairs(address),
-      heliusDisabled
-        ? Promise.resolve({ total: 0, topHolders: [] })  // Skip Helius when disabled
-        : heliusClient.getTokenHolders(address),
+      useSolscan
+        ? solscanClient.getTokenHolders(address)
+        : heliusDisabled
+          ? Promise.resolve({ total: 0, topHolders: [] })
+          : heliusClient.getTokenHolders(address),
     ]);
 
     const dexPairs = dexResult.status === 'fulfilled' ? dexResult.value : [];
-    const holderData = holderResult.status === 'fulfilled' ? holderResult.value : { total: 0, topHolders: [] };
+    let holderData = holderResult.status === 'fulfilled' ? holderResult.value : { total: 0, topHolders: [] };
+
+    // If Solscan failed, fall back to Helius
+    if (holderResult.status === 'rejected' && useSolscan && !heliusDisabled) {
+      logger.debug({ address: address.slice(0, 8) }, 'Solscan holder fetch failed, falling back to Helius');
+      try {
+        holderData = await heliusClient.getTokenHolders(address);
+      } catch {
+        holderData = { total: 0, topHolders: [] };
+      }
+    }
 
     // For very new tokens, we may have no data from APIs yet
     const hasAnyData = dexPairs.length > 0 || holderData.total > 0;
@@ -1135,31 +1376,32 @@ export async function getTokenMetrics(address: string): Promise<TokenMetrics | n
       : 50; // Default for very new tokens
 
     // Get token creation time for age calculation
-    // Use DexScreener pairCreatedAt (FREE)
     let ageMinutes = 5; // Default to 5 minutes for very new tokens
 
     if (primaryPair?.pairCreatedAt) {
       ageMinutes = (Date.now() - primaryPair.pairCreatedAt) / (1000 * 60);
     }
 
-    // Holder count from Helius (capped at 100 due to pagination)
-    // For tokens with >100 holders, Helius returns 100 which is a reasonable lower bound
+    // Holder count - Solscan returns the accurate total, Helius caps at 100
     const holderCount = holderData.total || 25;
 
-    // For tokens with minimal data, use permissive defaults
-    // This allows very new tokens to pass through to scoring
+    // Calculate holder change in last hour from Solscan snapshots
+    const holderChange1h = useSolscan
+      ? solscanClient.getHolderChange1h(address, holderCount)
+      : 0;
+
     return {
       address,
       ticker: primaryPair?.baseToken?.symbol || 'NEW',
       name: primaryPair?.baseToken?.name || 'New Token',
-      price: price || 0.000001, // Default tiny price if unknown
-      marketCap: marketCap || 10000, // Default $10k mcap if unknown (meets min threshold)
-      volume24h: volume24h || 1000, // Default $1k volume if unknown
-      volumeMarketCapRatio: marketCap > 0 ? volume24h / marketCap : 0.1, // Default 10% ratio
+      price: price || 0.000001,
+      marketCap: marketCap || 10000,
+      volume24h: volume24h || 1000,
+      volumeMarketCapRatio: marketCap > 0 ? volume24h / marketCap : 0.1,
       holderCount,
-      holderChange1h: 0,
+      holderChange1h,
       top10Concentration,
-      liquidityPool: liquidity || 5000, // Default $5k liquidity
+      liquidityPool: liquidity || 5000,
       tokenAge: ageMinutes,
       lpLocked: false,
       lpLockDuration: null,

@@ -60,6 +60,17 @@ const envSchema = z.object({
   ENABLE_EARLY_STRATEGY: z.string().optional().transform(val => val?.toLowerCase() !== 'false').default('true'),
   ENABLE_MATURE_STRATEGY: z.string().optional().transform(val => val?.toLowerCase() !== 'false').default('true'),
   
+  // Pump.fun Dev Tracker
+  PUMPFUN_DEV_TRACKER_ENABLED: z.string().optional().transform(val => val?.toLowerCase() !== 'false').default('true'),
+  DEV_MIN_LAUNCHES: z.coerce.number().default(5),
+  DEV_MIN_SUCCESS_RATE: z.coerce.number().default(0.20),
+  DEV_MAX_RUG_RATE: z.coerce.number().default(0.50),
+  DEV_MIN_BEST_PEAK_MC: z.coerce.number().default(200000),
+  DEV_STATS_UPDATE_INTERVAL_MS: z.coerce.number().default(1800000),    // 30 minutes
+  DEV_DISCOVERY_INTERVAL_MS: z.coerce.number().default(86400000),      // 24 hours
+  DEV_SIGNAL_COOLDOWN_MS: z.coerce.number().default(300000),           // 5 minutes
+  SOLSCAN_API_KEY: z.string().optional().default(''),
+
   // Screening (with defaults) - Aggressively optimized for early entries
   MIN_MARKET_CAP: z.coerce.number().default(50000),       // No tokens below $50K MC
   MAX_MARKET_CAP: z.coerce.number().default(25000000),   // Raised from 15M for broader range
@@ -121,6 +132,19 @@ function loadConfig(): AppConfig {
       maxTop10Concentration: env.MAX_TOP10_CONCENTRATION,
       minLiquidityPool: env.MIN_LIQUIDITY_POOL,
       minTokenAgeMinutes: env.MIN_TOKEN_AGE_MINUTES,
+    },
+
+    solscanApiKey: env.SOLSCAN_API_KEY,
+
+    devTracker: {
+      enabled: env.PUMPFUN_DEV_TRACKER_ENABLED,
+      minLaunches: env.DEV_MIN_LAUNCHES,
+      minSuccessRate: env.DEV_MIN_SUCCESS_RATE,
+      maxRugRate: env.DEV_MAX_RUG_RATE,
+      minBestPeakMc: env.DEV_MIN_BEST_PEAK_MC,
+      statsUpdateIntervalMs: env.DEV_STATS_UPDATE_INTERVAL_MS,
+      discoveryIntervalMs: env.DEV_DISCOVERY_INTERVAL_MS,
+      signalCooldownMs: env.DEV_SIGNAL_COOLDOWN_MS,
     },
   };
 }

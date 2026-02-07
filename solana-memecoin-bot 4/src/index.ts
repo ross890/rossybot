@@ -10,6 +10,8 @@ import { telegramBot } from './modules/telegram.js';
 import { matureTokenScanner, matureTokenTelegram } from './modules/mature-token/index.js';
 import { dailyAutoOptimizer, thresholdOptimizer } from './modules/performance/index.js';
 import { probabilitySignalModule } from './modules/probability-signal.js';
+import { pumpfunDevMonitor } from './modules/pumpfun/dev-monitor.js';
+import { devStatsUpdater } from './modules/pumpfun/dev-stats-updater.js';
 
 // ============ STARTUP ============
 
@@ -88,6 +90,7 @@ function printStartupDiagnostics(): void {
   logger.info('🎯 STRATEGY CONFIGURATION');
   logger.info(`   Early Token Strategy: ${appConfig.trading.enableEarlyStrategy ? '✅ ENABLED (5min-90min tokens)' : '❌ DISABLED'}`);
   logger.info(`   Mature Token Strategy: ${appConfig.trading.enableMatureStrategy ? '✅ ENABLED (21+ day tokens)' : '❌ DISABLED'}`);
+  logger.info(`   Pump.fun Dev Tracker: ${appConfig.devTracker.enabled ? '✅ ENABLED (dev wallet monitoring)' : '❌ DISABLED'}`);
 
   // Signal Generation Settings
   logger.info('');
@@ -123,6 +126,9 @@ function printStartupDiagnostics(): void {
   logger.info('   ✅ Holder Growth Scanner');
   logger.info('   ✅ Narrative Scanner');
   logger.info('   ✅ KOL Wallet Tracker');
+  if (appConfig.devTracker.enabled) {
+    logger.info('   ✅ Pump.fun Dev Signal Tracker');
+  }
 
   // Analysis Modules
   logger.info('');
@@ -188,6 +194,24 @@ async function main(): Promise<void> {
     logger.warn({ error }, 'Failed to initialize probability module - 2x signals disabled');
   }
 
+  // Initialize Pump.fun Dev Tracker
+  if (appConfig.devTracker.enabled) {
+    try {
+      await pumpfunDevMonitor.initialize();
+
+      // Wire up signal delivery to Telegram
+      pumpfunDevMonitor.onSignal(async (_signal, formattedMessage) => {
+        await telegramBot.sendDevSignal(formattedMessage, _signal.token.mint);
+      });
+
+      logger.info('Pump.fun Dev Tracker ENABLED');
+    } catch (error) {
+      logger.warn({ error }, 'Failed to initialize Pump.fun Dev Tracker');
+    }
+  } else {
+    logger.info('Pump.fun Dev Tracker DISABLED');
+  }
+
   // Load saved thresholds from database
   await thresholdOptimizer.loadThresholds();
   logger.info('Threshold optimizer loaded saved thresholds');
@@ -221,6 +245,17 @@ async function main(): Promise<void> {
     logger.warn({ error }, 'Failed to start probability module');
   }
 
+  // Start Pump.fun Dev Tracker
+  if (appConfig.devTracker.enabled) {
+    try {
+      pumpfunDevMonitor.start();
+      devStatsUpdater.start();
+      logger.info('Pump.fun Dev Monitor and Stats Updater started');
+    } catch (error) {
+      logger.warn({ error }, 'Failed to start Pump.fun Dev Tracker');
+    }
+  }
+
   logger.info('Bot is running! Press Ctrl+C to stop.');
   
   // Handle graceful shutdown
@@ -235,6 +270,8 @@ async function main(): Promise<void> {
     }
     probabilitySignalModule.stop();
     dailyAutoOptimizer.stop();
+    pumpfunDevMonitor.stop();
+    devStatsUpdater.stop();
     await telegramBot.stop();
     await pool.end();
 

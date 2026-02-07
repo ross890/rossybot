@@ -13,7 +13,6 @@ config();
 const envSchema = z.object({
   // Database
   DATABASE_URL: z.string().min(1),
-  REDIS_URL: z.string().min(1),
 
   // APIs
   // Helius can be disabled when rate limited - security checks return permissive defaults
@@ -21,14 +20,6 @@ const envSchema = z.object({
   HELIUS_DISABLED: z.string().optional().transform(val => val?.toLowerCase() === 'true'),
   HELIUS_API_KEY: z.string().optional().default(''),
   HELIUS_RPC_URL: z.string().optional().default('https://mainnet.helius-rpc.com'),
-
-  // Twitter/X API - supports both Bearer Token or Consumer Key/Secret
-  TWITTER_BEARER_TOKEN: z.string().optional(),
-  TWITTER_CONSUMER_KEY: z.string().optional(),
-  TWITTER_CONSUMER_SECRET: z.string().optional(),
-  // Twitter API toggle: auto-enables when credentials exist, set to "false" to force-disable
-  // Explicitly parse string "true"/"false" from env vars (Railway passes strings)
-  TWITTER_ENABLED: z.string().optional(),
 
   // Telegram
   TELEGRAM_BOT_TOKEN: z.string().min(1),
@@ -95,17 +86,9 @@ function loadConfig(): AppConfig {
   
   return {
     databaseUrl: env.DATABASE_URL,
-    redisUrl: env.REDIS_URL,
     heliusApiKey: env.HELIUS_API_KEY,
     heliusRpcUrl: env.HELIUS_RPC_URL,
     heliusDisabled: env.HELIUS_DISABLED || false,
-    twitterBearerToken: env.TWITTER_BEARER_TOKEN || '',
-    twitterConsumerKey: env.TWITTER_CONSUMER_KEY || '',
-    twitterConsumerSecret: env.TWITTER_CONSUMER_SECRET || '',
-    // Auto-enable Twitter if credentials exist, unless explicitly disabled
-    twitterEnabled: env.TWITTER_ENABLED !== undefined
-      ? env.TWITTER_ENABLED.toLowerCase() === 'true'
-      : !!(env.TWITTER_BEARER_TOKEN || (env.TWITTER_CONSUMER_KEY && env.TWITTER_CONSUMER_SECRET)),
     telegramBotToken: env.TELEGRAM_BOT_TOKEN,
     telegramChatId: env.TELEGRAM_CHAT_ID,
     nodeEnv: env.NODE_ENV,

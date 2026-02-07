@@ -556,14 +556,9 @@ export interface AppConfig {
   trading: TradingConfig;
   screening: ScreeningConfig;
   databaseUrl: string;
-  redisUrl: string;
   heliusApiKey: string;
   heliusRpcUrl: string;
   heliusDisabled: boolean;  // Set to true to disable Helius API (security checks return permissive defaults)
-  twitterBearerToken: string;
-  twitterConsumerKey: string;
-  twitterConsumerSecret: string;
-  twitterEnabled: boolean;  // Set to false to disable Twitter API entirely
   telegramBotToken: string;
   telegramChatId: string;
   nodeEnv: string;

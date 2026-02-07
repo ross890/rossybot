@@ -15,7 +15,6 @@ import { convictionTracker } from './signals/conviction-tracker.js';
 import { kolAnalytics } from './kol/kol-analytics.js';
 import { alphaWalletManager } from './alpha/index.js';
 import { bondingCurveMonitor } from './pumpfun/bonding-monitor.js';
-import { dailyDigestGenerator } from './telegram/daily-digest.js';
 import { dailyReportGenerator, signalPerformanceTracker, thresholdOptimizer, aiQueryInterface } from './performance/index.js';
 import { volumeAnomalyScanner } from './discovery/index.js';
 import {

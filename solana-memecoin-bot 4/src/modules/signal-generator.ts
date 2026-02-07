@@ -25,7 +25,6 @@ import { convictionTracker } from './signals/conviction-tracker.js';
 import { kolSellDetector } from './signals/sell-detector.js';
 import { kolAnalytics } from './kol/kol-analytics.js';
 import { bondingCurveMonitor } from './pumpfun/bonding-monitor.js';
-import { dailyDigestGenerator } from './telegram/daily-digest.js';
 import { moonshotAssessor } from './moonshot-assessor.js';
 
 // NEW: On-chain first modules (replacing KOL-dependent logic)
@@ -274,26 +273,10 @@ export class SignalGenerator {
     // Initialize Telegram bot
     await telegramBot.initialize();
 
-    // Initialize Pump.fun bonding curve monitor (Feature 4)
-    bondingCurveMonitor.onAlert(async (alert) => {
-      const message = bondingCurveMonitor.formatAlertMessage(alert);
-      try {
-        // Send via Telegram - would need to expose a generic message method
-        logger.info({ alert: alert.type, token: alert.token.tokenMint }, 'Pump.fun alert triggered');
-      } catch (error) {
-        logger.error({ error }, 'Failed to send Pump.fun alert');
-      }
-    });
+    // Start bonding curve monitor for pump.fun token tracking
     bondingCurveMonitor.start();
 
-    // Initialize daily digest (Feature 8)
-    dailyDigestGenerator.onSend(async (message) => {
-      // Would send via telegram bot
-      logger.info('Daily digest generated');
-    });
-    dailyDigestGenerator.start(9); // 9 AM
-
-    // AUDIT FIX: Sync optimizer thresholds to on-chain scoring engine
+    // Sync optimizer thresholds to on-chain scoring engine
     // This ensures learned thresholds are used for risk assessment
     try {
       await thresholdOptimizer.loadThresholds();
@@ -2121,47 +2104,26 @@ export class SignalGenerator {
    * Get social metrics (simplified implementation)
    */
   private async getSocialMetrics(
-    tokenAddress: string,
+    _tokenAddress: string,
     metrics: TokenMetrics
   ): Promise<SocialMetrics> {
-    try {
-      // Social analyzer removed - return default metrics with on-chain proxy fallback
-      const socialMetrics: SocialMetrics = {
-        mentionVelocity1h: 0,
-        engagementQuality: 0,
-        accountAuthenticity: 0,
-        sentimentPolarity: 0,
-        kolMentionDetected: false,
-        kolMentions: [],
-        narrativeFit: this.detectNarrative(metrics),
-      };
-      return socialMetrics;
-    } catch (error) {
-      logger.debug({ error, ticker: metrics.ticker }, 'Social metrics fetch failed, using on-chain proxy');
+    // No Twitter/social API connected — derive engagement proxies from on-chain data
+    const holdersRatio = Math.min(1, metrics.holderCount / 200);
+    const volumeScore = Math.min(1, (metrics.volume24h / Math.max(1, metrics.marketCap)) / 0.3);
+    const distributionScore = Math.max(0, 1 - (metrics.top10Concentration / 75));
 
-      // HIT RATE IMPROVEMENT: Use on-chain proxy metrics instead of hardcoded 0.5 placeholders
-      // The 0.5 hardcoded values were inflating scores for tokens without real social traction
-      // Now: infer social quality from on-chain activity (holder count, volume, distribution)
-      const holdersRatio = Math.min(1, metrics.holderCount / 200); // 200 holders = 1.0
-      const volumeScore = Math.min(1, (metrics.volume24h / Math.max(1, metrics.marketCap)) / 0.3); // 30% vol/mcap = 1.0
-      const distributionScore = Math.max(0, 1 - (metrics.top10Concentration / 75)); // Well distributed = higher
+    const engagementProxy = (holdersRatio * 0.4 + volumeScore * 0.4 + distributionScore * 0.2);
+    const authenticityProxy = distributionScore * 0.7 + Math.min(0.3, holdersRatio * 0.3);
 
-      // Engagement proxy: combine volume activity with holder growth
-      const engagementProxy = (holdersRatio * 0.4 + volumeScore * 0.4 + distributionScore * 0.2);
-
-      // Authenticity proxy: good distribution + reasonable holder count suggests organic
-      const authenticityProxy = distributionScore * 0.7 + Math.min(0.3, holdersRatio * 0.3);
-
-      return {
-        mentionVelocity1h: 0,
-        engagementQuality: Math.min(0.6, engagementProxy), // Cap at 0.6 without real social data
-        accountAuthenticity: Math.min(0.6, authenticityProxy), // Cap at 0.6 without real data
-        sentimentPolarity: 0,
-        kolMentionDetected: false,
-        kolMentions: [],
-        narrativeFit: this.detectNarrative(metrics),
-      };
-    }
+    return {
+      mentionVelocity1h: 0,
+      engagementQuality: Math.min(0.6, engagementProxy),
+      accountAuthenticity: Math.min(0.6, authenticityProxy),
+      sentimentPolarity: 0,
+      kolMentionDetected: false,
+      kolMentions: [],
+      narrativeFit: this.detectNarrative(metrics),
+    };
   }
   
   /**

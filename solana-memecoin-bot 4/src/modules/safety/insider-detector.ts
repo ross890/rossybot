@@ -35,7 +35,7 @@ export class InsiderDetector {
    * Perform comprehensive insider analysis on a token
    */
   async analyzeToken(tokenMint: string): Promise<InsiderAnalysis> {
-    logger.info({ tokenMint }, 'Starting insider analysis');
+    logger.debug({ tokenMint }, 'Starting insider analysis');
 
     const result: InsiderAnalysis = {
       sameBlockBuyers: 0,
@@ -93,7 +93,7 @@ export class InsiderDetector {
       // Cap the risk score at 100
       result.insiderRiskScore = Math.min(100, result.insiderRiskScore);
 
-      logger.info({
+      logger.debug({
         tokenMint,
         insiderRiskScore: result.insiderRiskScore,
         sameBlockBuyers: result.sameBlockBuyers,

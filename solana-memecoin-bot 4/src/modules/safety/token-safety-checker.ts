@@ -42,7 +42,7 @@ export class TokenSafetyChecker {
       return dbCached;
     }
 
-    logger.info({ tokenMint }, 'Running token safety check');
+    logger.debug({ tokenMint }, 'Running token safety check');
 
     const flags: string[] = [];
     let safetyScore = 100;
@@ -135,7 +135,7 @@ export class TokenSafetyChecker {
     this.cache.set(tokenMint, { result, expiry: Date.now() + CACHE_TTL_MS });
     await this.saveToDbCache(result);
 
-    logger.info({ tokenMint, safetyScore, flags }, 'Token safety check complete');
+    logger.debug({ tokenMint, safetyScore, flags }, 'Token safety check complete');
 
     return result;
   }

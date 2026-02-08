@@ -398,11 +398,11 @@ export class SignalGenerator {
       }
 
       // Diagnostic logging - show pipeline stats every cycle
-      logger.info({
+      logger.debug({
         candidates: candidates.length,
         passed: preFiltered.length,
         failed: quickFilterFails,
-      }, '=== SCAN CYCLE: Pre-filter complete, starting token evaluation ===');
+      }, 'Scan cycle: pre-filter complete');
 
       // Step 3: Evaluate each token (KOL signals + on-chain signals)
       let safetyBlocked = 0;
@@ -451,24 +451,31 @@ export class SignalGenerator {
       this.cleanupExpiredDiscoveries();
 
       // Show where tokens are dropping off
-      logger.info({
-        evaluated: preFiltered.length,
-        safetyBlocked,
-        noMetrics,
-        screeningFailed,
-        scamRejected,
-        rugcheckBlocked,
-        compoundRugBlocked,
-        scoringFailed,
-        momentumFailed,
-        bundleBlocked,
-        tierBlocked,
-        discoveryFailed,
-        buySignals: signalsGenerated,
-        onchainSignals,
-        discoveries: discoverySignals,
-        kolValidations: kolValidationSignals,
-      }, '=== SCAN CYCLE COMPLETE: Token evaluation results ===');
+      const totalSignals = signalsGenerated + onchainSignals + discoverySignals + kolValidationSignals;
+      if (totalSignals > 0) {
+        logger.info({
+          evaluated: preFiltered.length,
+          buySignals: signalsGenerated,
+          onchainSignals,
+          discoveries: discoverySignals,
+          kolValidations: kolValidationSignals,
+        }, 'Scan cycle: signals generated');
+      } else {
+        logger.debug({
+          evaluated: preFiltered.length,
+          safetyBlocked,
+          noMetrics,
+          screeningFailed,
+          scamRejected,
+          rugcheckBlocked,
+          compoundRugBlocked,
+          scoringFailed,
+          momentumFailed,
+          bundleBlocked,
+          tierBlocked,
+          discoveryFailed,
+        }, 'Scan cycle complete: no signals');
+      }
 
       // Log scan cycle metrics for performance tracking
       const cycleTimeMs = Date.now() - cycleStartTime;
@@ -574,7 +581,7 @@ export class SignalGenerator {
     }
 
     // Log final candidate pool composition
-    logger.info({
+    logger.debug({
       totalCandidates: candidates.size,
       sources: 'DexScreener + Jupiter + Discovery Engine (volume/holder/narrative)',
     }, 'Candidate token pool assembled');
@@ -623,14 +630,14 @@ export class SignalGenerator {
     const safetyBlock = tokenSafetyChecker.shouldBlockSignal(safetyResult);
 
     if (safetyBlock.blocked) {
-      logger.info({ tokenAddress: shortAddr, reason: safetyBlock.reason }, 'EVAL: Safety blocked');
+      logger.debug({ tokenAddress: shortAddr, reason: safetyBlock.reason }, 'EVAL: Safety blocked');
       return SignalGenerator.EVAL_RESULTS.SAFETY_BLOCKED;
     }
 
     // Get comprehensive token data first (needed for both paths)
     const metrics = await getTokenMetrics(tokenAddress);
     if (!metrics) {
-      logger.info({ tokenAddress: shortAddr }, 'EVAL: No metrics available');
+      logger.debug({ tokenAddress: shortAddr }, 'EVAL: No metrics available');
       return SignalGenerator.EVAL_RESULTS.NO_METRICS;
     }
 
@@ -643,7 +650,7 @@ export class SignalGenerator {
       metrics.price
     );
     if (exclusionCheck.excluded) {
-      logger.info({
+      logger.debug({
         tokenAddress: shortAddr,
         name: metrics.name,
         ticker: metrics.ticker,
@@ -656,7 +663,7 @@ export class SignalGenerator {
     const tier = getMarketCapTier(metrics.marketCap);
     const tierConfig = TIER_CONFIGS[tier];
 
-    logger.info({
+    logger.debug({
       tokenAddress: shortAddr,
       ticker: metrics.ticker,
       mcap: metrics.marketCap,
@@ -670,7 +677,7 @@ export class SignalGenerator {
 
     // Block signals from disabled tiers (e.g., EMERGING with 11% win rate)
     if (!tierConfig.enabled) {
-      logger.info({
+      logger.debug({
         tokenAddress: shortAddr,
         ticker: metrics.ticker,
         tier,
@@ -682,7 +689,7 @@ export class SignalGenerator {
 
     // Apply tier-specific liquidity requirements
     if (metrics.liquidityPool < tierConfig.minLiquidity) {
-      logger.info({
+      logger.debug({
         tokenAddress: shortAddr,
         ticker: metrics.ticker,
         tier,
@@ -697,16 +704,16 @@ export class SignalGenerator {
       return SignalGenerator.EVAL_RESULTS.SCREENING_FAILED;
     }
 
-    logger.info({ tokenAddress: shortAddr, ticker: metrics.ticker }, 'EVAL: Passed screening, running scam filter');
+    logger.debug({ tokenAddress: shortAddr, ticker: metrics.ticker }, 'EVAL: Passed screening, running scam filter');
 
     // Run full scam filter
     const scamResult = await scamFilter.filterToken(tokenAddress);
     if (scamResult.result === 'REJECT') {
-      logger.info({ tokenAddress: shortAddr, ticker: metrics.ticker, flags: scamResult.flags }, 'EVAL: Scam filter rejected');
+      logger.debug({ tokenAddress: shortAddr, ticker: metrics.ticker, flags: scamResult.flags }, 'EVAL: Scam filter rejected');
       return SignalGenerator.EVAL_RESULTS.SCAM_REJECTED;
     }
 
-    logger.info({ tokenAddress: shortAddr, ticker: metrics.ticker }, 'EVAL: Passed scam filter, running RugCheck hard gate');
+    logger.debug({ tokenAddress: shortAddr, ticker: metrics.ticker }, 'EVAL: Passed scam filter, running RugCheck hard gate');
 
     // ============ RUGCHECK HARD GATE ============
     // RugCheck DANGER is an absolute deal-breaker — even in learning mode.
@@ -717,7 +724,7 @@ export class SignalGenerator {
       const rugDecision = rugCheckClient.getDecision(rugCheckResult);
 
       if (rugDecision.action === 'AUTO_SKIP') {
-        logger.info({
+        logger.debug({
           tokenAddress: shortAddr,
           ticker: metrics.ticker,
           rugCheckScore: rugCheckResult.score,
@@ -728,7 +735,7 @@ export class SignalGenerator {
       }
 
       if (rugDecision.action === 'NEGATIVE_MODIFIER') {
-        logger.info({
+        logger.debug({
           tokenAddress: shortAddr,
           ticker: metrics.ticker,
           rugCheckScore: rugCheckResult.score,
@@ -795,7 +802,7 @@ export class SignalGenerator {
       // This fires even in learning mode — compound rugs are too risky
       const COMPOUND_RUG_THRESHOLD = 3;
       if (rugIndicatorCount >= COMPOUND_RUG_THRESHOLD) {
-        logger.info({
+        logger.debug({
           tokenAddress: shortAddr,
           ticker: metrics.ticker,
           rugIndicatorCount,
@@ -806,7 +813,7 @@ export class SignalGenerator {
       }
 
       if (rugIndicatorCount >= 2) {
-        logger.info({
+        logger.debug({
           tokenAddress: shortAddr,
           ticker: metrics.ticker,
           rugIndicatorCount,
@@ -844,7 +851,7 @@ export class SignalGenerator {
 
     // Log DexScreener/CTO status if notable
     if (dexScreenerInfo.hasPaidDexscreener || ctoAnalysis.isCTO) {
-      logger.info({
+      logger.debug({
         address: tokenAddress.slice(0, 8),
         dexPaid: dexScreenerInfo.hasPaidDexscreener,
         boosts: dexScreenerInfo.boostCount,
@@ -952,7 +959,7 @@ export class SignalGenerator {
     // ============ PATH B: NO KOL - ON-CHAIN MOMENTUM ANALYSIS ============
     // NEW: Use on-chain momentum analysis instead of social metrics
 
-    logger.info({ tokenAddress: shortAddr, ticker: metrics.ticker }, 'EVAL: Entering PATH B (no KOL) - calculating on-chain score');
+    logger.debug({ tokenAddress: shortAddr, ticker: metrics.ticker }, 'EVAL: Entering PATH B (no KOL) - calculating on-chain score');
 
     // Step 1: Calculate comprehensive on-chain score (handles momentum + bundle internally)
     const onChainScore = await onChainScoringEngine.calculateScore(tokenAddress, metrics);
@@ -965,7 +972,7 @@ export class SignalGenerator {
     const socialBonus = Math.min(25, socialScore.score);
     const adjustedTotal = Math.min(100, onChainScore.total + socialBonus);
 
-    logger.info({
+    logger.debug({
       tokenAddress: shortAddr,
       ticker: metrics.ticker,
       onChainTotal: onChainScore.total,
@@ -985,7 +992,7 @@ export class SignalGenerator {
     // but HIGH on-chain risk is an additional safety net
     const isLearning = appConfig.trading.learningMode;
     if (onChainScore.riskLevel === 'CRITICAL' || onChainScore.riskLevel === 'HIGH') {
-      logger.info({
+      logger.debug({
         tokenAddress: shortAddr,
         ticker: metrics.ticker,
         riskLevel: onChainScore.riskLevel,
@@ -1025,7 +1032,7 @@ export class SignalGenerator {
     if (metrics.tokenAge >= PROVEN_RUNNER_MIN_AGE) {
       // TRACK 1: PROVEN RUNNER - Token has survived, time is trust
       signalTrack = SignalTrack.PROVEN_RUNNER;
-      logger.info({
+      logger.debug({
         tokenAddress: shortAddr,
         ticker: metrics.ticker,
         tokenAgeMinutes: metrics.tokenAge,
@@ -1034,7 +1041,7 @@ export class SignalGenerator {
 
     } else if (metrics.tokenAge < 2) {
       // BLOCKED: Tokens under 2 minutes are too risky (instant dumps)
-      logger.info({
+      logger.debug({
         tokenAddress: shortAddr,
         ticker: metrics.ticker,
         tokenAgeMinutes: metrics.tokenAge,
@@ -1075,7 +1082,7 @@ export class SignalGenerator {
           kolReputationTier = bestKolTier;
         }
 
-        logger.info({
+        logger.debug({
           tokenAddress: shortAddr,
           ticker: metrics.ticker,
           tokenAgeMinutes: metrics.tokenAge,
@@ -1084,7 +1091,7 @@ export class SignalGenerator {
           kolTier: kolReputationTier || 'NONE',
         }, 'EVAL: Routing to EARLY QUALITY track (KOL bonus applied if found)');
       } else {
-        logger.info({
+        logger.debug({
           tokenAddress: shortAddr,
           ticker: metrics.ticker,
           tokenAgeMinutes: metrics.tokenAge,
@@ -1098,7 +1105,7 @@ export class SignalGenerator {
       // These tokens have shown some survival but haven't hit the 90-min mark yet
       // They can still generate signals if they have strong metrics
       signalTrack = SignalTrack.PROVEN_RUNNER;
-      logger.info({
+      logger.debug({
         tokenAddress: shortAddr,
         ticker: metrics.ticker,
         tokenAgeMinutes: metrics.tokenAge,
@@ -1127,7 +1134,7 @@ export class SignalGenerator {
     // In production mode, keep the momentum hard gate for quality filtering.
 
     if (!isLearningMode && onChainScore.components.momentum < MIN_MOMENTUM_SCORE) {
-      logger.info({
+      logger.debug({
         tokenAddress: shortAddr,
         ticker: metrics.ticker,
         momentumScore: onChainScore.components.momentum,
@@ -1139,7 +1146,7 @@ export class SignalGenerator {
 
     // Log momentum status in learning mode
     if (isLearningMode) {
-      logger.info({
+      logger.debug({
         tokenAddress: shortAddr,
         ticker: metrics.ticker,
         momentumScore: onChainScore.components.momentum,
@@ -1171,7 +1178,7 @@ export class SignalGenerator {
     // Use adjustedTotal (which includes social verification bonus) for threshold comparison
     // This rewards tokens with verified social presence (Twitter, Telegram, etc.)
     if (adjustedTotal < effectiveMinScore || shouldBlockByRecommendation) {
-      logger.info({
+      logger.debug({
         tokenAddress,
         ticker: metrics.ticker,
         onChainScore: onChainScore.total,
@@ -1185,7 +1192,7 @@ export class SignalGenerator {
       return SignalGenerator.EVAL_RESULTS.DISCOVERY_FAILED;
     }
 
-    logger.info({
+    logger.debug({
       tokenAddress,
       ticker: metrics.ticker,
       onChainScore: onChainScore.total,
@@ -1215,7 +1222,7 @@ export class SignalGenerator {
       const MIN_HOLDER_GROWTH_RATE = isLearningMode ? 0 : 0.01;
 
       if (holderGrowthRate < MIN_HOLDER_GROWTH_RATE && !isLearningMode) {
-        logger.info({
+        logger.debug({
           tokenAddress: shortAddr,
           ticker: metrics.ticker,
           holderGrowthRate,
@@ -1250,7 +1257,7 @@ export class SignalGenerator {
       // We accept more risk and manage it via position sizing
       const EARLY_QUALITY_MIN_SAFETY = isLearningMode ? 35 : 50;
       if (safetyResult.safetyScore < EARLY_QUALITY_MIN_SAFETY) {
-        logger.info({
+        logger.debug({
           tokenAddress: shortAddr,
           ticker: metrics.ticker,
           safetyScore: safetyResult.safetyScore,
@@ -1264,7 +1271,7 @@ export class SignalGenerator {
       // 2. Bundle risk required - VOLUME STRATEGY: Accept higher bundle risk
       const EARLY_QUALITY_MAX_BUNDLE_RISK = isLearningMode ? 70 : 55;
       if (bundleAnalysis.riskScore > EARLY_QUALITY_MAX_BUNDLE_RISK) {
-        logger.info({
+        logger.debug({
           tokenAddress: shortAddr,
           ticker: metrics.ticker,
           bundleRiskScore: bundleAnalysis.riskScore,
@@ -1281,7 +1288,7 @@ export class SignalGenerator {
       // - onChainScore.components.momentum (includes holder growth)
       // The weighted total score already penalizes tokens with poor liquidity/growth
 
-      logger.info({
+      logger.debug({
         tokenAddress: shortAddr,
         ticker: metrics.ticker,
         safetyScore: safetyResult.safetyScore,
@@ -1348,7 +1355,7 @@ export class SignalGenerator {
     const MAX_SERIOUS_WARNINGS = isLearningMode ? 99 : 4;  // Skip in learning mode
 
     if (seriousWarnings.length >= MAX_SERIOUS_WARNINGS) {
-      logger.info({
+      logger.debug({
         tokenAddress,
         ticker: metrics.ticker,
         warningCount: seriousWarnings.length,
@@ -1360,7 +1367,7 @@ export class SignalGenerator {
     }
 
     if (isLearningMode && seriousWarnings.length >= 4) {
-      logger.info({
+      logger.debug({
         tokenAddress,
         ticker: metrics.ticker,
         warningCount: seriousWarnings.length,
@@ -1652,7 +1659,7 @@ export class SignalGenerator {
     const buyCheck = scoringEngine.meetsBuyRequirements(score, kolActivities);
 
     if (!buyCheck.meets) {
-      logger.info({
+      logger.debug({
         tokenAddress,
         compositeScore: score.compositeScore,
         reason: buyCheck.reason,

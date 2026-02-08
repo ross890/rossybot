@@ -162,7 +162,7 @@ class TokenCrawler {
         }
       }
 
-      logger.info({
+      logger.debug({
         profileCount: profiles.length,
         boostedCount: boosted.length,
         newTokens: allAddresses.size,
@@ -287,7 +287,7 @@ class TokenCrawler {
         lastPolled: Date.now(),
       });
 
-      logger.info({
+      logger.debug({
         address: address.slice(0, 8),
         ticker,
         mc: mc.toLocaleString(),

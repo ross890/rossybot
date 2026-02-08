@@ -85,7 +85,7 @@ export function createDevSignal(
     timestamp: new Date(),
   };
 
-  logger.info({
+  logger.debug({
     devWallet: dev.walletAddress,
     tokenMint,
     priority,

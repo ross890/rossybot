@@ -219,7 +219,7 @@ class HeliusClient {
     const total = this.cacheStats.hits + this.cacheStats.misses;
     const hitRate = total > 0 ? ((this.cacheStats.hits / total) * 100).toFixed(1) : '0';
 
-    logger.info({
+    logger.debug({
       hits: this.cacheStats.hits,
       misses: this.cacheStats.misses,
       rateLimited: this.cacheStats.rateLimited,
@@ -229,7 +229,7 @@ class HeliusClient {
         holders: this.holderCache.size,
         accountInfo: this.accountInfoCache.size,
       },
-    }, '📊 Helius API cache statistics (5 min window)');
+    }, 'Helius API cache statistics (5 min window)');
 
     // Reset stats for next window
     this.cacheStats = { hits: 0, misses: 0, rateLimited: 0 };
@@ -614,7 +614,7 @@ class DexScreenerClient {
         this.pairsCache.set(address, { data: [], expiry: Date.now() + this.rateLimitBackoff });
         this.logRateLimit();
       } else {
-        logger.info(`DexScreener getTokenPairs failed: status=${status} error=${message} address=${address.slice(0, 8)}...`);
+        logger.debug(`DexScreener getTokenPairs failed: status=${status} error=${message} address=${address.slice(0, 8)}...`);
       }
 
       return [];
@@ -657,7 +657,7 @@ class DexScreenerClient {
         .filter((p: any) => p.chainId === 'solana')
         .slice(0, limit);
 
-      logger.info({ count: solanaPairs.length }, 'Fetched new Solana pairs from DexScreener token-boosts');
+      logger.debug({ count: solanaPairs.length }, 'Fetched new Solana pairs from DexScreener token-boosts');
       return solanaPairs;
     } catch (error: any) {
       logger.debug({ error: error?.message, status: error?.response?.status }, 'token-boosts endpoint failed, trying token-profiles');
@@ -672,7 +672,7 @@ class DexScreenerClient {
           .filter((p: any) => p.chainId === 'solana')
           .slice(0, limit);
 
-        logger.info({ count: solanaTokens.length }, 'Fetched Solana tokens from DexScreener token-profiles');
+        logger.debug({ count: solanaTokens.length }, 'Fetched Solana tokens from DexScreener token-profiles');
         return solanaTokens;
       } catch (fallbackError: any) {
         logger.warn({
@@ -704,7 +704,7 @@ class DexScreenerClient {
         }
       }
 
-      logger.info({ count: addresses.length }, 'Fetched trending Solana token addresses from token-boosts');
+      logger.debug({ count: addresses.length }, 'Fetched trending Solana token addresses from token-boosts');
 
       // If we have enough, return early
       if (addresses.length >= limit) {
@@ -732,7 +732,7 @@ class DexScreenerClient {
         }
       }
 
-      logger.info({ count: addresses.length }, 'Fetched trending Solana token addresses (combined)');
+      logger.debug({ count: addresses.length }, 'Fetched trending Solana token addresses (combined)');
     } catch (error: any) {
       logger.warn({
         error: error?.message,
@@ -965,7 +965,7 @@ export async function analyzeCTO(
   };
 
   if (isCTO) {
-    logger.info({
+    logger.debug({
       address: address.slice(0, 8),
       confidence: ctoConfidence,
       indicators,
@@ -1004,7 +1004,7 @@ class JupiterClient {
       // Check cache first
       const now = Date.now();
       if (this.tokenListCache && this.tokenListCache.expiry > now) {
-        logger.info({ count: this.tokenListCache.tokens.length, cached: true }, 'Returning cached Jupiter tokens');
+        logger.debug({ count: this.tokenListCache.tokens.length, cached: true }, 'Returning cached Jupiter tokens');
         return this.tokenListCache.tokens.slice(0, limit);
       }
 
@@ -1023,7 +1023,7 @@ class JupiterClient {
         expiry: now + this.CACHE_TTL_MS,
       };
 
-      logger.info({ totalTokens: mints.length }, 'Fetched Jupiter verified tokens');
+      logger.debug({ totalTokens: mints.length }, 'Fetched Jupiter verified tokens');
       return mints.slice(0, limit);
     } catch (error: any) {
       const status = error?.response?.status;
@@ -1047,7 +1047,7 @@ class JupiterClient {
       const tokens = Array.isArray(response.data) ? response.data : [];
       const mints = tokens.map((t: any) => t.id).filter((id: any) => id);
 
-      logger.info({ count: mints.length }, 'Fetched Jupiter recent tokens');
+      logger.debug({ count: mints.length }, 'Fetched Jupiter recent tokens');
       return mints.slice(0, limit);
     } catch (error: any) {
       logger.warn({ error: error?.message }, 'Failed to fetch Jupiter recent tokens');
@@ -1429,7 +1429,7 @@ export async function analyzeTokenContract(address: string): Promise<TokenContra
     const mintInfo = await heliusClient.getTokenMintInfo(address);
 
     // Log what Helius actually returned
-    logger.info(
+    logger.debug(
       `Helius security for ${address.slice(0, 8)}: mintAuth=${mintInfo?.mintAuthority || 'null'} freezeAuth=${mintInfo?.freezeAuthority || 'null'}`
     );
 

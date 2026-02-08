@@ -121,7 +121,7 @@ export class BondingCurveMonitor {
     if (status && !status.isMigrated) {
       this.trackedTokens.set(tokenMint, status);
       await this.saveToDb(status);
-      logger.info({ tokenMint, progress: status.bondingProgress }, 'Started tracking Pump.fun token');
+      logger.debug({ tokenMint, progress: status.bondingProgress }, 'Started tracking Pump.fun token');
     }
 
     return status;

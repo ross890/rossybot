@@ -122,7 +122,7 @@ export class DevStatsUpdater {
    * Recalculate dev success rates
    */
   async updateStats(): Promise<void> {
-    logger.info('Running dev stats update...');
+    logger.debug('Running dev stats update...');
 
     try {
       // 1. Get all dev tokens launched in last 7 days
@@ -171,7 +171,7 @@ export class DevStatsUpdater {
       // 3. Recalculate dev stats for all active devs
       await this.recalculateAllDevStats();
 
-      logger.info({ updatedTokens: updatedCount }, 'Dev stats update complete');
+      logger.debug({ updatedTokens: updatedCount }, 'Dev stats update complete');
     } catch (error) {
       logger.error({ error }, 'Dev stats update failed');
     }
@@ -268,7 +268,7 @@ export class DevStatsUpdater {
    * Uses Solscan to find recent pump.fun launches and group by deployer
    */
   async discoverNewDevs(): Promise<string[]> {
-    logger.info('Running dev discovery scan...');
+    logger.debug('Running dev discovery scan...');
     const discovered: string[] = [];
 
     try {
@@ -320,7 +320,7 @@ export class DevStatsUpdater {
         await this.sleep(500);
       }
 
-      logger.info({ discoveredCount: discovered.length }, 'Dev discovery scan complete');
+      logger.debug({ discoveredCount: discovered.length }, 'Dev discovery scan complete');
     } catch (error) {
       logger.error({ error }, 'Dev discovery scan failed');
     }

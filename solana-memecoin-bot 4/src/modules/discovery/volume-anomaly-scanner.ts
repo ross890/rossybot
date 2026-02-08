@@ -165,7 +165,7 @@ class VolumeAnomalyScanner {
    */
   private async runScanCycle(): Promise<void> {
     try {
-      logger.info('Volume anomaly scan cycle starting...');
+      logger.debug('Volume anomaly scan cycle starting...');
 
       // Step 1: Get candidate tokens to check (from trending + recent signals)
       const candidates = await this.getCandidateTokens();

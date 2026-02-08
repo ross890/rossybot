@@ -102,7 +102,6 @@ export class PerformanceLogger {
     this.isInitialized = true;
 
     await this.logSystem('INFO', 'Performance logger initialized');
-    logger.info('Performance Logger initialized - metrics collection active');
   }
 
   /**

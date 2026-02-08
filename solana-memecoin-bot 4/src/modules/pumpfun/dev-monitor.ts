@@ -519,7 +519,7 @@ export class PumpfunDevMonitor {
       const cooldownMs = appConfig.devTracker.signalCooldownMs;
       const lastSignal = this.lastSignalTime.get(walletAddress) || 0;
       if (Date.now() - lastSignal < cooldownMs) {
-        logger.info({ walletAddress, tokenMint }, 'Dev signal suppressed by cooldown');
+        logger.debug({ walletAddress, tokenMint }, 'Dev signal suppressed by cooldown');
         return;
       }
 
@@ -532,7 +532,7 @@ export class PumpfunDevMonitor {
       // Run basic safety checks (lightweight — honeypot only for speed)
       const safetyOk = await this.runLightweightSafetyCheck(tokenMint);
       if (!safetyOk) {
-        logger.info({ tokenMint, walletAddress }, 'Dev token failed lightweight safety check');
+        logger.debug({ tokenMint, walletAddress }, 'Dev token failed lightweight safety check');
         return;
       }
 
@@ -602,7 +602,7 @@ export class PumpfunDevMonitor {
         const { rugCheckClient } = await import('../rugcheck.js');
         const rugResult = await rugCheckClient.checkToken(tokenMint);
         if (rugResult && rugResult.score === 'DANGER') {
-          logger.info({ tokenMint, risks: rugResult.risks }, 'Dev token flagged DANGER by RugCheck');
+          logger.debug({ tokenMint, risks: rugResult.risks }, 'Dev token flagged DANGER by RugCheck');
           return false;
         }
       } catch {

@@ -64,7 +64,7 @@ class RugCheckClient {
       // Cache the result
       rugCheckCache.set(contractAddress, result, RUGCHECK_CACHE_TTL_MS);
 
-      logger.info({
+      logger.debug({
         address: contractAddress.slice(0, 8),
         score: result.score,
         risks: result.risks.length,

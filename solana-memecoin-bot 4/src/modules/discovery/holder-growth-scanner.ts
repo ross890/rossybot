@@ -176,7 +176,7 @@ class HolderGrowthScanner {
    */
   private async runScanCycle(): Promise<void> {
     try {
-      logger.info('Holder growth scan cycle starting...');
+      logger.debug('Holder growth scan cycle starting...');
 
       // Step 1: Get candidate tokens
       const candidates = await this.getCandidateTokens();

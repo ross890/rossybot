@@ -74,11 +74,12 @@ async function getDexScreenerTokenInfo(tokenMint: string): Promise<{
 } | null> {
   try {
     const response = await axios.get(
-      `https://api.dexscreener.com/latest/dex/tokens/${tokenMint}`,
+      `https://api.dexscreener.com/token-pairs/v1/solana/${tokenMint}`,
       { timeout: 8000 }
     );
 
-    const pairs = response.data?.pairs;
+    // New endpoint returns array directly instead of { pairs: [...] }
+    const pairs = Array.isArray(response.data) ? response.data : (response.data?.pairs || []);
     if (!pairs || pairs.length === 0) return null;
 
     return {

@@ -100,13 +100,23 @@ interface DexScreenerPairData {
 class DexScreenerCrawlerClient {
   private client: AxiosInstance;
   private cache = new Map<string, { data: DexScreenerPairData[]; expiry: number }>();
-  private lastRequestTime = 0;
+  private lastDexRequestTime = 0;
+  private lastBoostRequestTime = 0;
   private rateLimitBackoff = 0;
+
+  // Cache for boost/profile results (shared across methods, 30s TTL)
+  private boostCache: { data: any[]; expiry: number } | null = null;
+  private topBoostCache: { data: any[]; expiry: number } | null = null;
+  private profileCache: { data: any[]; expiry: number } | null = null;
 
   constructor() {
     this.client = axios.create({
       baseURL: 'https://api.dexscreener.com',
       timeout: 10000,
+      headers: {
+        'Accept': 'application/json',
+        'User-Agent': 'Mozilla/5.0 (compatible; SolanaBot/1.0)',
+      },
     });
 
     // Cache cleanup every 5 minutes
@@ -118,20 +128,29 @@ class DexScreenerCrawlerClient {
     }, 5 * 60 * 1000);
   }
 
-  private async rateLimit(): Promise<void> {
-    const wait = CONFIG.MIN_REQUEST_INTERVAL_MS + this.rateLimitBackoff - (Date.now() - this.lastRequestTime);
+  // DEX endpoints rate limit: 300 req/min
+  private async dexRateLimit(): Promise<void> {
+    const wait = CONFIG.MIN_REQUEST_INTERVAL_MS + this.rateLimitBackoff - (Date.now() - this.lastDexRequestTime);
     if (wait > 0) await new Promise(r => setTimeout(r, wait));
-    this.lastRequestTime = Date.now();
+    this.lastDexRequestTime = Date.now();
+  }
+
+  // Boost/profile endpoints rate limit: 60 req/min
+  private async boostRateLimit(): Promise<void> {
+    const wait = 1100 + this.rateLimitBackoff - (Date.now() - this.lastBoostRequestTime);
+    if (wait > 0) await new Promise(r => setTimeout(r, wait));
+    this.lastBoostRequestTime = Date.now();
   }
 
   async getTokenPairs(address: string): Promise<DexScreenerPairData[]> {
     const cached = this.cache.get(address);
     if (cached && cached.expiry > Date.now()) return cached.data;
 
-    await this.rateLimit();
+    await this.dexRateLimit();
     try {
-      const res = await this.client.get(`/latest/dex/tokens/${address}`);
-      const pairs = res.data.pairs?.filter((p: any) => p.chainId === 'solana') || [];
+      const res = await this.client.get(`/token-pairs/v1/solana/${address}`);
+      const rawPairs = Array.isArray(res.data) ? res.data : (res.data.pairs || []);
+      const pairs = rawPairs.filter((p: any) => p.chainId === 'solana') || [];
       this.cache.set(address, { data: pairs, expiry: Date.now() + CONFIG.CACHE_TTL_MS });
 
       if (this.rateLimitBackoff > 0) {
@@ -147,41 +166,102 @@ class DexScreenerCrawlerClient {
     }
   }
 
+  private async fetchBoostData(): Promise<any[]> {
+    const now = Date.now();
+    if (this.boostCache && this.boostCache.expiry > now) return this.boostCache.data;
+    await this.boostRateLimit();
+    const res = await this.client.get('/token-boosts/latest/v1');
+    const data = res.data || [];
+    this.boostCache = { data, expiry: now + CONFIG.CACHE_TTL_MS };
+    return data;
+  }
+
+  private async fetchTopBoostData(): Promise<any[]> {
+    const now = Date.now();
+    if (this.topBoostCache && this.topBoostCache.expiry > now) return this.topBoostCache.data;
+    await this.boostRateLimit();
+    const res = await this.client.get('/token-boosts/top/v1');
+    const data = res.data || [];
+    this.topBoostCache = { data, expiry: now + CONFIG.CACHE_TTL_MS };
+    return data;
+  }
+
+  private async fetchProfileData(): Promise<any[]> {
+    const now = Date.now();
+    if (this.profileCache && this.profileCache.expiry > now) return this.profileCache.data;
+    await this.boostRateLimit();
+    const res = await this.client.get('/token-profiles/latest/v1');
+    const data = res.data || [];
+    this.profileCache = { data, expiry: now + CONFIG.CACHE_TTL_MS };
+    return data;
+  }
+
   async getNewSolanaPairs(limit = 50): Promise<string[]> {
-    await this.rateLimit();
+    // Try token-boosts/latest first
     try {
-      // Primary: token-boosts endpoint
-      const res = await this.client.get('/token-boosts/latest/v1');
-      const pairs = (res.data || [])
-        .filter((p: any) => p.chainId === 'solana')
-        .slice(0, limit);
-      return pairs.map((p: any) => p.tokenAddress).filter(Boolean);
+      const data = await this.fetchBoostData();
+      const pairs = data.filter((p: any) => p.chainId === 'solana').slice(0, limit);
+      if (pairs.length > 0) return pairs.map((p: any) => p.tokenAddress).filter(Boolean);
+    } catch { /* try next */ }
+
+    // Fallback 1: token-boosts/top
+    try {
+      const data = await this.fetchTopBoostData();
+      const pairs = data.filter((p: any) => p.chainId === 'solana').slice(0, limit);
+      if (pairs.length > 0) return pairs.map((p: any) => p.tokenAddress).filter(Boolean);
+    } catch { /* try next */ }
+
+    // Fallback 2: token-profiles
+    try {
+      const data = await this.fetchProfileData();
+      const profiles = data.filter((p: any) => p.chainId === 'solana').slice(0, limit);
+      return profiles.map((p: any) => p.tokenAddress).filter(Boolean);
     } catch {
-      // Fallback: token-profiles endpoint
-      try {
-        const res = await this.client.get('/token-profiles/latest/v1');
-        const profiles = (res.data || [])
-          .filter((p: any) => p.chainId === 'solana')
-          .slice(0, limit);
-        return profiles.map((p: any) => p.tokenAddress).filter(Boolean);
-      } catch {
-        return [];
-      }
+      return [];
     }
   }
 
   async getTrendingSolana(limit = 50): Promise<string[]> {
-    await this.rateLimit();
+    const addresses: string[] = [];
+
+    // Source 1: token-boosts/latest
     try {
-      const res = await this.client.get('/token-boosts/latest/v1');
-      const tokens = (res.data || [])
-        .filter((p: any) => p.chainId === 'solana' && p.amount > 0)
-        .sort((a: any, b: any) => (b.amount || 0) - (a.amount || 0))
-        .slice(0, limit);
-      return tokens.map((t: any) => t.tokenAddress).filter(Boolean);
-    } catch {
-      return [];
+      const data = await this.fetchBoostData();
+      for (const t of data) {
+        if (t.chainId === 'solana' && t.tokenAddress && !addresses.includes(t.tokenAddress)) {
+          addresses.push(t.tokenAddress);
+          if (addresses.length >= limit) break;
+        }
+      }
+    } catch { /* continue */ }
+
+    // Source 2: token-boosts/top (sorted by amount)
+    if (addresses.length < limit) {
+      try {
+        const data = await this.fetchTopBoostData();
+        for (const t of data) {
+          if (t.chainId === 'solana' && t.tokenAddress && !addresses.includes(t.tokenAddress)) {
+            addresses.push(t.tokenAddress);
+            if (addresses.length >= limit) break;
+          }
+        }
+      } catch { /* continue */ }
     }
+
+    // Source 3: token-profiles
+    if (addresses.length < limit) {
+      try {
+        const data = await this.fetchProfileData();
+        for (const t of data) {
+          if (t.chainId === 'solana' && t.tokenAddress && !addresses.includes(t.tokenAddress)) {
+            addresses.push(t.tokenAddress);
+            if (addresses.length >= limit) break;
+          }
+        }
+      } catch { /* continue */ }
+    }
+
+    return addresses;
   }
 }
 

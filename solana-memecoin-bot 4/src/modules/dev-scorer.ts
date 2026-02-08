@@ -322,13 +322,15 @@ class DevWalletScorer {
     try {
       const response = await dexScreenerRateLimiter.execute(
         () => axios.get(
-          `https://api.dexscreener.com/latest/dex/tokens/${tokenAddress}`,
+          `https://api.dexscreener.com/token-pairs/v1/solana/${tokenAddress}`,
           { timeout: 10000 }
         ),
-        `/latest/dex/tokens/${tokenAddress.slice(0, 8)}`
+        `/token-pairs/v1/solana/${tokenAddress.slice(0, 8)}`
       );
 
-      const pairs = (response.data?.pairs || []).filter(
+      // New endpoint returns array directly instead of { pairs: [...] }
+      const rawPairs = Array.isArray(response.data) ? response.data : (response.data?.pairs || []);
+      const pairs = rawPairs.filter(
         (p: any) => p.chainId === 'solana'
       );
 

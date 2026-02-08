@@ -35,9 +35,9 @@ const envSchema = z.object({
   // Trading (with defaults)
   MAX_MEMECOIN_PORTFOLIO_PERCENT: z.coerce.number().default(20),
   DEFAULT_POSITION_SIZE_PERCENT: z.coerce.number().default(2),
-  MAX_SIGNALS_PER_HOUR: z.coerce.number().default(50),   // Increased from 5 for better data collection
-  MAX_SIGNALS_PER_DAY: z.coerce.number().default(200),   // Increased from 20 for learning phase
-  MIN_SCORE_BUY_SIGNAL: z.coerce.number().default(45),
+  MAX_SIGNALS_PER_HOUR: z.coerce.number().default(15),   // Tightened from 50 to reduce noise
+  MAX_SIGNALS_PER_DAY: z.coerce.number().default(50),    // Tightened from 200 to focus on quality
+  MIN_SCORE_BUY_SIGNAL: z.coerce.number().default(55),   // Raised from 45 for higher quality signals
   MIN_SCORE_WATCH_SIGNAL: z.coerce.number().default(30),
 
   // Learning mode (default: true - allows more signals for ML training)
@@ -49,7 +49,7 @@ const envSchema = z.object({
   // EARLY_STRATEGY: Original strategy for new tokens (5min-90min old, high volume signals)
   // MATURE_STRATEGY: New strategy for established tokens (21+ days old, high quality signals)
   ENABLE_EARLY_STRATEGY: z.string().optional().transform(val => val?.toLowerCase() !== 'false').default('true'),
-  ENABLE_MATURE_STRATEGY: z.string().optional().transform(val => val?.toLowerCase() !== 'false').default('true'),
+  ENABLE_MATURE_STRATEGY: z.string().optional().transform(val => val?.toLowerCase() === 'true').default('false'),
   
   // Pump.fun Dev Tracker
   PUMPFUN_DEV_TRACKER_ENABLED: z.string().optional().transform(val => val?.toLowerCase() !== 'false').default('true'),
@@ -65,11 +65,11 @@ const envSchema = z.object({
   // Screening (with defaults) - Aggressively optimized for early entries
   MIN_MARKET_CAP: z.coerce.number().default(50000),       // No tokens below $50K MC
   MAX_MARKET_CAP: z.coerce.number().default(25000000),   // Raised from 15M for broader range
-  MIN_24H_VOLUME: z.coerce.number().default(500),        // Lowered from 3k - very early tokens have tiny volume
-  MIN_VOLUME_MCAP_RATIO: z.coerce.number().default(0.01), // Lowered from 0.05 - more flexibility for early tokens
-  MIN_HOLDER_COUNT: z.coerce.number().default(5),        // Lowered from 20 - brand new tokens have few holders
-  MAX_TOP10_CONCENTRATION: z.coerce.number().default(90), // Raised from 75% - memecoins are concentrated by nature
-  MIN_LIQUIDITY_POOL: z.coerce.number().default(500),    // Lowered from 2k - early gems start with tiny liquidity
+  MIN_24H_VOLUME: z.coerce.number().default(3000),        // Raised from 500 — need real volume
+  MIN_VOLUME_MCAP_RATIO: z.coerce.number().default(0.03), // Raised from 0.01 — need active trading
+  MIN_HOLDER_COUNT: z.coerce.number().default(15),        // Raised from 5 — need some distribution
+  MAX_TOP10_CONCENTRATION: z.coerce.number().default(80), // Tightened from 90% — less whale risk
+  MIN_LIQUIDITY_POOL: z.coerce.number().default(5000),    // Raised from 500 — avoid illiquid traps
   MIN_TOKEN_AGE_MINUTES: z.coerce.number().default(1),   // Lowered from 5 mins - only reject truly instant tokens
 });
 

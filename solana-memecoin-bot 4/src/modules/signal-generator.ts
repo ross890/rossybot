@@ -1165,15 +1165,12 @@ export class SignalGenerator {
     // - This caused ALL tokens with scores 30-39 to be blocked despite passing numerical check
     // (isLearningMode already defined above in momentum check)
 
-    // In learning mode: only block STRONG_AVOID (score < 25) to maximize data collection
-    // In production mode: block both AVOID and STRONG_AVOID for quality filtering
-    const shouldBlockByRecommendation = isLearningMode
-      ? onChainScore.recommendation === 'STRONG_AVOID'
-      : (onChainScore.recommendation === 'STRONG_AVOID' || onChainScore.recommendation === 'AVOID');
+    // Block both AVOID and STRONG_AVOID regardless of mode — quality over quantity
+    const shouldBlockByRecommendation =
+      onChainScore.recommendation === 'STRONG_AVOID' || onChainScore.recommendation === 'AVOID';
 
-    // LEARNING MODE: Use lower total score threshold (20 vs 30) to collect more training data
-    // The weighted scoring already balances momentum/safety/structure - let ML learn correlations
-    const effectiveMinScore = isLearningMode ? Math.min(MIN_ONCHAIN_SCORE, 20) : MIN_ONCHAIN_SCORE;
+    // Use the optimizer's threshold directly — no more learning mode discount
+    const effectiveMinScore = MIN_ONCHAIN_SCORE;
 
     // Use adjustedTotal (which includes social verification bonus) for threshold comparison
     // This rewards tokens with verified social presence (Twitter, Telegram, etc.)
@@ -1215,13 +1212,10 @@ export class SignalGenerator {
     const holderGrowthRate = momentumData?.holderGrowthRate || 0;
 
     if (signalTrack === SignalTrack.PROVEN_RUNNER) {
-      // PROVEN RUNNER: Holder growth requirement
-      // VOLUME STRATEGY: Lowered from 0.03 to 0.01 (1 new holder per 100 minutes)
-      // Stable tokens with minimal growth can still pump on news/catalysts
-      // We want volume - let position sizing manage risk
-      const MIN_HOLDER_GROWTH_RATE = isLearningMode ? 0 : 0.01;
+      // PROVEN RUNNER: Require some holder growth — dead tokens don't pump
+      const MIN_HOLDER_GROWTH_RATE = 0.01;
 
-      if (holderGrowthRate < MIN_HOLDER_GROWTH_RATE && !isLearningMode) {
+      if (holderGrowthRate < MIN_HOLDER_GROWTH_RATE) {
         logger.debug({
           tokenAddress: shortAddr,
           ticker: metrics.ticker,
@@ -1230,15 +1224,6 @@ export class SignalGenerator {
           track: 'PROVEN_RUNNER',
         }, 'EVAL: BLOCKED - Holder growth too low');
         return SignalGenerator.EVAL_RESULTS.DISCOVERY_FAILED;
-      }
-
-      if (isLearningMode) {
-        logger.debug({
-          tokenAddress: shortAddr,
-          ticker: metrics.ticker,
-          holderGrowthRate,
-          note: 'Learning mode: holder growth requirement skipped',
-        }, 'EVAL: PROVEN_RUNNER - holder growth check bypassed');
       }
     } else if (signalTrack === SignalTrack.EARLY_QUALITY) {
       // EARLY QUALITY: Simplified requirements (reduced from 4 to 2)
@@ -1253,9 +1238,8 @@ export class SignalGenerator {
       // LEARNING MODE FIX: Relax these requirements significantly in learning mode
       // to collect more diverse training data for the ML model.
 
-      // 1. Safety score required - VOLUME STRATEGY: Lowered thresholds
-      // We accept more risk and manage it via position sizing
-      const EARLY_QUALITY_MIN_SAFETY = isLearningMode ? 35 : 50;
+      // 1. Safety score required — no learning mode discount, quality matters
+      const EARLY_QUALITY_MIN_SAFETY = 55;
       if (safetyResult.safetyScore < EARLY_QUALITY_MIN_SAFETY) {
         logger.debug({
           tokenAddress: shortAddr,
@@ -1268,8 +1252,8 @@ export class SignalGenerator {
         return SignalGenerator.EVAL_RESULTS.DISCOVERY_FAILED;
       }
 
-      // 2. Bundle risk required - VOLUME STRATEGY: Accept higher bundle risk
-      const EARLY_QUALITY_MAX_BUNDLE_RISK = isLearningMode ? 70 : 55;
+      // 2. Bundle risk required — no learning mode discount
+      const EARLY_QUALITY_MAX_BUNDLE_RISK = 45;
       if (bundleAnalysis.riskScore > EARLY_QUALITY_MAX_BUNDLE_RISK) {
         logger.debug({
           tokenAddress: shortAddr,
@@ -1352,7 +1336,7 @@ export class SignalGenerator {
     const seriousWarnings = (onChainSignal.riskWarnings || []).filter((w: string) =>
       !w.includes('ON-CHAIN SIGNAL') && !w.includes('No KOL')
     );
-    const MAX_SERIOUS_WARNINGS = isLearningMode ? 99 : 4;  // Skip in learning mode
+    const MAX_SERIOUS_WARNINGS = 3;  // Strict — too many red flags = no signal
 
     if (seriousWarnings.length >= MAX_SERIOUS_WARNINGS) {
       logger.debug({

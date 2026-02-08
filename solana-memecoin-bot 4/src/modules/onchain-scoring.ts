@@ -89,34 +89,34 @@ const WEIGHTS = {
 // ============ THRESHOLDS ============
 
 const THRESHOLDS = {
-  // Grade thresholds - loosened for memecoin trading
-  GRADE_A: 70,
-  GRADE_B: 50,
-  GRADE_C: 35,
-  GRADE_D: 20,
+  // Grade thresholds — tightened for quality
+  GRADE_A: 75,
+  GRADE_B: 55,
+  GRADE_C: 40,
+  GRADE_D: 25,
 
-  // Recommendation thresholds - loosened
-  STRONG_BUY: 70,
-  BUY: 50,
-  WATCH: 35,
-  AVOID: 20,
+  // Recommendation thresholds — raised to reduce weak signals
+  STRONG_BUY: 75,
+  BUY: 55,
+  WATCH: 40,
+  AVOID: 25,
 
-  // Risk thresholds - loosened
-  RISK_VERY_LOW: 70,
-  RISK_LOW: 50,
-  RISK_MEDIUM: 35,
-  RISK_HIGH: 20,
+  // Risk thresholds — tightened
+  RISK_VERY_LOW: 75,
+  RISK_LOW: 55,
+  RISK_MEDIUM: 40,
+  RISK_HIGH: 25,
 
-  // Market structure ideals - loosened for early memecoin entries
-  IDEAL_LIQUIDITY_RATIO: 0.03,     // 3% of mcap (lowered from 5%)
-  MIN_LIQUIDITY_USD: 500,          // $500 minimum (early gems start tiny)
-  IDEAL_TOP10_CONCENTRATION: 50,   // 50% max (memecoins are concentrated)
-  MAX_TOP10_CONCENTRATION: 90,     // 90% reject threshold (memecoins are very concentrated)
-  MIN_HOLDER_COUNT: 5,             // 5 min holders (brand new tokens)
-  IDEAL_HOLDER_COUNT: 50,          // 50 ideal (lowered from 200)
+  // Market structure ideals — tightened for quality
+  IDEAL_LIQUIDITY_RATIO: 0.04,     // 4% of mcap
+  MIN_LIQUIDITY_USD: 5000,          // $5K minimum — avoid illiquid death traps
+  IDEAL_TOP10_CONCENTRATION: 45,   // 45% max
+  MAX_TOP10_CONCENTRATION: 80,     // 80% reject threshold
+  MIN_HOLDER_COUNT: 15,             // 15 min holders — need some distribution
+  IDEAL_HOLDER_COUNT: 100,          // 100 ideal
 
-  // Timing ideals - wider window
-  OPTIMAL_AGE_MIN: 5,              // 5 minutes minimum (catch early)
+  // Timing ideals
+  OPTIMAL_AGE_MIN: 5,              // 5 minutes minimum
   OPTIMAL_AGE_MAX: 720,            // 12 hours maximum sweet spot
   TOO_EARLY_MIN: 2,                // Too early only if < 2 min
   TOO_LATE_HOURS: 48,              // Too late if > 48 hours

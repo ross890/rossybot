@@ -57,17 +57,16 @@ export interface FactorAnalysis {
 
 // ============ CONSTANTS ============
 
-// Default thresholds — Phase 1 moderate loosening (Feb 2026)
-// Previous values created an impossible combined filter (0 tokens passing).
-// Strategy: Let more signals through, use position sizing to manage risk.
-// The bot is an alert system, not a gatekeeper.
+// Default thresholds — Phase 2 quality tightening
+// Phase 1 let too many weak signals through. Now focusing on higher quality:
+// fewer signals, better hit rate, less noise.
 const DEFAULT_THRESHOLDS: ThresholdSet = {
-  minMomentumScore: 25,      // Still 2.5x the old minimum (10), but down from 35
-  minOnChainScore: 35,       // Above old default (20), down from 45
-  minSafetyScore: 50,        // Major bottleneck at 63 — now 50 (still 3.3x old 15)
-  maxBundleRiskScore: 50,    // Allow moderate bundle activity (was 38, default was 80)
-  minLiquidity: 8000,        // Still 8x the old minimum ($1K), down from $16K
-  maxTop10Concentration: 60, // Allow slightly more concentrated tokens (was 50%, default 85%)
+  minMomentumScore: 35,      // Raised from 25 — require real momentum
+  minOnChainScore: 50,       // Raised from 35 — only send genuinely strong setups
+  minSafetyScore: 60,        // Raised from 50 — filter out sketchy contracts
+  maxBundleRiskScore: 40,    // Tightened from 50 — less tolerance for insider activity
+  minLiquidity: 15000,       // Raised from 8K — avoid illiquid traps
+  maxTop10Concentration: 55, // Tightened from 60 — less whale-dominated tokens
 };
 
 // Target performance

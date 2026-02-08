@@ -492,11 +492,22 @@ class DexScreenerClient {
   private readonly CACHE_TTL_EMPTY_MS = 10 * 1000; // 10 seconds for empty results
   private readonly MAX_CACHE_SIZE = 500; // Prevent memory bloat
 
-  // Rate limiting - DexScreener free tier allows ~300 req/min (~5/sec)
-  // Reduced to 2/sec to share headroom with token-crawler and discovery modules
-  private lastRequestTime = 0;
-  private readonly MIN_REQUEST_INTERVAL_MS = 500; // Max 2 requests/second
+  // Rate limiting - DexScreener has separate limits per endpoint type:
+  //   - DEX/Pairs endpoints: 300 req/min (~5/sec)
+  //   - Token boost/profile endpoints: 60 req/min (~1/sec)
+  private lastDexRequestTime = 0;
+  private lastBoostRequestTime = 0;
+  private readonly MIN_DEX_REQUEST_INTERVAL_MS = 500; // 2 req/sec for DEX endpoints (300/min limit)
+  private readonly MIN_BOOST_REQUEST_INTERVAL_MS = 1100; // ~55 req/min for boost/profile endpoints (60/min limit)
   private rateLimitBackoff = 0; // Additional backoff when rate limited
+
+  // Cache for boost/profile results to avoid redundant calls from multiple modules
+  private boostCache: { data: any[]; expiry: number } | null = null;
+  private profileCache: { data: any[]; expiry: number } | null = null;
+  private topBoostCache: { data: any[]; expiry: number } | null = null;
+  private readonly BOOST_CACHE_TTL_MS = 30 * 1000; // 30 seconds
+  private trendingCache: { data: string[]; expiry: number } | null = null;
+  private newPairsCache: { data: any[]; expiry: number } | null = null;
 
   // Rate limit logging throttling - avoid log spam
   private rateLimitHitCount = 0;
@@ -507,6 +518,10 @@ class DexScreenerClient {
     this.client = axios.create({
       baseURL: 'https://api.dexscreener.com',
       timeout: 10000,
+      headers: {
+        'Accept': 'application/json',
+        'User-Agent': 'Mozilla/5.0 (compatible; SolanaBot/1.0)',
+      },
     });
 
     // Clean up expired cache entries every 5 minutes
@@ -514,18 +529,33 @@ class DexScreenerClient {
   }
 
   /**
-   * Wait for rate limit before making request
+   * Wait for rate limit before making a DEX/pairs request (300 req/min limit)
    */
-  private async waitForRateLimit(): Promise<void> {
+  private async waitForDexRateLimit(): Promise<void> {
     const now = Date.now();
-    const timeSinceLastRequest = now - this.lastRequestTime;
-    const requiredWait = this.MIN_REQUEST_INTERVAL_MS + this.rateLimitBackoff - timeSinceLastRequest;
+    const timeSinceLastRequest = now - this.lastDexRequestTime;
+    const requiredWait = this.MIN_DEX_REQUEST_INTERVAL_MS + this.rateLimitBackoff - timeSinceLastRequest;
 
     if (requiredWait > 0) {
       await new Promise(resolve => setTimeout(resolve, requiredWait));
     }
 
-    this.lastRequestTime = Date.now();
+    this.lastDexRequestTime = Date.now();
+  }
+
+  /**
+   * Wait for rate limit before making a boost/profile request (60 req/min limit)
+   */
+  private async waitForBoostRateLimit(): Promise<void> {
+    const now = Date.now();
+    const timeSinceLastRequest = now - this.lastBoostRequestTime;
+    const requiredWait = this.MIN_BOOST_REQUEST_INTERVAL_MS + this.rateLimitBackoff - timeSinceLastRequest;
+
+    if (requiredWait > 0) {
+      await new Promise(resolve => setTimeout(resolve, requiredWait));
+    }
+
+    this.lastBoostRequestTime = Date.now();
   }
 
   /**
@@ -577,12 +607,15 @@ class DexScreenerClient {
       return cached.data;
     }
 
-    // Wait for rate limit before making request
-    await this.waitForRateLimit();
+    // Wait for DEX endpoint rate limit (300 req/min)
+    await this.waitForDexRateLimit();
 
     try {
-      const response = await this.client.get(`/latest/dex/tokens/${address}`);
-      const pairs = response.data.pairs?.filter((p: any) => p.chainId === 'solana') || [];
+      // Use the new /token-pairs/v1 endpoint (replaces deprecated /latest/dex/tokens/)
+      const response = await this.client.get(`/token-pairs/v1/solana/${address}`);
+      // New endpoint returns array directly instead of { pairs: [...] }
+      const rawPairs = Array.isArray(response.data) ? response.data : (response.data.pairs || []);
+      const pairs = rawPairs.filter((p: any) => p.chainId === 'solana') || [];
 
       // Cache the result
       const requestTime = Date.now();
@@ -622,7 +655,7 @@ class DexScreenerClient {
   }
 
   async searchTokens(query: string): Promise<DexScreenerPair[]> {
-    await this.waitForRateLimit();
+    await this.waitForDexRateLimit();
     try {
       const response = await this.client.get(`/latest/dex/search`, {
         params: { q: query },
@@ -642,60 +675,145 @@ class DexScreenerClient {
   }
 
   /**
+   * Fetch and cache token-boosts/latest data (shared across methods)
+   */
+  private async fetchBoostData(): Promise<any[]> {
+    const now = Date.now();
+    if (this.boostCache && this.boostCache.expiry > now) {
+      return this.boostCache.data;
+    }
+
+    await this.waitForBoostRateLimit();
+    const response = await this.client.get('/token-boosts/latest/v1');
+    const data = response.data || [];
+    this.boostCache = { data, expiry: now + this.BOOST_CACHE_TTL_MS };
+    return data;
+  }
+
+  /**
+   * Fetch and cache token-profiles/latest data (shared across methods)
+   */
+  private async fetchProfileData(): Promise<any[]> {
+    const now = Date.now();
+    if (this.profileCache && this.profileCache.expiry > now) {
+      return this.profileCache.data;
+    }
+
+    await this.waitForBoostRateLimit();
+    const response = await this.client.get('/token-profiles/latest/v1');
+    const data = response.data || [];
+    this.profileCache = { data, expiry: now + this.BOOST_CACHE_TTL_MS };
+    return data;
+  }
+
+  /**
+   * Fetch and cache token-boosts/top data
+   */
+  private async fetchTopBoostData(): Promise<any[]> {
+    const now = Date.now();
+    if (this.topBoostCache && this.topBoostCache.expiry > now) {
+      return this.topBoostCache.data;
+    }
+
+    await this.waitForBoostRateLimit();
+    const response = await this.client.get('/token-boosts/top/v1');
+    const data = response.data || [];
+    this.topBoostCache = { data, expiry: now + this.BOOST_CACHE_TTL_MS };
+    return data;
+  }
+
+  /**
    * Get new/trending Solana token pairs from DexScreener
    * This is a free alternative to Birdeye's new_listing endpoint
+   * Results are cached for 30s to avoid redundant calls from multiple modules
    */
   async getNewSolanaPairs(limit = 50): Promise<any[]> {
-    await this.waitForRateLimit();
-    try {
-      // Get latest Solana pairs using the token-boosts endpoint
-      const response = await this.client.get('/token-boosts/latest/v1');
-      const allPairs = response.data || [];
+    // Check result cache first - multiple modules call this method
+    const now = Date.now();
+    if (this.newPairsCache && this.newPairsCache.expiry > now) {
+      return this.newPairsCache.data.slice(0, limit);
+    }
 
-      // Filter for Solana pairs
+    try {
+      // Primary: token-boosts/latest endpoint
+      const allPairs = await this.fetchBoostData();
       const solanaPairs = allPairs
         .filter((p: any) => p.chainId === 'solana')
         .slice(0, limit);
 
-      logger.debug({ count: solanaPairs.length }, 'Fetched new Solana pairs from DexScreener token-boosts');
-      return solanaPairs;
-    } catch (error: any) {
-      logger.debug({ error: error?.message, status: error?.response?.status }, 'token-boosts endpoint failed, trying token-profiles');
-
-      // Fallback: try token-profiles endpoint
-      try {
-        const response = await this.client.get('/token-profiles/latest/v1');
-        const allProfiles = response.data || [];
-
-        // Filter for Solana tokens
-        const solanaTokens = allProfiles
-          .filter((p: any) => p.chainId === 'solana')
-          .slice(0, limit);
-
-        logger.debug({ count: solanaTokens.length }, 'Fetched Solana tokens from DexScreener token-profiles');
-        return solanaTokens;
-      } catch (fallbackError: any) {
-        logger.warn({
-          error: fallbackError?.message,
-          status: fallbackError?.response?.status
-        }, 'Failed to get new pairs from DexScreener - all endpoints failed');
-        return [];
+      if (solanaPairs.length > 0) {
+        logger.debug({ count: solanaPairs.length }, 'Fetched new Solana pairs from DexScreener token-boosts');
+        this.newPairsCache = { data: solanaPairs, expiry: now + this.BOOST_CACHE_TTL_MS };
+        return solanaPairs;
       }
+    } catch (error: any) {
+      if (error?.response?.status === 429) {
+        this.rateLimitBackoff = Math.min(5000, (this.rateLimitBackoff || 500) * 2);
+        this.logRateLimit();
+      }
+      logger.debug({ error: error?.message, status: error?.response?.status }, 'token-boosts/latest failed, trying top boosts');
+    }
+
+    // Fallback 1: token-boosts/top endpoint (different endpoint, may not be rate-limited)
+    try {
+      const topPairs = await this.fetchTopBoostData();
+      const solanaPairs = topPairs
+        .filter((p: any) => p.chainId === 'solana')
+        .slice(0, limit);
+
+      if (solanaPairs.length > 0) {
+        logger.debug({ count: solanaPairs.length }, 'Fetched new Solana pairs from DexScreener token-boosts/top');
+        this.newPairsCache = { data: solanaPairs, expiry: now + this.BOOST_CACHE_TTL_MS };
+        return solanaPairs;
+      }
+    } catch (error: any) {
+      if (error?.response?.status === 429) {
+        this.rateLimitBackoff = Math.min(5000, (this.rateLimitBackoff || 500) * 2);
+        this.logRateLimit();
+      }
+      logger.debug({ error: error?.message, status: error?.response?.status }, 'token-boosts/top failed, trying token-profiles');
+    }
+
+    // Fallback 2: token-profiles endpoint
+    try {
+      const allProfiles = await this.fetchProfileData();
+      const solanaTokens = allProfiles
+        .filter((p: any) => p.chainId === 'solana')
+        .slice(0, limit);
+
+      logger.debug({ count: solanaTokens.length }, 'Fetched Solana tokens from DexScreener token-profiles');
+      this.newPairsCache = { data: solanaTokens, expiry: now + this.BOOST_CACHE_TTL_MS };
+      return solanaTokens;
+    } catch (fallbackError: any) {
+      if (fallbackError?.response?.status === 429) {
+        this.rateLimitBackoff = Math.min(5000, (this.rateLimitBackoff || 500) * 2);
+        this.logRateLimit();
+      }
+      logger.warn({
+        error: fallbackError?.message,
+        status: fallbackError?.response?.status
+      }, 'Failed to get new pairs from DexScreener - all endpoints failed');
+      return [];
     }
   }
 
   /**
    * Get trending tokens on Solana via DexScreener
-   * Uses token-boosts and token-profiles endpoints as the /latest/dex/pairs/solana endpoint no longer exists
+   * Uses token-boosts (latest + top) and token-profiles endpoints
+   * Results are cached for 30s to avoid redundant calls from multiple modules
    */
   async getTrendingSolanaTokens(limit = 50): Promise<string[]> {
+    // Check result cache first - multiple modules call this method frequently
+    const now = Date.now();
+    if (this.trendingCache && this.trendingCache.expiry > now) {
+      return this.trendingCache.data.slice(0, limit);
+    }
+
     const addresses: string[] = [];
 
-    await this.waitForRateLimit();
+    // Source 1: token-boosts/latest (actively boosted tokens)
     try {
-      // Primary: Get boosted tokens (these are actively promoted/trending)
-      const boostsResponse = await this.client.get('/token-boosts/latest/v1');
-      const boosts = boostsResponse.data || [];
+      const boosts = await this.fetchBoostData();
 
       for (const token of boosts) {
         if (token.chainId === 'solana' && token.tokenAddress && !addresses.includes(token.tokenAddress)) {
@@ -704,40 +822,69 @@ class DexScreenerClient {
         }
       }
 
-      logger.debug({ count: addresses.length }, 'Fetched trending Solana token addresses from token-boosts');
-
-      // If we have enough, return early
-      if (addresses.length >= limit) {
-        return addresses;
-      }
+      logger.debug({ count: addresses.length }, 'Fetched trending Solana token addresses from token-boosts/latest');
     } catch (error: any) {
       if (error?.response?.status === 429) {
         this.rateLimitBackoff = Math.min(5000, (this.rateLimitBackoff || 500) * 2);
         this.logRateLimit();
       } else {
-        logger.debug({ error: error?.message, status: error?.response?.status }, 'token-boosts endpoint failed for trending tokens');
+        logger.debug({ error: error?.message, status: error?.response?.status }, 'token-boosts/latest failed for trending tokens');
       }
     }
 
-    // Fallback: Try token-profiles endpoint
-    await this.waitForRateLimit();
-    try {
-      const profilesResponse = await this.client.get('/token-profiles/latest/v1');
-      const profiles = profilesResponse.data || [];
+    // Source 2: token-boosts/top (top boosted tokens, sorted by boost amount)
+    if (addresses.length < limit) {
+      try {
+        const topBoosts = await this.fetchTopBoostData();
 
-      for (const token of profiles) {
-        if (token.chainId === 'solana' && token.tokenAddress && !addresses.includes(token.tokenAddress)) {
-          addresses.push(token.tokenAddress);
-          if (addresses.length >= limit) break;
+        for (const token of topBoosts) {
+          if (token.chainId === 'solana' && token.tokenAddress && !addresses.includes(token.tokenAddress)) {
+            addresses.push(token.tokenAddress);
+            if (addresses.length >= limit) break;
+          }
+        }
+
+        logger.debug({ count: addresses.length }, 'Fetched trending Solana token addresses (with top boosts)');
+      } catch (error: any) {
+        if (error?.response?.status === 429) {
+          this.rateLimitBackoff = Math.min(5000, (this.rateLimitBackoff || 500) * 2);
+          this.logRateLimit();
+        } else {
+          logger.debug({ error: error?.message, status: error?.response?.status }, 'token-boosts/top failed for trending tokens');
         }
       }
+    }
 
-      logger.debug({ count: addresses.length }, 'Fetched trending Solana token addresses (combined)');
-    } catch (error: any) {
-      logger.warn({
-        error: error?.message,
-        status: error?.response?.status
-      }, 'Failed to get trending Solana tokens - all endpoints failed');
+    // Source 3: token-profiles (fallback for broader coverage)
+    if (addresses.length < limit) {
+      try {
+        const profiles = await this.fetchProfileData();
+
+        for (const token of profiles) {
+          if (token.chainId === 'solana' && token.tokenAddress && !addresses.includes(token.tokenAddress)) {
+            addresses.push(token.tokenAddress);
+            if (addresses.length >= limit) break;
+          }
+        }
+
+        logger.debug({ count: addresses.length }, 'Fetched trending Solana token addresses (combined)');
+      } catch (error: any) {
+        if (error?.response?.status === 429) {
+          this.rateLimitBackoff = Math.min(5000, (this.rateLimitBackoff || 500) * 2);
+          this.logRateLimit();
+        }
+        if (addresses.length === 0) {
+          logger.warn({
+            error: error?.message,
+            status: error?.response?.status
+          }, 'Failed to get trending Solana tokens - all endpoints failed');
+        }
+      }
+    }
+
+    // Cache the result
+    if (addresses.length > 0) {
+      this.trendingCache = { data: addresses, expiry: now + this.BOOST_CACHE_TTL_MS };
     }
 
     return addresses;
@@ -836,12 +983,11 @@ class DexScreenerClient {
 
   /**
    * Check if a token is in the boosted/paid tokens list
-   * Uses the token-boosts endpoint to check against recently boosted tokens
+   * Uses cached boost data to avoid extra API calls
    */
   async isTokenBoosted(address: string): Promise<boolean> {
     try {
-      const response = await this.client.get('/token-boosts/latest/v1');
-      const boostedTokens = response.data || [];
+      const boostedTokens = await this.fetchBoostData();
 
       return boostedTokens.some((token: any) =>
         token.chainId === 'solana' &&

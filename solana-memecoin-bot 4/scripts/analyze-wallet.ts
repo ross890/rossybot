@@ -207,10 +207,12 @@ class WalletAnalyzer {
   async getTokenMetadata(address: string): Promise<{ symbol: string; name: string } | null> {
     try {
       // Try DexScreener first (free, no API key)
-      const response = await axios.get(`https://api.dexscreener.com/latest/dex/tokens/${address}`, {
+      const response = await axios.get(`https://api.dexscreener.com/token-pairs/v1/solana/${address}`, {
         timeout: 5000,
       });
-      const pairs = response.data.pairs?.filter((p: any) => p.chainId === 'solana') || [];
+      // New endpoint returns array directly instead of { pairs: [...] }
+      const rawPairs = Array.isArray(response.data) ? response.data : (response.data.pairs || []);
+      const pairs = rawPairs.filter((p: any) => p.chainId === 'solana') || [];
       if (pairs.length > 0) {
         return {
           symbol: pairs[0].baseToken?.symbol || 'UNKNOWN',

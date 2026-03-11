@@ -15,6 +15,7 @@ import {
 } from './onchain.js';
 import { scamFilter, quickScamCheck } from './scam-filter.js';
 import { kolWalletMonitor } from './kol-tracker.js';
+import { alphaWalletManager } from './alpha/alpha-wallet-manager.js';
 import { scoringEngine } from './scoring.js';
 import { telegramBot } from './telegram.js';
 
@@ -60,6 +61,7 @@ import {
   DexScreenerTokenInfo,
   CTOAnalysis,
   KolReputationTier,
+  AlphaWallet,
 } from '../types/index.js';
 
 // ============ CONFIGURATION ============
@@ -957,6 +959,29 @@ export class SignalGenerator {
       );
     }
 
+    // ============ PATH A2: ALPHA WALLET ACTIVITY DETECTED ============
+    // Check if any tracked alpha wallets have bought this token
+    const alphaActivity = await kolWalletMonitor.getAlphaWalletActivityForToken(
+      tokenAddress,
+      KOL_ACTIVITY_WINDOW_MS
+    );
+
+    if (alphaActivity.length > 0) {
+      logger.info({ tokenAddress, alphaCount: alphaActivity.length }, 'Alpha wallet activity detected');
+
+      return await this.handleAlphaSignal(
+        tokenAddress,
+        metrics,
+        socialMetrics,
+        volumeAuthenticity,
+        scamResult,
+        alphaActivity,
+        safetyResult,
+        dexScreenerInfo,
+        ctoAnalysis
+      );
+    }
+
     // ============ PATH B: NO KOL - ON-CHAIN MOMENTUM ANALYSIS ============
     // NEW: Use on-chain momentum analysis instead of social metrics
 
@@ -1824,6 +1849,161 @@ export class SignalGenerator {
     }
 
     return SignalGenerator.EVAL_RESULTS.KOL_VALIDATION_SENT;
+  }
+
+  /**
+   * Handle alpha wallet buy signal
+   */
+  private async handleAlphaSignal(
+    tokenAddress: string,
+    metrics: TokenMetrics,
+    socialMetrics: SocialMetrics,
+    volumeAuthenticity: any,
+    scamResult: any,
+    alphaActivities: Array<{
+      wallet: AlphaWallet;
+      transaction: {
+        signature: string;
+        solAmount: number;
+        tokensAcquired: number;
+        timestamp: Date;
+      };
+      signalWeight: number;
+    }>,
+    safetyResult: TokenSafetyResult,
+    dexScreenerInfo?: DexScreenerTokenInfo,
+    ctoAnalysis?: CTOAnalysis
+  ): Promise<string> {
+    // Use the highest-weight alpha wallet as primary
+    const primaryAlpha = alphaActivities.reduce((best, curr) =>
+      curr.signalWeight > best.signalWeight ? curr : best
+    );
+
+    // Calculate score without KOL activity
+    const score = scoringEngine.calculateScore(
+      tokenAddress,
+      metrics,
+      socialMetrics,
+      volumeAuthenticity,
+      scamResult,
+      [] // No KOL activities
+    );
+
+    // Add safety flags
+    if (safetyResult.safetyScore < 60) {
+      score.flags.push(`SAFETY_${safetyResult.safetyScore}`);
+    }
+    if (safetyResult.insiderAnalysis.insiderRiskScore > 50) {
+      score.flags.push(`INSIDER_RISK_${safetyResult.insiderAnalysis.insiderRiskScore}`);
+    }
+
+    // Apply alpha wallet weight as a score boost
+    // Multiple alpha wallets buying = higher confidence
+    const alphaBoost = Math.min(15, alphaActivities.length * 5); // Up to +15 for 3+ wallets
+    score.compositeScore = Math.min(100, score.compositeScore + alphaBoost);
+
+    // Position size scaled by alpha wallet signal weight (lower than KOL)
+    let positionSize = appConfig.trading.defaultPositionSizePercent * 0.75; // 75% of normal
+    positionSize *= primaryAlpha.signalWeight; // Scale by wallet performance weight
+    if (alphaActivities.length >= 2) positionSize *= 1.25; // Multiple alpha wallets = more confidence
+    if (score.flags.includes('LOW_LIQUIDITY')) positionSize *= 0.5;
+    if (score.flags.includes('NEW_TOKEN')) positionSize *= 0.75;
+    positionSize = Math.min(positionSize, 2.5); // Cap at 2.5% for alpha
+
+    const price = metrics.price;
+
+    const signal: BuySignal = {
+      id: `sig_alpha_${Date.now()}_${tokenAddress.slice(0, 8)}`,
+      tokenAddress,
+      tokenTicker: metrics.ticker,
+      tokenName: metrics.name,
+
+      score,
+      tokenMetrics: metrics,
+      socialMetrics,
+      volumeAuthenticity,
+      scamFilter: scamResult,
+
+      kolActivity: null, // No KOL for alpha signals
+      alphaWalletActivity: primaryAlpha,
+
+      dexScreenerInfo,
+      ctoAnalysis,
+
+      entryZone: {
+        low: price * 0.95,
+        high: price * 1.05,
+      },
+      positionSizePercent: Math.round(positionSize * 10) / 10,
+      stopLoss: {
+        price: price * 0.7,
+        percent: 30,
+      },
+      takeProfit1: {
+        price: price * 1.5,
+        percent: 50,
+      },
+      takeProfit2: {
+        price: price * 2.5,
+        percent: 150,
+      },
+      timeLimitHours: 72,
+
+      generatedAt: new Date(),
+      signalType: SignalType.ALPHA_WALLET,
+      signalTrack: SignalTrack.EARLY_QUALITY,
+    };
+
+    // Send via telegram
+    await telegramBot.sendAlphaWalletSignal(signal, alphaActivities);
+
+    // AUTO-TRADING: Process alpha signal for potential auto-buy
+    try {
+      const conviction = await convictionTracker.getConvictionLevel(tokenAddress);
+      const autoTradeResult = await autoTrader.processSignal(signal, conviction);
+
+      logger.info({
+        tokenAddress,
+        action: autoTradeResult.action,
+        success: autoTradeResult.tradeResult?.success,
+      }, 'Auto-trade alpha signal processed');
+    } catch (error) {
+      logger.error({ error, tokenAddress }, 'Auto-trade alpha signal failed');
+    }
+
+    // Record signal for performance tracking
+    try {
+      await signalPerformanceTracker.recordSignal(
+        signal.id,
+        tokenAddress,
+        metrics.ticker,
+        'ALPHA_WALLET',
+        metrics.price,
+        metrics.marketCap,
+        score.factors.onChainHealth || 50,
+        score.compositeScore,
+        safetyResult?.safetyScore || 50,
+        scamResult.bundleAnalysis?.bundledSupplyPercent || 0,
+        score.compositeScore >= 80 ? 'STRONG' : score.compositeScore >= 65 ? 'MODERATE' : 'WEAK',
+        {
+          liquidity: metrics.liquidityPool,
+          tokenAge: metrics.tokenAge,
+          holderCount: metrics.holderCount,
+          top10Concentration: metrics.top10Concentration,
+          buySellRatio: 0,
+          uniqueBuyers: 0,
+        }
+      );
+    } catch (error) {
+      logger.error({ error, tokenAddress }, 'Failed to record alpha signal for tracking');
+    }
+
+    // FEATURE 4: Track Pump.fun tokens
+    if (await bondingCurveMonitor.isPumpfunToken(tokenAddress)) {
+      await bondingCurveMonitor.trackToken(tokenAddress);
+    }
+
+    return SignalGenerator.EVAL_RESULTS.SIGNAL_SENT;
   }
 
   /**

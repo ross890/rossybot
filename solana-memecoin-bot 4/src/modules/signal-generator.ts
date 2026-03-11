@@ -250,8 +250,17 @@ function isExcludedToken(
 
 // ============ SIGNAL GENERATOR CLASS ============
 
+// Maximum on-chain signals per scan cycle to prevent flooding
+// With 20s scan interval, 3 per cycle = max 9/min theoretical, but rate limits cap at 15/hr
+const MAX_ONCHAIN_SIGNALS_PER_CYCLE = 3;
+
+// Cooldown for recently-signaled tokens (skip re-evaluation for 30 min)
+const SIGNAL_COOLDOWN_MS = 30 * 60 * 1000;
+
 export class SignalGenerator {
   private isRunning = false;
+  // Track recently-signaled tokens to skip re-evaluation
+  private recentlySignaledTokens: Map<string, number> = new Map();
   private scanTimer: NodeJS.Timeout | null = null;
 
   // Track discovery signals for KOL follow-up alerts
@@ -417,7 +426,13 @@ export class SignalGenerator {
       let rugcheckBlocked = 0;
       let compoundRugBlocked = 0;
 
+      let onchainSignalsThisCycle = 0;
       for (const tokenAddress of preFiltered) {
+        // Stop evaluating once we hit the per-cycle signal cap
+        if (onchainSignalsThisCycle >= MAX_ONCHAIN_SIGNALS_PER_CYCLE) {
+          logger.debug({ cap: MAX_ONCHAIN_SIGNALS_PER_CYCLE }, 'Per-cycle on-chain signal cap reached, skipping remaining');
+          break;
+        }
         try {
           const result = await this.evaluateTokenWithDiagnostics(tokenAddress);
           switch (result) {
@@ -430,7 +445,7 @@ export class SignalGenerator {
             case 'DISCOVERY_SENT': discoverySignals++; break;
             case 'KOL_VALIDATION_SENT': kolValidationSignals++; break;
             case 'DISCOVERY_FAILED': discoveryFailed++; break;
-            case 'ONCHAIN_SIGNAL_SENT': onchainSignals++; break;
+            case 'ONCHAIN_SIGNAL_SENT': onchainSignals++; onchainSignalsThisCycle++; break;
             case 'MOMENTUM_FAILED': momentumFailed++; break;
             case 'BUNDLE_BLOCKED': bundleBlocked++; break;
             case 'TIER_BLOCKED': tierBlocked++; break;
@@ -652,6 +667,20 @@ export class SignalGenerator {
    */
   private async evaluateTokenWithDiagnostics(tokenAddress: string): Promise<string> {
     const shortAddr = tokenAddress.slice(0, 8);
+
+    // Skip tokens that were recently signaled (30 min cooldown)
+    const lastSignaled = this.recentlySignaledTokens.get(tokenAddress);
+    if (lastSignaled && Date.now() - lastSignaled < SIGNAL_COOLDOWN_MS) {
+      return SignalGenerator.EVAL_RESULTS.SKIPPED;
+    }
+
+    // Clean up expired cooldowns periodically (every ~100 checks)
+    if (Math.random() < 0.01) {
+      const now = Date.now();
+      for (const [addr, ts] of this.recentlySignaledTokens) {
+        if (now - ts >= SIGNAL_COOLDOWN_MS) this.recentlySignaledTokens.delete(addr);
+      }
+    }
 
     // Check if we already have an open position
     if (await Database.hasOpenPosition(tokenAddress)) {
@@ -1481,6 +1510,9 @@ export class SignalGenerator {
       await bondingCurveMonitor.trackToken(tokenAddress);
     }
 
+    // Mark as recently signaled to prevent re-evaluation for 30 min
+    this.recentlySignaledTokens.set(tokenAddress, Date.now());
+
     return SignalGenerator.EVAL_RESULTS.ONCHAIN_SIGNAL_SENT;
   }
 
@@ -1814,6 +1846,7 @@ export class SignalGenerator {
       await bondingCurveMonitor.trackToken(tokenAddress);
     }
 
+    this.recentlySignaledTokens.set(tokenAddress, Date.now());
     return SignalGenerator.EVAL_RESULTS.SIGNAL_SENT;
   }
 
@@ -2049,6 +2082,7 @@ export class SignalGenerator {
       await bondingCurveMonitor.trackToken(tokenAddress);
     }
 
+    this.recentlySignaledTokens.set(tokenAddress, Date.now());
     return SignalGenerator.EVAL_RESULTS.SIGNAL_SENT;
   }
 

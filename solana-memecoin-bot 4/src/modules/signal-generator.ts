@@ -456,8 +456,10 @@ export class SignalGenerator {
           discoveries: discoverySignals,
           kolValidations: kolValidationSignals,
         }, 'Scan cycle: signals generated');
-      } else {
-        logger.debug({
+      } else if (preFiltered.length > 0) {
+        // Log at info level when we have candidates but no signals — helps diagnose filtering
+        logger.info({
+          candidates: candidates.length,
           evaluated: preFiltered.length,
           safetyBlocked,
           noMetrics,
@@ -470,7 +472,7 @@ export class SignalGenerator {
           bundleBlocked,
           tierBlocked,
           discoveryFailed,
-        }, 'Scan cycle complete: no signals');
+        }, 'Scan cycle: candidates found but all filtered out');
       }
 
       // Log scan cycle metrics for performance tracking
@@ -1030,20 +1032,34 @@ export class SignalGenerator {
     }, 'EVAL: On-chain + social scoring complete');
 
     // Step 2: Check if bundle/safety risk is too high
-    // CRITICAL risk is ALWAYS blocked (non-negotiable, even in learning mode)
-    // HIGH risk is ALWAYS blocked — learning mode should NOT learn from rugs
-    // The RugCheck hard gate and compound rug detection above already catch most rugs,
-    // but HIGH on-chain risk is an additional safety net
+    // CRITICAL risk is ALWAYS blocked (non-negotiable)
+    // HIGH risk: blocked in production, allowed in learning mode for data collection
+    // RugCheck hard gate and compound rug detection above already catch actual rugs
     const isLearning = appConfig.trading.learningMode;
-    if (onChainScore.riskLevel === 'CRITICAL' || onChainScore.riskLevel === 'HIGH') {
+    if (onChainScore.riskLevel === 'CRITICAL') {
       logger.debug({
         tokenAddress: shortAddr,
         ticker: metrics.ticker,
         riskLevel: onChainScore.riskLevel,
-        learningMode: isLearning,
         warnings: onChainScore.warnings,
-      }, `EVAL: BLOCKED - ${onChainScore.riskLevel} risk level (always blocked, even in learning mode)`);
+      }, 'EVAL: BLOCKED - CRITICAL risk level');
       return SignalGenerator.EVAL_RESULTS.BUNDLE_BLOCKED;
+    }
+    if (onChainScore.riskLevel === 'HIGH' && !isLearning) {
+      logger.debug({
+        tokenAddress: shortAddr,
+        ticker: metrics.ticker,
+        riskLevel: onChainScore.riskLevel,
+        warnings: onChainScore.warnings,
+      }, 'EVAL: BLOCKED - HIGH risk level (production mode)');
+      return SignalGenerator.EVAL_RESULTS.BUNDLE_BLOCKED;
+    }
+    if (onChainScore.riskLevel === 'HIGH' && isLearning) {
+      logger.debug({
+        tokenAddress: shortAddr,
+        ticker: metrics.ticker,
+        riskLevel: onChainScore.riskLevel,
+      }, 'EVAL: HIGH risk allowed in learning mode — RugCheck/compound gates provide safety');
     }
 
     // Step 2.5: DUAL-TRACK SIGNAL ROUTING
@@ -1209,12 +1225,14 @@ export class SignalGenerator {
     // - This caused ALL tokens with scores 30-39 to be blocked despite passing numerical check
     // (isLearningMode already defined above in momentum check)
 
-    // Block both AVOID and STRONG_AVOID regardless of mode — quality over quantity
-    const shouldBlockByRecommendation =
-      onChainScore.recommendation === 'STRONG_AVOID' || onChainScore.recommendation === 'AVOID';
+    // In learning mode, only block STRONG_AVOID to collect more training data
+    // In production mode, block both AVOID and STRONG_AVOID
+    const shouldBlockByRecommendation = isLearningMode
+      ? onChainScore.recommendation === 'STRONG_AVOID'
+      : onChainScore.recommendation === 'STRONG_AVOID' || onChainScore.recommendation === 'AVOID';
 
-    // Use the optimizer's threshold directly — no more learning mode discount
-    const effectiveMinScore = MIN_ONCHAIN_SCORE;
+    // In learning mode, lower the on-chain score threshold to collect diverse data
+    const effectiveMinScore = isLearningMode ? Math.max(35, MIN_ONCHAIN_SCORE - 15) : MIN_ONCHAIN_SCORE;
 
     // Use adjustedTotal (which includes social verification bonus) for threshold comparison
     // This rewards tokens with verified social presence (Twitter, Telegram, etc.)
@@ -1256,10 +1274,12 @@ export class SignalGenerator {
     const holderGrowthRate = momentumData?.holderGrowthRate || 0;
 
     if (signalTrack === SignalTrack.PROVEN_RUNNER) {
-      // PROVEN RUNNER: Require some holder growth — dead tokens don't pump
+      // PROVEN RUNNER: Prefer some holder growth — dead tokens don't pump
+      // But don't hard-block when holder data is unavailable (Helius/Solscan down)
       const MIN_HOLDER_GROWTH_RATE = 0.01;
+      const holderDataAvailable = momentumData?.holderCount != null && momentumData.holderCount > 0;
 
-      if (holderGrowthRate < MIN_HOLDER_GROWTH_RATE) {
+      if (holderDataAvailable && holderGrowthRate < MIN_HOLDER_GROWTH_RATE) {
         logger.debug({
           tokenAddress: shortAddr,
           ticker: metrics.ticker,
@@ -1268,6 +1288,14 @@ export class SignalGenerator {
           track: 'PROVEN_RUNNER',
         }, 'EVAL: BLOCKED - Holder growth too low');
         return SignalGenerator.EVAL_RESULTS.DISCOVERY_FAILED;
+      }
+
+      if (!holderDataAvailable) {
+        logger.debug({
+          tokenAddress: shortAddr,
+          ticker: metrics.ticker,
+          track: 'PROVEN_RUNNER',
+        }, 'EVAL: Holder data unavailable - skipping growth gate');
       }
     } else if (signalTrack === SignalTrack.EARLY_QUALITY) {
       // EARLY QUALITY: Simplified requirements (reduced from 4 to 2)
@@ -1282,8 +1310,8 @@ export class SignalGenerator {
       // LEARNING MODE FIX: Relax these requirements significantly in learning mode
       // to collect more diverse training data for the ML model.
 
-      // 1. Safety score required — no learning mode discount, quality matters
-      const EARLY_QUALITY_MIN_SAFETY = 55;
+      // 1. Safety score required — relaxed in learning mode for data collection
+      const EARLY_QUALITY_MIN_SAFETY = isLearningMode ? 40 : 55;
       if (safetyResult.safetyScore < EARLY_QUALITY_MIN_SAFETY) {
         logger.debug({
           tokenAddress: shortAddr,
@@ -1382,7 +1410,7 @@ export class SignalGenerator {
     const seriousWarnings = (onChainSignal.riskWarnings || []).filter((w: string) =>
       !w.includes('ON-CHAIN SIGNAL') && !w.includes('No KOL')
     );
-    const MAX_SERIOUS_WARNINGS = 3;  // Strict — too many red flags = no signal
+    const MAX_SERIOUS_WARNINGS = isLearningMode ? 5 : 3;
 
     if (seriousWarnings.length >= MAX_SERIOUS_WARNINGS) {
       logger.debug({

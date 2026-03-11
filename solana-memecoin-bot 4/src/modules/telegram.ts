@@ -4267,17 +4267,31 @@ export class TelegramAlertBot {
       signalWeight: number;
     }>
   ): string {
-    const { score, tokenMetrics, scamFilter, dexScreenerInfo, ctoAnalysis } = signal;
+    const { score, tokenMetrics, socialMetrics, scamFilter, dexScreenerInfo, ctoAnalysis } = signal;
+
+    // Calculate total SOL deployed across all alpha wallets
+    const totalSolDeployed = alphaActivities.reduce((sum, a) => sum + a.transaction.solAmount, 0);
+    const bestWallet = alphaActivities.reduce((best, curr) =>
+      curr.signalWeight > best.signalWeight ? curr : best
+    );
+
+    // Conviction level based on wallet count + total SOL
+    const convictionLevel = alphaActivities.length >= 3 ? 'ULTRA' :
+                            alphaActivities.length >= 2 ? 'HIGH' :
+                            totalSolDeployed >= 5 ? 'HIGH' : 'MODERATE';
+    const convictionEmoji = convictionLevel === 'ULTRA' ? '🔥🔥🔥' :
+                            convictionLevel === 'HIGH' ? '🔥🔥' : '🔥';
 
     let msg = `\n`;
     msg += `═══════════════════════════════\n`;
-    msg += `🔍  *ALPHA WALLET BUY SIGNAL*\n`;
+    msg += `💎  *ALPHA WALLET BUY SIGNAL*  💎\n`;
     msg += `    Score: *${score.compositeScore}/100* · ${score.confidence}\n`;
+    msg += `    ${convictionEmoji} ${convictionLevel} CONVICTION\n`;
     msg += `═══════════════════════════════\n\n`;
 
     // Token info
     msg += `*Token:* \`$${signal.tokenTicker}\` (${this.truncateAddress(signal.tokenAddress)})\n`;
-    msg += `*Chain:* Solana\n`;
+    msg += `*Chain:* Solana\n\n`;
 
     // DexScreener & CTO Status
     msg += this.formatDexScreenerCTOStatus(dexScreenerInfo, ctoAnalysis);
@@ -4292,22 +4306,35 @@ export class TelegramAlertBot {
     msg += `└─ Signal Type: ALPHA\\_WALLET\n\n`;
 
     msg += `───────────────────────────────\n`;
-    // Alpha wallet activity
-    msg += `🔍 *ALPHA WALLET ACTIVITY* (${alphaActivities.length} wallet${alphaActivities.length > 1 ? 's' : ''})\n`;
+    // Alpha wallet activity — the main event
+    const walletCountLabel = alphaActivities.length === 1 ? '1 WALLET' : `${alphaActivities.length} WALLETS`;
+    msg += `💎 *ALPHA WALLET ACTIVITY* (${walletCountLabel})\n`;
+    msg += `├─ Status: ✅ *CONFIRMED BUY${alphaActivities.length > 1 ? 'S' : ''} DETECTED*\n`;
+    msg += `├─ Total Deployed: *${totalSolDeployed.toFixed(2)} SOL*\n`;
+    msg += `├─ Conviction: ${convictionEmoji} *${convictionLevel}*\n`;
 
     for (let i = 0; i < alphaActivities.length; i++) {
       const activity = alphaActivities[i];
       const w = activity.wallet;
       const tx = activity.transaction;
-      const prefix = i === alphaActivities.length - 1 ? '└' : '├';
-      const label = w.label ? ` (${w.label})` : '';
-      const statusEmoji = w.status === 'TRUSTED' ? '⭐' : w.status === 'ACTIVE' ? '✅' : '🔄';
+      const isLast = i === alphaActivities.length - 1;
+      const prefix = isLast ? '└' : '├';
+      const cont = isLast ? ' ' : '│';
 
-      msg += `${prefix}─ ${statusEmoji} \`${this.truncateAddress(w.address)}\`${label}\n`;
-      msg += `${i === alphaActivities.length - 1 ? ' ' : '│'}  Buy: ${tx.solAmount.toFixed(2)} SOL · `;
-      msg += `Win: ${(w.winRate * 100).toFixed(0)}% · `;
-      msg += `ROI: ${w.avgRoi.toFixed(0)}% · `;
-      msg += `Weight: ${(activity.signalWeight * 100).toFixed(0)}%\n`;
+      // Status badge
+      const statusBadge = w.status === 'TRUSTED' ? '⭐ TRUSTED' :
+                          w.status === 'ACTIVE' ? '🟢 ACTIVE' : '🔄 PROBATION';
+      const label = w.label ? ` "${w.label}"` : '';
+
+      msg += `${prefix}─ *Wallet ${i + 1}:* ${statusBadge}${label}\n`;
+      msg += `${cont}  ├─ Address: \`${this.truncateAddress(w.address)}\`\n`;
+      msg += `${cont}  ├─ Buy: *${tx.solAmount.toFixed(2)} SOL*\n`;
+      msg += `${cont}  ├─ Tokens: ${this.formatNumber(tx.tokensAcquired)}\n`;
+      msg += `${cont}  ├─ TX: \`${this.truncateAddress(tx.signature)}\`\n`;
+      msg += `${cont}  ├─ Time: ${tx.timestamp.toISOString().replace('T', ' ').slice(0, 19)} UTC\n`;
+      msg += `${cont}  ├─ Win Rate: *${(w.winRate * 100).toFixed(0)}%* (${w.totalTrades} trades)\n`;
+      msg += `${cont}  ├─ Avg ROI: *${w.avgRoi.toFixed(0)}%*\n`;
+      msg += `${cont}  └─ Signal Weight: *${(activity.signalWeight * 100).toFixed(0)}%*\n`;
     }
     msg += `\n`;
 
@@ -4317,21 +4344,60 @@ export class TelegramAlertBot {
     msg += `├─ Price: $${this.formatPrice(tokenMetrics.price)}\n`;
     msg += `├─ Market Cap: $${this.formatNumber(tokenMetrics.marketCap)}\n`;
     msg += `├─ 24h Volume: $${this.formatNumber(tokenMetrics.volume24h)}\n`;
-    msg += `├─ Holders: ${tokenMetrics.holderCount}\n`;
+    msg += `├─ Holders: ${tokenMetrics.holderCount} (${tokenMetrics.holderChange1h >= 0 ? '+' : ''}${tokenMetrics.holderChange1h}% 1h)\n`;
     msg += `├─ Top 10: ${tokenMetrics.top10Concentration.toFixed(1)}%\n`;
+    msg += `├─ Vol Auth: ${signal.volumeAuthenticity.score}/100\n`;
     msg += `└─ Bundle Risk: ${scamFilter.bundleAnalysis?.riskLevel === 'LOW' ? '🟢 CLEAR' : scamFilter.bundleAnalysis?.riskLevel === 'MEDIUM' ? '🟡 FLAGGED' : '🔴 HIGH'}\n\n`;
 
     msg += `───────────────────────────────\n`;
-    // Action zone
-    msg += `💰 *SUGGESTED ACTION*\n`;
-    msg += `├─ Entry: $${this.formatPrice(signal.entryZone.low)} - $${this.formatPrice(signal.entryZone.high)}\n`;
-    msg += `├─ Position: ${signal.positionSizePercent}%\n`;
-    msg += `├─ Stop Loss: -${signal.stopLoss.percent}%\n`;
-    msg += `├─ TP1: +${signal.takeProfit1.percent}%\n`;
-    msg += `└─ TP2: +${signal.takeProfit2.percent}%\n\n`;
+    // Social signals
+    msg += `𝕏 *X/SOCIAL SIGNALS*\n`;
 
-    // Links
+    const velocityEmoji = socialMetrics.mentionVelocity1h >= 50 ? '🔥' :
+                          socialMetrics.mentionVelocity1h >= 20 ? '📈' :
+                          socialMetrics.mentionVelocity1h >= 5 ? '📊' : '📉';
+    const velocityLabel = socialMetrics.mentionVelocity1h >= 50 ? 'VIRAL' :
+                          socialMetrics.mentionVelocity1h >= 20 ? 'HIGH' :
+                          socialMetrics.mentionVelocity1h >= 5 ? 'MODERATE' : 'LOW';
+    msg += `├─ Velocity: ${velocityEmoji} *${socialMetrics.mentionVelocity1h}* mentions/hr (${velocityLabel})\n`;
+
+    const engagementPercent = Math.round(socialMetrics.engagementQuality * 100);
+    const engagementEmoji = engagementPercent >= 70 ? '🟢' : engagementPercent >= 40 ? '🟡' : '🔴';
+    msg += `├─ Engagement: ${engagementEmoji} ${engagementPercent}/100\n`;
+
+    const authPercent = Math.round(socialMetrics.accountAuthenticity * 100);
+    const authEmoji = authPercent >= 70 ? '✅' : authPercent >= 40 ? '⚠️' : '🚨';
+    msg += `├─ Authenticity: ${authEmoji} ${authPercent}/100\n`;
+
+    msg += `├─ Sentiment: ${socialMetrics.sentimentPolarity > 0.3 ? '🟢 POSITIVE' : socialMetrics.sentimentPolarity > -0.3 ? '🟡 NEUTRAL' : '🔴 NEGATIVE'}\n`;
+    msg += `└─ Narrative: ${socialMetrics.narrativeFit || 'N/A'}\n\n`;
+
+    msg += `───────────────────────────────\n`;
+    // Suggested action
+    msg += `⚡ *SUGGESTED ACTION*\n`;
+    msg += `├─ Entry Zone: $${this.formatPrice(signal.entryZone.low)} - $${this.formatPrice(signal.entryZone.high)}\n`;
+    msg += `├─ Position Size: ${signal.positionSizePercent}% of portfolio\n`;
+    msg += `├─ Stop Loss: $${this.formatPrice(signal.stopLoss.price)} (-${signal.stopLoss.percent}%)\n`;
+    msg += `├─ Take Profit 1: $${this.formatPrice(signal.takeProfit1.price)} (+${signal.takeProfit1.percent}%)\n`;
+    msg += `├─ Take Profit 2: $${this.formatPrice(signal.takeProfit2.price)} (+${signal.takeProfit2.percent}%)\n`;
+    msg += `└─ Time Limit: ${signal.timeLimitHours}h max hold\n\n`;
+
+    // Flags
+    if (score.flags.length > 0) {
+      msg += `⚠️ *FLAGS:* ${score.flags.join(', ')}\n\n`;
+    }
+
+    msg += `───────────────────────────────\n`;
+    // Trade Links
+    msg += `*Quick Trade:*\n`;
     msg += formatLinksAsMarkdown(signal.tokenAddress);
+    msg += `\n\n`;
+
+    // Footer
+    msg += `⏱️ _Signal: ${signal.generatedAt.toISOString().replace('T', ' ').slice(0, 19)} UTC_\n`;
+    msg += `💎 _Alpha wallet signal — tracked wallets with proven edge._\n`;
+    msg += `⚠️ _DYOR. Not financial advice. Smart money buys ≠ guaranteed profits._\n`;
+    msg += `═══════════════════════════════\n`;
 
     return msg;
   }

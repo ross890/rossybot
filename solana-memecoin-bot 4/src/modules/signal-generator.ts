@@ -594,10 +594,28 @@ export class SignalGenerator {
       logger.debug({ error }, 'GMGN trending failed');
     }
 
+    // ===== SOURCE 6: Alpha Wallet Buys (direct feed from trade monitor) =====
+    try {
+      const alphaTokens = alphaWalletManager.drainDiscoveredTokens();
+
+      for (const address of alphaTokens) {
+        candidates.add(address);
+      }
+
+      if (alphaTokens.length > 0) {
+        logger.info({
+          count: alphaTokens.length,
+          source: 'Alpha wallet buys'
+        }, 'Candidates from alpha wallet activity');
+      }
+    } catch (error) {
+      logger.debug({ error }, 'Alpha wallet discovery drain failed');
+    }
+
     // Log final candidate pool composition
     logger.debug({
       totalCandidates: candidates.size,
-      sources: 'DexScreener + Jupiter + Discovery Engine + GMGN',
+      sources: 'DexScreener + Jupiter + Discovery Engine + GMGN + Alpha Wallets',
     }, 'Candidate token pool assembled');
 
     return Array.from(candidates);

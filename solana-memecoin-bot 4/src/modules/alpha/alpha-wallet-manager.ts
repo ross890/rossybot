@@ -75,6 +75,15 @@ export class AlphaWalletManager {
   // Callback for sending Telegram notifications
   private notifyCallback: ((message: string) => Promise<void>) | null = null;
 
+  // Tokens discovered via alpha wallet buys — picked up by signal generator
+  private alphaDiscoveredTokens: Map<string, {
+    walletAddress: string;
+    walletLabel: string | null;
+    solAmount: number;
+    txSignature: string;
+    discoveredAt: number;
+  }> = new Map();
+
   /**
    * Initialize the alpha wallet manager
    */
@@ -96,6 +105,32 @@ export class AlphaWalletManager {
    */
   setNotifyCallback(callback: (message: string) => Promise<void>): void {
     this.notifyCallback = callback;
+  }
+
+  /**
+   * Get tokens discovered by alpha wallet buys and clear the buffer.
+   * Called by signal generator's getCandidateTokens() each scan cycle.
+   */
+  drainDiscoveredTokens(): string[] {
+    const tokens = Array.from(this.alphaDiscoveredTokens.keys());
+
+    // Expire entries older than 30 minutes
+    const now = Date.now();
+    const EXPIRY_MS = 30 * 60 * 1000;
+    for (const [token, info] of this.alphaDiscoveredTokens) {
+      if (now - info.discoveredAt > EXPIRY_MS) {
+        this.alphaDiscoveredTokens.delete(token);
+      }
+    }
+
+    return tokens;
+  }
+
+  /**
+   * Check if a token was recently discovered by an alpha wallet
+   */
+  isAlphaDiscovered(tokenAddress: string): boolean {
+    return this.alphaDiscoveredTokens.has(tokenAddress);
   }
 
   /**
@@ -565,6 +600,25 @@ export class AlphaWalletManager {
       sol: trade.solAmount.toFixed(2),
       roi: roi?.toFixed(1),
     }, 'Alpha wallet trade recorded');
+
+    // Feed BUY tokens into discovery pipeline for signal generation
+    if (trade.tradeType === 'BUY' && trade.solAmount >= 0.1) {
+      this.alphaDiscoveredTokens.set(trade.tokenAddress, {
+        walletAddress: wallet.address,
+        walletLabel: wallet.label,
+        solAmount: trade.solAmount,
+        txSignature: trade.txSignature,
+        discoveredAt: Date.now(),
+      });
+
+      logger.info({
+        wallet: wallet.address.slice(0, 8),
+        label: wallet.label,
+        token: trade.tokenAddress.slice(0, 8),
+        sol: trade.solAmount.toFixed(2),
+        status: wallet.status,
+      }, 'Alpha wallet BUY detected — token added to signal pipeline');
+    }
   }
 
   // ============ PERFORMANCE EVALUATION ============

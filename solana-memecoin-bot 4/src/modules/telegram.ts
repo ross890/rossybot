@@ -2613,26 +2613,21 @@ export class TelegramAlertBot {
       }
     }
 
-    // LEARNING MODE: Allow more signals, follow-ups provide valuable data
-    if (appConfig.trading.learningMode) {
-      logger.debug({
-        tokenAddress: signal.tokenAddress,
-        isFollowUp: !!previousSnapshot,
-      }, 'Learning mode: signal allowed');
-      return { allowed: true };
-    }
-
-    // PRODUCTION MODE: Full rate limiting
-    // Check hourly limit
+    // Hourly and daily rate limits apply in ALL modes (including learning mode)
+    // Learning mode relaxes score thresholds, NOT volume caps
     const hourlyCount = await Database.getRecentSignalCount(1);
     if (hourlyCount >= RATE_LIMITS.MAX_SIGNALS_PER_HOUR) {
       return { allowed: false, reason: 'Hourly signal limit reached' };
     }
 
-    // Check daily limit
     const dailyCount = await Database.getRecentSignalCount(24);
     if (dailyCount >= RATE_LIMITS.MAX_SIGNALS_PER_DAY) {
       return { allowed: false, reason: 'Daily signal limit reached' };
+    }
+
+    // In learning mode, skip token/KOL cooldowns to collect more diverse data
+    if (appConfig.trading.learningMode) {
+      return { allowed: true };
     }
 
     // Check token cooldown from database (for follow-ups after bot restart)
@@ -3704,6 +3699,18 @@ export class TelegramAlertBot {
     this.signalsInProgress.add(signal.tokenAddress);
 
     try {
+      // Check hourly/daily rate limits (shared with KOL signals)
+      const hourlyCount = await Database.getRecentSignalCount(1);
+      if (hourlyCount >= RATE_LIMITS.MAX_SIGNALS_PER_HOUR) {
+        logger.info({ hourlyCount, limit: RATE_LIMITS.MAX_SIGNALS_PER_HOUR }, 'On-chain signal blocked: hourly limit reached');
+        return false;
+      }
+      const dailyCount = await Database.getRecentSignalCount(24);
+      if (dailyCount >= RATE_LIMITS.MAX_SIGNALS_PER_DAY) {
+        logger.info({ dailyCount, limit: RATE_LIMITS.MAX_SIGNALS_PER_DAY }, 'On-chain signal blocked: daily limit reached');
+        return false;
+      }
+
       // Clean up signal history
       this.cleanupSignalHistory();
 

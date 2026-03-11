@@ -1225,14 +1225,14 @@ export class SignalGenerator {
     // - This caused ALL tokens with scores 30-39 to be blocked despite passing numerical check
     // (isLearningMode already defined above in momentum check)
 
-    // In learning mode, only block STRONG_AVOID to collect more training data
-    // In production mode, block both AVOID and STRONG_AVOID
-    const shouldBlockByRecommendation = isLearningMode
-      ? onChainScore.recommendation === 'STRONG_AVOID'
-      : onChainScore.recommendation === 'STRONG_AVOID' || onChainScore.recommendation === 'AVOID';
+    // Block both AVOID and STRONG_AVOID in all modes
+    // The numerical score threshold (40 in learning, 50 in production) provides enough relaxation
+    const shouldBlockByRecommendation =
+      onChainScore.recommendation === 'STRONG_AVOID' || onChainScore.recommendation === 'AVOID';
 
     // In learning mode, lower the on-chain score threshold to collect diverse data
-    const effectiveMinScore = isLearningMode ? Math.max(35, MIN_ONCHAIN_SCORE - 15) : MIN_ONCHAIN_SCORE;
+    // Floor of 40 balances data collection vs signal noise (original 50 blocked everything, 35 flooded)
+    const effectiveMinScore = isLearningMode ? Math.max(40, MIN_ONCHAIN_SCORE - 10) : MIN_ONCHAIN_SCORE;
 
     // Use adjustedTotal (which includes social verification bonus) for threshold comparison
     // This rewards tokens with verified social presence (Twitter, Telegram, etc.)

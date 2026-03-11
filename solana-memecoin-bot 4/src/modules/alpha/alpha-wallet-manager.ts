@@ -424,27 +424,36 @@ export class AlphaWalletManager {
 
   /**
    * Monitor trades for a single wallet
+   * Uses Helius Enhanced Transactions API for reliable swap detection.
+   * Falls back to raw RPC parsing with WSOL support if enhanced API fails.
    */
   private async monitorWalletTrades(wallet: AlphaWallet): Promise<void> {
-    // Skip when Helius is disabled
-    if (appConfig.heliusDisabled) {
+    if (appConfig.heliusDisabled) return;
+
+    // Try Helius Enhanced Transactions API first (pre-parsed swaps)
+    const enhancedTxs = await heliusClient.getEnhancedTransactions(wallet.address, 20);
+
+    if (enhancedTxs.length > 0) {
+      for (const tx of enhancedTxs) {
+        try {
+          const trade = this.parseEnhancedTransaction(tx, wallet);
+          if (!trade) continue;
+          await this.recordTrade(wallet, trade);
+        } catch (error) {
+          logger.debug({ error, signature: tx.signature }, 'Error parsing enhanced transaction');
+        }
+      }
       return;
     }
 
-    // Get recent transactions
+    // Fallback: raw RPC with WSOL-aware parsing
     const txs = await heliusClient.getRecentTransactions(wallet.address, 20);
-
     for (const tx of txs) {
       try {
-        // Get full transaction details
         const txDetails = await heliusClient.getTransaction(tx.signature);
         if (!txDetails) continue;
-
-        // Parse token swaps from transaction
-        const trade = await this.parseSwapTransaction(txDetails, wallet);
+        const trade = this.parseSwapTransaction(txDetails, wallet);
         if (!trade) continue;
-
-        // Record the trade
         await this.recordTrade(wallet, trade);
       } catch (error) {
         logger.debug({ error, signature: tx.signature }, 'Error parsing transaction');
@@ -452,13 +461,17 @@ export class AlphaWalletManager {
     }
   }
 
+  // Wrapped SOL mint address
+  private static readonly WSOL_MINT = 'So11111111111111111111111111111111111111112';
+
   /**
-   * Parse swap transaction to extract trade details
+   * Parse a Helius Enhanced Transaction (pre-parsed swap data).
+   * The enhanced API returns tokenTransfers and nativeTransfers directly.
    */
-  private async parseSwapTransaction(
-    txDetails: any,
+  private parseEnhancedTransaction(
+    tx: any,
     wallet: AlphaWallet
-  ): Promise<{
+  ): {
     tokenAddress: string;
     tokenTicker: string | null;
     tradeType: 'BUY' | 'SELL';
@@ -467,15 +480,151 @@ export class AlphaWalletManager {
     priceAtTrade: number;
     txSignature: string;
     timestamp: Date;
-  } | null> {
+  } | null {
+    try {
+      const tokenTransfers = tx.tokenTransfers || [];
+      const nativeTransfers = tx.nativeTransfers || [];
+      const signature = tx.signature;
+      const timestamp = new Date(tx.timestamp * 1000);
+
+      // Find token transfers involving this wallet (excluding WSOL/SOL)
+      const walletTokenIn = tokenTransfers.filter(
+        (t: any) => t.toUserAccount === wallet.address && t.mint !== AlphaWalletManager.WSOL_MINT
+      );
+      const walletTokenOut = tokenTransfers.filter(
+        (t: any) => t.fromUserAccount === wallet.address && t.mint !== AlphaWalletManager.WSOL_MINT
+      );
+
+      // Calculate SOL flow (native + WSOL combined)
+      let solIn = 0;
+      let solOut = 0;
+
+      // Native SOL transfers
+      for (const nt of nativeTransfers) {
+        if (nt.toUserAccount === wallet.address) solIn += (nt.amount || 0) / 1e9;
+        if (nt.fromUserAccount === wallet.address) solOut += (nt.amount || 0) / 1e9;
+      }
+
+      // WSOL token transfers
+      const wsolIn = tokenTransfers.filter(
+        (t: any) => t.toUserAccount === wallet.address && t.mint === AlphaWalletManager.WSOL_MINT
+      );
+      const wsolOut = tokenTransfers.filter(
+        (t: any) => t.fromUserAccount === wallet.address && t.mint === AlphaWalletManager.WSOL_MINT
+      );
+      for (const w of wsolIn) solIn += (w.tokenAmount || 0);
+      for (const w of wsolOut) solOut += (w.tokenAmount || 0);
+
+      // BUY: token coming in, SOL going out
+      if (walletTokenIn.length > 0 && solOut > 0.01) {
+        const tokenTx = walletTokenIn[0];
+        const tokenAmount = tokenTx.tokenAmount || 0;
+        const solAmount = solOut - solIn; // net SOL spent
+        if (solAmount < 0.01) return null;
+
+        return {
+          tokenAddress: tokenTx.mint,
+          tokenTicker: null,
+          tradeType: 'BUY',
+          solAmount: Math.abs(solAmount),
+          tokenAmount,
+          priceAtTrade: Math.abs(solAmount) / tokenAmount,
+          txSignature: signature,
+          timestamp,
+        };
+      }
+
+      // SELL: token going out, SOL coming in
+      if (walletTokenOut.length > 0 && solIn > 0.01) {
+        const tokenTx = walletTokenOut[0];
+        const tokenAmount = tokenTx.tokenAmount || 0;
+        const solAmount = solIn - solOut; // net SOL received
+        if (solAmount < 0.01) return null;
+
+        return {
+          tokenAddress: tokenTx.mint,
+          tokenTicker: null,
+          tradeType: 'SELL',
+          solAmount: Math.abs(solAmount),
+          tokenAmount,
+          priceAtTrade: Math.abs(solAmount) / tokenAmount,
+          txSignature: signature,
+          timestamp,
+        };
+      }
+
+      return null;
+    } catch (error) {
+      logger.debug({ error }, 'Error parsing enhanced transaction');
+      return null;
+    }
+  }
+
+  /**
+   * Fallback: Parse swap transaction from raw RPC data.
+   * Handles both native SOL and WSOL token balance changes.
+   */
+  private parseSwapTransaction(
+    txDetails: any,
+    wallet: AlphaWallet
+  ): {
+    tokenAddress: string;
+    tokenTicker: string | null;
+    tradeType: 'BUY' | 'SELL';
+    solAmount: number;
+    tokenAmount: number;
+    priceAtTrade: number;
+    txSignature: string;
+    timestamp: Date;
+  } | null {
     try {
       const preBalances = txDetails.meta?.preTokenBalances || [];
       const postBalances = txDetails.meta?.postTokenBalances || [];
       const accountKeys = txDetails.transaction?.message?.accountKeys || [];
 
-      // Find token balance changes for this wallet
+      // Calculate SOL change: native balance + WSOL token balance combined
+      const walletIndex = accountKeys.findIndex((k: any) =>
+        (typeof k === 'string' ? k : k.pubkey) === wallet.address
+      );
+
+      let solChange = 0;
+
+      // Native SOL change
+      if (walletIndex >= 0) {
+        const preSol = (txDetails.meta?.preBalances?.[walletIndex] || 0) / 1e9;
+        const postSol = (txDetails.meta?.postBalances?.[walletIndex] || 0) / 1e9;
+        solChange += postSol - preSol;
+      }
+
+      // WSOL token balance change (this is where most DEX SOL flow happens)
+      for (const postBal of postBalances) {
+        if (postBal.owner !== wallet.address) continue;
+        if (postBal.mint !== AlphaWalletManager.WSOL_MINT) continue;
+
+        const preBal = preBalances.find(
+          (pb: any) => pb.mint === AlphaWalletManager.WSOL_MINT && pb.owner === wallet.address
+        );
+        const preAmount = preBal?.uiTokenAmount?.uiAmount || 0;
+        const postAmount = postBal.uiTokenAmount?.uiAmount || 0;
+        solChange += postAmount - preAmount;
+      }
+
+      // Also check if WSOL account was created (not in preBalances) or closed (not in postBalances)
+      for (const preBal of preBalances) {
+        if (preBal.owner !== wallet.address) continue;
+        if (preBal.mint !== AlphaWalletManager.WSOL_MINT) continue;
+        const stillExists = postBalances.some(
+          (pb: any) => pb.mint === AlphaWalletManager.WSOL_MINT && pb.owner === wallet.address
+        );
+        if (!stillExists) {
+          // WSOL account was closed — SOL was reclaimed (already reflected in native balance)
+        }
+      }
+
+      // Find non-SOL token changes for this wallet
       for (const postBalance of postBalances) {
         if (postBalance.owner !== wallet.address) continue;
+        if (postBalance.mint === AlphaWalletManager.WSOL_MINT) continue;
 
         const preBalance = preBalances.find(
           (pb: any) => pb.mint === postBalance.mint && pb.owner === wallet.address
@@ -487,20 +636,9 @@ export class AlphaWalletManager {
 
         if (Math.abs(tokenChange) < 0.0001) continue;
 
-        // Calculate SOL change
-        const walletIndex = accountKeys.findIndex((k: any) =>
-          (typeof k === 'string' ? k : k.pubkey) === wallet.address
-        );
-
-        if (walletIndex < 0) continue;
-
-        const preSol = (txDetails.meta?.preBalances?.[walletIndex] || 0) / 1e9;
-        const postSol = (txDetails.meta?.postBalances?.[walletIndex] || 0) / 1e9;
-        const solChange = postSol - preSol;
-
-        // Determine trade type
-        const isBuy = tokenChange > 0 && solChange < 0;
-        const isSell = tokenChange < 0 && solChange > 0;
+        // Determine trade type using combined SOL change
+        const isBuy = tokenChange > 0 && solChange < -0.005;
+        const isSell = tokenChange < 0 && solChange > 0.005;
 
         if (!isBuy && !isSell) continue;
 
@@ -508,19 +646,15 @@ export class AlphaWalletManager {
         const solAmount = Math.abs(solChange);
         const tokenAmount = Math.abs(tokenChange);
 
-        // Skip very small trades
         if (solAmount < 0.01) continue;
-
-        // Calculate price
-        const priceAtTrade = solAmount / tokenAmount;
 
         return {
           tokenAddress,
-          tokenTicker: null, // Would need to fetch from token metadata
+          tokenTicker: null,
           tradeType: isBuy ? 'BUY' : 'SELL',
           solAmount,
           tokenAmount,
-          priceAtTrade,
+          priceAtTrade: solAmount / tokenAmount,
           txSignature: txDetails.transaction.signatures[0],
           timestamp: new Date(txDetails.blockTime * 1000),
         };

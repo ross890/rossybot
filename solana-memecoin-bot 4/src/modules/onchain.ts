@@ -319,10 +319,25 @@ class HeliusClient {
         method: 'getSignaturesForAddress',
         params: [address, { limit }],
       });
-      
+
       return response.data.result || [];
     } catch (error) {
       logger.error({ error, address }, 'Failed to get transactions from Helius');
+      return [];
+    }
+  }
+
+  /**
+   * Get parsed transaction history using Helius Enhanced Transactions API.
+   * Returns pre-parsed swap/transfer data — much more reliable than raw RPC parsing.
+   */
+  async getEnhancedTransactions(address: string, limit = 20): Promise<any[]> {
+    try {
+      const url = `https://api.helius.xyz/v0/addresses/${address}/transactions?api-key=${this.apiKey}&limit=${limit}&type=SWAP`;
+      const response = await axios.get(url, { timeout: 30000 });
+      return response.data || [];
+    } catch (error) {
+      logger.warn({ error, address }, 'Enhanced transactions API failed, will use RPC fallback');
       return [];
     }
   }

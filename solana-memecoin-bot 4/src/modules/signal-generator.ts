@@ -18,20 +18,17 @@ import { kolWalletMonitor } from './kol-tracker.js';
 import { scoringEngine } from './scoring.js';
 import { telegramBot } from './telegram.js';
 
-// New feature modules
+// Safety & scoring modules
 import { tokenSafetyChecker } from './safety/token-safety-checker.js';
-import { insiderDetector } from './safety/insider-detector.js';
 import { convictionTracker } from './signals/conviction-tracker.js';
 import { kolSellDetector } from './signals/sell-detector.js';
 import { kolAnalytics } from './kol/kol-analytics.js';
 import { bondingCurveMonitor } from './pumpfun/bonding-monitor.js';
-import { moonshotAssessor } from './moonshot-assessor.js';
 
-// NEW: On-chain first modules (replacing KOL-dependent logic)
+// On-chain first modules
 import { momentumAnalyzer } from './momentum-analyzer.js';
 import { bundleDetector, BundleAnalysisResult } from './bundle-detector.js';
 import { onChainScoringEngine, OnChainScore } from './onchain-scoring.js';
-import { smallCapitalManager, SignalQuality } from './small-capital-manager.js';
 
 // Performance tracking
 import { signalPerformanceTracker, thresholdOptimizer, performanceLogger } from './performance/index.js';
@@ -41,9 +38,6 @@ import { autoTrader } from './trading/index.js';
 
 // Multi-source token discovery
 import { discoveryEngine } from './discovery/index.js';
-
-// 2x Probability & Dev Scoring
-import { probabilitySignalModule } from './probability-signal.js';
 
 // RugCheck integration — hard-gate for DANGER tokens
 import { rugCheckClient } from './rugcheck.js';
@@ -821,12 +815,6 @@ export class SignalGenerator {
       }
     }
 
-    // 2x PROBABILITY CHECK: Run in parallel with existing pipeline
-    // This fires a separate 2x probability alert when conditions are met
-    this.runTwoXProbabilityCheck(tokenAddress, metrics, null).catch(err => {
-      logger.debug({ err, tokenAddress: shortAddr }, '2x probability check failed (non-blocking)');
-    });
-
     // Get social metrics
     const socialMetrics = await this.getSocialMetrics(tokenAddress, metrics);
 
@@ -871,11 +859,6 @@ export class SignalGenerator {
     // ============ PATH A: KOL ACTIVITY DETECTED ============
     if (kolActivities.length > 0) {
       logger.info({ tokenAddress, kolCount: kolActivities.length }, 'KOL activity detected');
-
-      // 2x PROBABILITY: Re-run with KOL activity data (higher probability expected)
-      this.runTwoXProbabilityCheck(tokenAddress, metrics, kolActivities[0]).catch(err => {
-        logger.debug({ err, tokenAddress: shortAddr }, '2x probability check with KOL failed (non-blocking)');
-      });
 
       // FEATURE 2: Track conviction - record all KOL buys
       for (const activity of kolActivities) {
@@ -1299,15 +1282,17 @@ export class SignalGenerator {
       confidence: onChainScore.confidence,
     };
 
-    const signalQuality = smallCapitalManager.classifySignal(
-      mockMomentumScore as any,
-      safetyResult.safetyScore,
-      bundleAnalysis,
-      false, // kolValidated
-      false  // multiKol
-    );
-
-    const positionSize = smallCapitalManager.calculatePositionSize(signalQuality);
+    // Inline signal quality classification (replaced smallCapitalManager)
+    const signalStrength = onChainScore.total >= 75 ? 'STRONG' as const :
+                           onChainScore.total >= 55 ? 'MODERATE' as const : 'WEAK' as const;
+    const signalQuality = {
+      signalStrength,
+      kolValidated: false,
+    };
+    const positionSize = {
+      solAmount: tierConfig.positionSizeMultiplier * appConfig.trading.defaultPositionSizePercent,
+      rationale: `${tier} tier, ${signalStrength} signal, ${tierConfig.positionSizeMultiplier}x multiplier`,
+    };
 
     // Step 7: Build and send on-chain momentum signal
     const onChainSignal = await this.buildOnChainSignal(
@@ -1419,7 +1404,7 @@ export class SignalGenerator {
     bundleAnalysis: BundleAnalysisResult,
     safetyResult: TokenSafetyResult,
     positionSize: any,
-    signalQuality: SignalQuality,
+    signalQuality: { signalStrength: 'STRONG' | 'MODERATE' | 'WEAK'; kolValidated: boolean },
     momentumScore: any,
     socialMetrics: SocialMetrics,
     dexScreenerInfo?: DexScreenerTokenInfo,
@@ -1907,47 +1892,7 @@ export class SignalGenerator {
     };
   }
 
-  /**
-   * Run 2x probability check and send alert if conditions are met.
-   * This runs as a fire-and-forget parallel check — does NOT block the main pipeline.
-   */
-  private async runTwoXProbabilityCheck(
-    tokenAddress: string,
-    metrics: TokenMetrics,
-    kolActivity: KolWalletActivity | null
-  ): Promise<void> {
-    // Only check tokens at $50k+ MC
-    if (metrics.marketCap < 50000) return;
-
-    try {
-      // Get holder data from 30 minutes ago (approximate from holderChange1h)
-      const holders30minAgo = metrics.holderChange1h > 0
-        ? Math.max(1, Math.round(metrics.holderCount / (1 + metrics.holderChange1h / 100 / 2)))
-        : metrics.holderCount;
-
-      // Approximate volume rolling average from 24h volume
-      const volumeRollingAvg = metrics.volume24h > 0 ? metrics.volume24h : 1;
-
-      const result = await probabilitySignalModule.checkToken(
-        metrics,
-        kolActivity,
-        holders30minAgo,
-        volumeRollingAvg
-      );
-
-      if (result.shouldSignal && result.formattedAlert) {
-        await telegramBot.sendTwoXSignal(result.formattedAlert, tokenAddress);
-        logger.info({
-          tokenAddress: tokenAddress.slice(0, 8),
-          ticker: metrics.ticker,
-          probability: (result.twoXSignal.adjustedProbability * 100).toFixed(1) + '%',
-          confidence: result.twoXSignal.confidence,
-        }, '2x probability signal fired');
-      }
-    } catch (error) {
-      logger.debug({ error, tokenAddress: tokenAddress.slice(0, 8) }, '2x probability check error');
-    }
-  }
+  // 2x probability module REMOVED (was over-engineered, decoupled from main pipeline)
 
   /**
    * Clean up expired discovery signals

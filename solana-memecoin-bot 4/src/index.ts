@@ -10,7 +10,7 @@ import { telegramBot } from './modules/telegram.js';
 // REMOVED: Mature token strategy disabled - contradicts micro-cap focus
 // import { matureTokenScanner, matureTokenTelegram } from './modules/mature-token/index.js';
 import { dailyAutoOptimizer, thresholdOptimizer } from './modules/performance/index.js';
-import { probabilitySignalModule } from './modules/probability-signal.js';
+// probability-signal module REMOVED (over-engineered, decoupled from pipeline)
 import { pumpfunDevMonitor } from './modules/pumpfun/dev-monitor.js';
 import { devStatsUpdater } from './modules/pumpfun/dev-stats-updater.js';
 
@@ -115,13 +115,7 @@ async function main(): Promise<void> {
     logger.info('Early token strategy DISABLED');
   }
 
-  // Initialize 2x probability signal module (RugCheck, Dev Scoring, Token Crawler)
-  try {
-    await probabilitySignalModule.initialize();
-    logger.info('2x probability signal module initialized');
-  } catch (error) {
-    logger.warn({ error }, 'Failed to initialize probability module - 2x signals disabled');
-  }
+  // 2x probability module REMOVED - was over-engineered bloat
 
   // Initialize Pump.fun Dev Tracker
   if (appConfig.devTracker.enabled) {
@@ -163,13 +157,7 @@ async function main(): Promise<void> {
 
   // Mature token strategy REMOVED - micro-cap focus only
 
-  // Start 2x probability module (token crawler + backtest scheduler)
-  try {
-    probabilitySignalModule.start();
-    logger.info('2x probability module started (crawler + backtest scheduler)');
-  } catch (error) {
-    logger.warn({ error }, 'Failed to start probability module');
-  }
+  // 2x probability module REMOVED
 
   // Start Pump.fun Dev Tracker
   if (appConfig.devTracker.enabled) {
@@ -191,7 +179,7 @@ async function main(): Promise<void> {
     if (appConfig.trading.enableEarlyStrategy) {
       signalGenerator.stop();
     }
-    probabilitySignalModule.stop();
+    // probabilitySignalModule removed
     dailyAutoOptimizer.stop();
     pumpfunDevMonitor.stop();
     devStatsUpdater.stop();

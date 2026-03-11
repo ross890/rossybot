@@ -15,6 +15,8 @@ import type { PumpfunDev, DevSignal } from '../../types/index.js';
 // ============ CONSTANTS ============
 
 const PUMPFUN_PROGRAM_ID = '6EF8rrecthR5Dkzon8Nwu78hRvfCKubJ14M5uBEwF6P';
+const PUMPFUN_AMM_PROGRAM_ID = 'pAMMBay6oceH9fJKBRHGP5D4bD4sWpmSwMn52FMfXEA';
+const PUMPFUN_PROGRAM_IDS = new Set([PUMPFUN_PROGRAM_ID, PUMPFUN_AMM_PROGRAM_ID]);
 
 // Solscan Pro API v2.0
 const SOLSCAN_BASE = 'https://pro-api.solscan.io/v2.0';
@@ -323,7 +325,7 @@ export class PumpfunDevMonitor {
     // Solscan transaction data includes program IDs in different formats
     // Check parsed_instructions, program_invocations, or programs array
     const programs = tx.program_ids || tx.programs || [];
-    if (Array.isArray(programs) && programs.includes(PUMPFUN_PROGRAM_ID)) {
+    if (Array.isArray(programs) && programs.some((p: string) => PUMPFUN_PROGRAM_IDS.has(p))) {
       return true;
     }
 
@@ -332,7 +334,7 @@ export class PumpfunDevMonitor {
     if (Array.isArray(instructions)) {
       for (const ix of instructions) {
         const programId = ix.program_id || ix.programId || ix.program;
-        if (programId === PUMPFUN_PROGRAM_ID) {
+        if (PUMPFUN_PROGRAM_IDS.has(programId)) {
           return true;
         }
       }
@@ -360,7 +362,7 @@ export class PumpfunDevMonitor {
       const programId = ix.program_id || ix.programId || ix.program;
 
       // Look for create/deploy/init patterns from Pump.fun
-      if (programId === PUMPFUN_PROGRAM_ID) {
+      if (PUMPFUN_PROGRAM_IDS.has(programId)) {
         // "create" instruction on Pump.fun — the new token mint is in the params
         if (ixType === 'create' || ixType === 'initialize' || ixType === 'init') {
           // Token mint is usually the first token in the params

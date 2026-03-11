@@ -18,20 +18,17 @@ import { kolWalletMonitor } from './kol-tracker.js';
 import { scoringEngine } from './scoring.js';
 import { telegramBot } from './telegram.js';
 
-// New feature modules
+// Safety & scoring modules
 import { tokenSafetyChecker } from './safety/token-safety-checker.js';
-import { insiderDetector } from './safety/insider-detector.js';
 import { convictionTracker } from './signals/conviction-tracker.js';
 import { kolSellDetector } from './signals/sell-detector.js';
 import { kolAnalytics } from './kol/kol-analytics.js';
 import { bondingCurveMonitor } from './pumpfun/bonding-monitor.js';
-import { moonshotAssessor } from './moonshot-assessor.js';
 
-// NEW: On-chain first modules (replacing KOL-dependent logic)
+// On-chain first modules
 import { momentumAnalyzer } from './momentum-analyzer.js';
 import { bundleDetector, BundleAnalysisResult } from './bundle-detector.js';
 import { onChainScoringEngine, OnChainScore } from './onchain-scoring.js';
-import { smallCapitalManager, SignalQuality } from './small-capital-manager.js';
 
 // Performance tracking
 import { signalPerformanceTracker, thresholdOptimizer, performanceLogger } from './performance/index.js';
@@ -41,9 +38,7 @@ import { autoTrader } from './trading/index.js';
 
 // Multi-source token discovery
 import { discoveryEngine } from './discovery/index.js';
-
-// 2x Probability & Dev Scoring
-import { probabilitySignalModule } from './probability-signal.js';
+import { gmgnClient } from './gmgn-client.js';
 
 // RugCheck integration — hard-gate for DANGER tokens
 import { rugCheckClient } from './rugcheck.js';
@@ -78,16 +73,15 @@ const KOL_ACTIVITY_WINDOW_MS = 2 * 60 * 60 * 1000; // 2 hours
 const DISCOVERY_SIGNAL_EXPIRY_MS = 24 * 60 * 60 * 1000; // Track discovery for 24 hours
 
 // ============ TIER-AWARE FILTERING ============
-// Based on performance data: EMERGING tier ($8M-$20M) has 11% win rate vs 47% for RISING
-// This indicates tokens in the $8M-$20M range are poor risk/reward
+// RECALIBRATED: Micro-cap focus for quick-flip edge.
+// The formula targets MCAP ≤ $225K as the sweet spot for 80% win rate.
+// We keep MICRO as primary, allow RISING up to $1M, and disable everything above.
+// Larger caps = more bots, less edge, worse risk/reward.
 //
 // TIER BOUNDARIES (based on entry market cap):
-// - RISING:      $500K - $8M   (best performance: 47% win rate)
-// - EMERGING:    $8M - $20M    (worst performance: 11% win rate, -72% avg return)
-// - GRADUATED:   $20M - $50M   (insufficient data)
-// - ESTABLISHED: $50M - $150M  (insufficient data)
-//
-// STRATEGY: Skip or heavily penalize EMERGING tier signals
+// - MICRO:   $30K - $225K   (PRIMARY: sweet spot for quick flips)
+// - RISING:  $225K - $1M    (SECONDARY: still viable, reduced size)
+// - ABOVE:   $1M+           (DISABLED: no edge vs institutional bots)
 
 type MarketCapTier = 'MICRO' | 'RISING' | 'EMERGING' | 'GRADUATED' | 'ESTABLISHED' | 'UNKNOWN';
 
@@ -100,63 +94,63 @@ interface TierConfig {
   positionSizeMultiplier: number;  // Scale position size for tier
 }
 
-// Tier configuration - LOOSENED for memecoin signal generation
+// Tier configuration - MICRO-CAP FOCUSED
 const TIER_CONFIGS: Record<MarketCapTier, TierConfig> = {
   MICRO: {
-    minMcap: 50_000,             // No tokens below $50K MC
-    maxMcap: 500_000,
+    minMcap: 30_000,              // Lowered floor - catch earlier
+    maxMcap: 225_000,             // Sweet spot ceiling per formula
     enabled: true,
-    minLiquidity: 500,           // Was $5K - early gems start tiny
-    minSafetyScore: 20,          // Was 50 - memecoins are inherently risky
-    positionSizeMultiplier: 0.5,  // Half size for micro caps
+    minLiquidity: 500,            // Early gems start tiny
+    minSafetyScore: 20,           // Memecoins are inherently risky
+    positionSizeMultiplier: 1.0,  // Full size - this is our edge
   },
   RISING: {
-    minMcap: 500_000,
-    maxMcap: 8_000_000,
+    minMcap: 225_000,
+    maxMcap: 1_000_000,           // Hard cap at $1M
     enabled: true,
-    minLiquidity: 2000,          // Was $10K
-    minSafetyScore: 25,          // Was 50
-    positionSizeMultiplier: 1.0,  // Full position size
+    minLiquidity: 2000,
+    minSafetyScore: 25,
+    positionSizeMultiplier: 0.5,  // Half size - diminishing edge
   },
   EMERGING: {
-    minMcap: 8_000_000,
-    maxMcap: 20_000_000,
-    enabled: true,
-    minLiquidity: 5000,          // Was $20K
-    minSafetyScore: 30,          // Was 55
-    positionSizeMultiplier: 0.5,
+    minMcap: 1_000_000,
+    maxMcap: 5_000_000,
+    enabled: false,               // DISABLED: no edge above $1M
+    minLiquidity: 5000,
+    minSafetyScore: 30,
+    positionSizeMultiplier: 0,
   },
   GRADUATED: {
-    minMcap: 20_000_000,
-    maxMcap: 50_000_000,
-    enabled: true,
-    minLiquidity: 15000,         // Was $50K
-    minSafetyScore: 35,          // Was 60
-    positionSizeMultiplier: 0.75,
+    minMcap: 5_000_000,
+    maxMcap: 25_000_000,
+    enabled: false,               // DISABLED
+    minLiquidity: 15000,
+    minSafetyScore: 35,
+    positionSizeMultiplier: 0,
   },
   ESTABLISHED: {
-    minMcap: 50_000_000,
+    minMcap: 25_000_000,
     maxMcap: 150_000_000,
-    enabled: false,              // DISABLED: 0% win rate, -43% avg return on 2 signals
+    enabled: false,               // DISABLED
     minLiquidity: 30000,
     minSafetyScore: 35,
-    positionSizeMultiplier: 0.5,
+    positionSizeMultiplier: 0,
   },
   UNKNOWN: {
     minMcap: 0,
     maxMcap: Infinity,
-    enabled: false,  // Block tokens outside known ranges
+    enabled: false,
     minLiquidity: 50000,
     minSafetyScore: 70,
-    positionSizeMultiplier: 0.25,
+    positionSizeMultiplier: 0,
   },
 };
 
 function getMarketCapTier(marketCap: number): MarketCapTier {
-  if (marketCap < 500_000) return 'MICRO';
-  if (marketCap < 8_000_000) return 'RISING';
-  if (marketCap < 20_000_000) return 'EMERGING';
-  if (marketCap < 50_000_000) return 'GRADUATED';
+  if (marketCap < 225_000) return 'MICRO';
+  if (marketCap < 1_000_000) return 'RISING';
+  if (marketCap < 5_000_000) return 'EMERGING';
+  if (marketCap < 25_000_000) return 'GRADUATED';
   if (marketCap < 150_000_000) return 'ESTABLISHED';
   return 'UNKNOWN';
 }
@@ -562,7 +556,7 @@ export class SignalGenerator {
       logger.debug({ error }, 'DexScreener trending failed');
     }
 
-    // ===== SOURCE 4: Discovery Engine (volume anomalies, holder growth, narratives) =====
+    // ===== SOURCE 4: Discovery Engine (smart money scanner) =====
     try {
       const discoveryTokens = await discoveryEngine.getAllDiscoveredTokens();
 
@@ -580,10 +574,28 @@ export class SignalGenerator {
       logger.debug({ error }, 'Discovery engine failed');
     }
 
+    // ===== SOURCE 5: GMGN Trending (smart money + swap activity) =====
+    try {
+      const gmgnTokens = await gmgnClient.getTrendingSolanaTokens(50);
+
+      for (const address of gmgnTokens) {
+        candidates.add(address);
+      }
+
+      if (gmgnTokens.length > 0) {
+        logger.debug({
+          count: gmgnTokens.length,
+          source: 'GMGN trending'
+        }, 'Candidates from GMGN');
+      }
+    } catch (error) {
+      logger.debug({ error }, 'GMGN trending failed');
+    }
+
     // Log final candidate pool composition
     logger.debug({
       totalCandidates: candidates.size,
-      sources: 'DexScreener + Jupiter + Discovery Engine (volume/holder/narrative)',
+      sources: 'DexScreener + Jupiter + Discovery Engine + GMGN',
     }, 'Candidate token pool assembled');
 
     return Array.from(candidates);
@@ -822,12 +834,6 @@ export class SignalGenerator {
       }
     }
 
-    // 2x PROBABILITY CHECK: Run in parallel with existing pipeline
-    // This fires a separate 2x probability alert when conditions are met
-    this.runTwoXProbabilityCheck(tokenAddress, metrics, null).catch(err => {
-      logger.debug({ err, tokenAddress: shortAddr }, '2x probability check failed (non-blocking)');
-    });
-
     // Get social metrics
     const socialMetrics = await this.getSocialMetrics(tokenAddress, metrics);
 
@@ -872,11 +878,6 @@ export class SignalGenerator {
     // ============ PATH A: KOL ACTIVITY DETECTED ============
     if (kolActivities.length > 0) {
       logger.info({ tokenAddress, kolCount: kolActivities.length }, 'KOL activity detected');
-
-      // 2x PROBABILITY: Re-run with KOL activity data (higher probability expected)
-      this.runTwoXProbabilityCheck(tokenAddress, metrics, kolActivities[0]).catch(err => {
-        logger.debug({ err, tokenAddress: shortAddr }, '2x probability check with KOL failed (non-blocking)');
-      });
 
       // FEATURE 2: Track conviction - record all KOL buys
       for (const activity of kolActivities) {
@@ -1300,15 +1301,17 @@ export class SignalGenerator {
       confidence: onChainScore.confidence,
     };
 
-    const signalQuality = smallCapitalManager.classifySignal(
-      mockMomentumScore as any,
-      safetyResult.safetyScore,
-      bundleAnalysis,
-      false, // kolValidated
-      false  // multiKol
-    );
-
-    const positionSize = smallCapitalManager.calculatePositionSize(signalQuality);
+    // Inline signal quality classification (replaced smallCapitalManager)
+    const signalStrength = onChainScore.total >= 75 ? 'STRONG' as const :
+                           onChainScore.total >= 55 ? 'MODERATE' as const : 'WEAK' as const;
+    const signalQuality = {
+      signalStrength,
+      kolValidated: false,
+    };
+    const positionSize = {
+      solAmount: tierConfig.positionSizeMultiplier * appConfig.trading.defaultPositionSizePercent,
+      rationale: `${tier} tier, ${signalStrength} signal, ${tierConfig.positionSizeMultiplier}x multiplier`,
+    };
 
     // Step 7: Build and send on-chain momentum signal
     const onChainSignal = await this.buildOnChainSignal(
@@ -1420,7 +1423,7 @@ export class SignalGenerator {
     bundleAnalysis: BundleAnalysisResult,
     safetyResult: TokenSafetyResult,
     positionSize: any,
-    signalQuality: SignalQuality,
+    signalQuality: { signalStrength: 'STRONG' | 'MODERATE' | 'WEAK'; kolValidated: boolean },
     momentumScore: any,
     socialMetrics: SocialMetrics,
     dexScreenerInfo?: DexScreenerTokenInfo,
@@ -1908,47 +1911,7 @@ export class SignalGenerator {
     };
   }
 
-  /**
-   * Run 2x probability check and send alert if conditions are met.
-   * This runs as a fire-and-forget parallel check — does NOT block the main pipeline.
-   */
-  private async runTwoXProbabilityCheck(
-    tokenAddress: string,
-    metrics: TokenMetrics,
-    kolActivity: KolWalletActivity | null
-  ): Promise<void> {
-    // Only check tokens at $50k+ MC
-    if (metrics.marketCap < 50000) return;
-
-    try {
-      // Get holder data from 30 minutes ago (approximate from holderChange1h)
-      const holders30minAgo = metrics.holderChange1h > 0
-        ? Math.max(1, Math.round(metrics.holderCount / (1 + metrics.holderChange1h / 100 / 2)))
-        : metrics.holderCount;
-
-      // Approximate volume rolling average from 24h volume
-      const volumeRollingAvg = metrics.volume24h > 0 ? metrics.volume24h : 1;
-
-      const result = await probabilitySignalModule.checkToken(
-        metrics,
-        kolActivity,
-        holders30minAgo,
-        volumeRollingAvg
-      );
-
-      if (result.shouldSignal && result.formattedAlert) {
-        await telegramBot.sendTwoXSignal(result.formattedAlert, tokenAddress);
-        logger.info({
-          tokenAddress: tokenAddress.slice(0, 8),
-          ticker: metrics.ticker,
-          probability: (result.twoXSignal.adjustedProbability * 100).toFixed(1) + '%',
-          confidence: result.twoXSignal.confidence,
-        }, '2x probability signal fired');
-      }
-    } catch (error) {
-      logger.debug({ error, tokenAddress: tokenAddress.slice(0, 8) }, '2x probability check error');
-    }
-  }
+  // 2x probability module REMOVED (was over-engineered, decoupled from main pipeline)
 
   /**
    * Clean up expired discovery signals

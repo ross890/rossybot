@@ -17,7 +17,7 @@ export interface ManagedPosition {
   tokenTicker: string;
   entryPrice: number;
   currentPrice: number;
-  peakPrice: number;      // HIT RATE IMPROVEMENT: Track peak for trailing stop
+  peakPrice: number;      // Track peak for trailing stop
   quantity: number;
   entryTimestamp: Date;
   signalCategory: SignalCategory;
@@ -31,12 +31,12 @@ export interface ManagedPosition {
   pnlPercent: number;
   holdTimeHours: number;
   currentStopLoss: number; // Adjusted stop loss after time decay
-  peakPnlPercent: number;  // HIT RATE IMPROVEMENT: Track peak PnL for trailing stop
+  peakPnlPercent: number;  // Track peak PnL for trailing stop
+  entryMarketCap: number | null; // MCAP at entry for 4x exit rule
 }
 
 export interface PositionCheckResult {
-  // HIT RATE IMPROVEMENT: Added TRAILING_STOP and MOMENTUM_FADE actions
-  action: 'NONE' | 'STOP_LOSS' | 'TAKE_PROFIT_1' | 'TAKE_PROFIT_2' | 'TIME_DECAY_STOP' | 'TRAILING_STOP' | 'MOMENTUM_FADE';
+  action: 'NONE' | 'STOP_LOSS' | 'TAKE_PROFIT_1' | 'TAKE_PROFIT_2' | 'TIME_DECAY_STOP' | 'TRAILING_STOP' | 'MOMENTUM_FADE' | 'MCAP_MULTIPLE_EXIT';
   sellPercent: number;
   reason: string;
 }
@@ -51,6 +51,13 @@ const MOMENTUM_FADE_CONFIG = {
   MIN_PNL_TO_CHECK: 15,   // Only check momentum fade if up 15%+
   MIN_SELL_PRESSURE: 1.5, // Sell:Buy ratio > 1.5 = fading
   PARTIAL_EXIT_PERCENT: 50, // Sell 50% on momentum fade
+};
+
+// MCAP-multiple exit: exit when token MCAP reaches 4x entry MCAP
+// Per meme coin formula: MCAP > 4x entry = high dump risk
+const MCAP_EXIT_CONFIG = {
+  EXIT_MULTIPLE: 4,         // Exit at 4x entry MCAP
+  SELL_PERCENT: 100,        // Full exit - dump risk too high at 4x
 };
 
 // ============ POSITION MANAGER CLASS ============
@@ -155,13 +162,14 @@ export class PositionManager {
       // Momentum data optional - continue without it
     }
 
-    // Check what action to take (now with trailing stop and momentum data)
+    // Check what action to take (now with trailing stop, momentum, and MCAP exit)
     const checkResult = this.evaluatePosition(
       position,
       currentPrice,
       pnlPercent,
       peakPnlPercent,
-      momentumData
+      momentumData,
+      metrics.marketCap
     );
 
     if (checkResult.action === 'NONE') {
@@ -213,10 +221,27 @@ export class PositionManager {
     currentPrice: number,
     pnlPercent: number,
     peakPnlPercent: number = pnlPercent,
-    momentumData: any = null
+    momentumData: any = null,
+    currentMarketCap: number = 0
   ): PositionCheckResult {
     const config = DEFAULT_TRADE_CONFIG;
     const category = position.signalCategory;
+
+    // ===== 0. MCAP MULTIPLE EXIT (formula rule: exit at 4x entry MCAP) =====
+    // Per meme coin formula: MCAP > 4x entry = overextended, high dump risk
+    if (
+      position.entryMarketCap &&
+      position.entryMarketCap > 0 &&
+      currentMarketCap > 0 &&
+      currentMarketCap >= position.entryMarketCap * MCAP_EXIT_CONFIG.EXIT_MULTIPLE
+    ) {
+      const mcapMultiple = (currentMarketCap / position.entryMarketCap).toFixed(1);
+      return {
+        action: 'MCAP_MULTIPLE_EXIT',
+        sellPercent: MCAP_EXIT_CONFIG.SELL_PERCENT,
+        reason: `MCAP_EXIT: ${mcapMultiple}x entry MCAP ($${(position.entryMarketCap / 1000).toFixed(0)}K → $${(currentMarketCap / 1000).toFixed(0)}K)`,
+      };
+    }
 
     // ===== 1. STOP LOSS (highest priority) =====
     // Calculate time-adjusted stop loss
@@ -389,6 +414,7 @@ export class PositionManager {
         peakPnlPercent: ((peakPrice - entryPrice) / entryPrice) * 100,
         holdTimeHours,
         currentStopLoss: parseFloat(row.stop_loss),
+        entryMarketCap: row.entry_market_cap ? parseFloat(row.entry_market_cap) : null,
       };
     });
   }

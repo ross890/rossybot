@@ -32,8 +32,10 @@ interface NarrativeTrend {
 
 // ============ CONSTANTS ============
 
-// Pump.fun Program ID
+// Pump.fun Program IDs
 const PUMPFUN_PROGRAM_ID = '6EF8rrecthR5Dkzon8Nwu78hRvfCKubJ14M5uBEwF6P';
+const PUMPFUN_AMM_PROGRAM_ID = 'pAMMBay6oceH9fJKBRHGP5D4bD4sWpmSwMn52FMfXEA';
+const PUMPFUN_PROGRAM_IDS = new Set([PUMPFUN_PROGRAM_ID, PUMPFUN_AMM_PROGRAM_ID]);
 
 // Migration thresholds
 const TARGET_MARKET_CAP = 69000; // ~$69k for migration
@@ -510,7 +512,7 @@ export class BondingCurveMonitor {
         typeof k === 'string' ? k : k.pubkey.toString()
       );
 
-      return accounts.includes(PUMPFUN_PROGRAM_ID);
+      return accounts.some(a => PUMPFUN_PROGRAM_IDS.has(a));
     } catch (error) {
       logger.debug({ error, tokenMint }, 'Failed to check if Pump.fun token');
       return false;
@@ -954,6 +956,8 @@ export default {
   BondingCurveMonitor,
   bondingCurveMonitor,
   PUMPFUN_PROGRAM_ID,
+  PUMPFUN_AMM_PROGRAM_ID,
+  PUMPFUN_PROGRAM_IDS,
   TARGET_MARKET_CAP,
   ALERT_THRESHOLDS,
 };

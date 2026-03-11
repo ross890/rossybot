@@ -7,9 +7,10 @@ import { logger } from './utils/logger.js';
 import { pool, SCHEMA_SQL } from './utils/database.js';
 import { signalGenerator } from './modules/signal-generator.js';
 import { telegramBot } from './modules/telegram.js';
-import { matureTokenScanner, matureTokenTelegram } from './modules/mature-token/index.js';
+// REMOVED: Mature token strategy disabled - contradicts micro-cap focus
+// import { matureTokenScanner, matureTokenTelegram } from './modules/mature-token/index.js';
 import { dailyAutoOptimizer, thresholdOptimizer } from './modules/performance/index.js';
-import { probabilitySignalModule } from './modules/probability-signal.js';
+// probability-signal module REMOVED (over-engineered, decoupled from pipeline)
 import { pumpfunDevMonitor } from './modules/pumpfun/dev-monitor.js';
 import { devStatsUpdater } from './modules/pumpfun/dev-stats-updater.js';
 
@@ -60,6 +61,7 @@ function printStartupDiagnostics(): void {
   }
   logger.info('   DexScreener: FREE (token discovery, metrics, boost status)');
   logger.info('   Jupiter: FREE (recent tokens, verified list)');
+  logger.info('   GMGN: FREE (trending tokens, smart money activity)');
   logger.info('   RugCheck: FREE (contract safety hard gate)');
   logger.info(`   Solscan Pro: ${appConfig.solscanApiKey ? 'CONFIGURED (dev wallet monitoring)' : 'NOT SET - dev tracker limited'}`);
   logger.info(`   Telegram: ${appConfig.telegramBotToken ? 'CONFIGURED' : 'MISSING - alerts disabled'}`);
@@ -68,8 +70,7 @@ function printStartupDiagnostics(): void {
   // Strategy Configuration
   logger.info('');
   logger.info('STRATEGIES');
-  logger.info(`   Early Token (5min-90min): ${appConfig.trading.enableEarlyStrategy ? 'ENABLED - 20s scan cycle' : 'DISABLED'}`);
-  logger.info(`   Mature Token (21+ days): ${appConfig.trading.enableMatureStrategy ? 'ENABLED - 5min scan cycle' : 'DISABLED'}`);
+  logger.info(`   Early Token (micro-cap focus): ${appConfig.trading.enableEarlyStrategy ? 'ENABLED - 20s scan cycle' : 'DISABLED'}`);
   logger.info(`   Pump.fun Dev Tracker: ${appConfig.devTracker.enabled ? 'ENABLED - 15s poll cycle' : 'DISABLED'}`);
 
   // Signal Limits
@@ -83,7 +84,7 @@ function printStartupDiagnostics(): void {
   // Screening
   logger.info('');
   logger.info('SCREENING');
-  logger.info(`   Market Cap: $${appConfig.screening.minMarketCap.toLocaleString()} - $${appConfig.screening.maxMarketCap.toLocaleString()}`);
+  logger.info(`   Market Cap: $${appConfig.screening.minMarketCap.toLocaleString()} - $${appConfig.screening.maxMarketCap.toLocaleString()} (MICRO-CAP FOCUS)`);
   logger.info(`   Min Volume: $${appConfig.screening.min24hVolume.toLocaleString()} | Min Holders: ${appConfig.screening.minHolderCount}`);
   logger.info(`   Max Top10: ${appConfig.screening.maxTop10Concentration}% | Min Liquidity: $${appConfig.screening.minLiquidityPool.toLocaleString()}`);
   logger.info(`   Min Token Age: ${appConfig.screening.minTokenAgeMinutes} minutes`);
@@ -107,14 +108,7 @@ async function main(): Promise<void> {
   // Initialize Telegram bot (must be done early for commands to work)
   await telegramBot.initialize();
 
-  // Share bot instance with mature token telegram formatter
-  const botInstance = telegramBot.getBot();
-  if (botInstance) {
-    matureTokenTelegram.initialize(botInstance);
-    logger.info('Mature token telegram formatter initialized');
-  }
-
-  // Initialize signal generators based on config
+  // Initialize signal generator (early token strategy - core mission)
   if (appConfig.trading.enableEarlyStrategy) {
     await signalGenerator.initialize();
     logger.info('Early token strategy ENABLED');
@@ -122,20 +116,7 @@ async function main(): Promise<void> {
     logger.info('Early token strategy DISABLED');
   }
 
-  if (appConfig.trading.enableMatureStrategy) {
-    await matureTokenScanner.initialize();
-    logger.info('Mature token strategy ENABLED');
-  } else {
-    logger.info('Mature token strategy DISABLED');
-  }
-
-  // Initialize 2x probability signal module (RugCheck, Dev Scoring, Token Crawler)
-  try {
-    await probabilitySignalModule.initialize();
-    logger.info('2x probability signal module initialized');
-  } catch (error) {
-    logger.warn({ error }, 'Failed to initialize probability module - 2x signals disabled');
-  }
+  // 2x probability module REMOVED - was over-engineered bloat
 
   // Initialize Pump.fun Dev Tracker
   if (appConfig.devTracker.enabled) {
@@ -175,18 +156,9 @@ async function main(): Promise<void> {
     logger.info('Early token signal generator started');
   }
 
-  if (appConfig.trading.enableMatureStrategy) {
-    matureTokenScanner.start();
-    logger.info('Mature token scanner started - scanning for 21+ day survivor tokens');
-  }
+  // Mature token strategy REMOVED - micro-cap focus only
 
-  // Start 2x probability module (token crawler + backtest scheduler)
-  try {
-    probabilitySignalModule.start();
-    logger.info('2x probability module started (crawler + backtest scheduler)');
-  } catch (error) {
-    logger.warn({ error }, 'Failed to start probability module');
-  }
+  // 2x probability module REMOVED
 
   // Start Pump.fun Dev Tracker
   if (appConfig.devTracker.enabled) {
@@ -208,10 +180,7 @@ async function main(): Promise<void> {
     if (appConfig.trading.enableEarlyStrategy) {
       signalGenerator.stop();
     }
-    if (appConfig.trading.enableMatureStrategy) {
-      matureTokenScanner.stop();
-    }
-    probabilitySignalModule.stop();
+    // probabilitySignalModule removed
     dailyAutoOptimizer.stop();
     pumpfunDevMonitor.stop();
     devStatsUpdater.stop();

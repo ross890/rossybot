@@ -667,6 +667,7 @@ export interface TokenSafetyResult {
   mintAuthorityEnabled: boolean;
   freezeAuthorityEnabled: boolean;
   lpLocked: boolean;
+  lpBurned: boolean;           // LP tokens burned - strongest rug resistance
   lpLockDuration: number | null;
   top10HolderConcentration: number;
   deployerHolding: number;

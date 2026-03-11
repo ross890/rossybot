@@ -15,8 +15,7 @@ import { convictionTracker } from './signals/conviction-tracker.js';
 import { kolAnalytics } from './kol/kol-analytics.js';
 import { alphaWalletManager } from './alpha/index.js';
 import { bondingCurveMonitor } from './pumpfun/bonding-monitor.js';
-import { dailyReportGenerator, signalPerformanceTracker, thresholdOptimizer, aiQueryInterface } from './performance/index.js';
-import { volumeAnomalyScanner } from './discovery/index.js';
+import { dailyReportGenerator, signalPerformanceTracker, thresholdOptimizer } from './performance/index.js';
 import {
   BuySignal,
   KolWalletActivity,
@@ -555,29 +554,9 @@ export class TelegramAlertBot {
       );
     });
 
-    // /backtest command - Show 2x probability backtest analysis
+    // /backtest command - REMOVED (probability-signal module deleted)
     this.bot.onText(/\/backtest/, async (msg) => {
-      const chatId = msg.chat.id;
-      try {
-        const { probabilitySignalModule } = await import('./probability-signal.js');
-        await this.bot!.sendMessage(chatId, 'Running backtest analysis...', { parse_mode: 'Markdown' });
-
-        const stats = await probabilitySignalModule.runBacktest();
-        const formatted = probabilitySignalModule.getFormattedStats();
-        const crawlerStats = probabilitySignalModule.getCrawlerStats();
-
-        const message = formatted + '\n\n' +
-          `🕷️ Crawler: ${crawlerStats.active} active, ${crawlerStats.candidate} candidate, ${crawlerStats.background} background (${crawlerStats.total} total)`;
-
-        await this.bot!.sendMessage(chatId, message, {
-          parse_mode: 'Markdown',
-          disable_web_page_preview: true,
-        });
-      } catch (error) {
-        const errorMessage = error instanceof Error ? error.message : 'Unknown error';
-        logger.error({ error, chatId }, 'Failed to run backtest');
-        await this.bot!.sendMessage(chatId, `Failed to run backtest: ${errorMessage}`);
-      }
+      await this.bot!.sendMessage(msg.chat.id, 'Backtest module has been removed (was over-engineered bloat).', { parse_mode: 'Markdown' });
     });
 
     // /devscore <token> command - Check dev wallet score for a token
@@ -682,125 +661,14 @@ export class TelegramAlertBot {
       }
     });
 
-    // /funnel command - Show token filtering funnel stats
+    // /funnel command - REMOVED (mature-token scanner deleted)
     this.bot.onText(/\/funnel/, async (msg) => {
-      const chatId = msg.chat.id;
-      try {
-        // Get funnel stats from mature token scanner
-        const { matureTokenScanner } = await import('./mature-token/index.js');
-        const stats = matureTokenScanner.getFunnelStats();
-
-        const message =
-          '*📊 Token Filtering Funnel*\n\n' +
-          '*Last Scan Results:*\n' +
-          `• Trending tokens fetched: ${stats.fetched}\n` +
-          `• Passed age filter: ${stats.passedAge}\n` +
-          `• Passed eligibility: ${stats.eligible}\n` +
-          `• Tokens evaluated: ${stats.evaluated}\n` +
-          `• Signals sent: ${stats.signalsSent}\n\n` +
-          '*Rejection Reasons:*\n' +
-          `• Too young (<3 days for RISING, <21 days others): ${stats.rejections.tooYoung}\n` +
-          `• Market cap out of range: ${stats.rejections.marketCap}\n` +
-          `• No tier match ($5-8M gap): ${stats.rejections.noTier}\n` +
-          `• Volume too low: ${stats.rejections.volume}\n` +
-          `• Holders too low: ${stats.rejections.holders}\n` +
-          `• Liquidity issues: ${stats.rejections.liquidity}\n` +
-          `• Score below threshold: ${stats.rejections.score}\n\n` +
-          '*Tier Distribution:*\n' +
-          `🚀 RISING: ${stats.tiers.RISING}\n` +
-          `🌱 EMERGING: ${stats.tiers.EMERGING}\n` +
-          `🎓 GRADUATED: ${stats.tiers.GRADUATED}\n` +
-          `🏛️ ESTABLISHED: ${stats.tiers.ESTABLISHED}\n\n` +
-          `_Last updated: ${stats.lastScanTime || 'No scan yet'}_`;
-
-        await this.bot!.sendMessage(chatId, message, { parse_mode: 'Markdown' });
-      } catch (error) {
-        await this.bot!.sendMessage(chatId,
-          '*📊 Token Filtering Funnel*\n\n' +
-          'No funnel data available yet.\n' +
-          'Wait for the next scan cycle (every 5 minutes).',
-          { parse_mode: 'Markdown' }
-        );
-      }
+      await this.bot!.sendMessage(msg.chat.id, 'Funnel command removed. Mature token scanner was deleted (micro-cap focus only).', { parse_mode: 'Markdown' });
     });
 
-    // /funnel_debug command - Show last 10 rejected tokens with per-criteria scores
+    // /funnel_debug command - REMOVED (mature-token scanner deleted)
     this.bot.onText(/\/funnel_debug/, async (msg) => {
-      const chatId = msg.chat.id;
-      try {
-        const { matureTokenScanner } = await import('./mature-token/index.js');
-        const rejections = matureTokenScanner.getRecentRejections(10);
-
-        if (rejections.length === 0) {
-          await this.bot!.sendMessage(chatId,
-            '*🔍 Funnel Debug*\n\nNo rejected tokens recorded yet.\nWait for the next scan cycle.',
-            { parse_mode: 'Markdown' }
-          );
-          return;
-        }
-
-        let message = '*🔍 Funnel Debug — Last Rejected Tokens*\n\n';
-
-        for (const rej of rejections) {
-          const mcStr = rej.marketCap >= 1_000_000
-            ? `$${(rej.marketCap / 1_000_000).toFixed(1)}M`
-            : `$${(rej.marketCap / 1_000).toFixed(0)}K`;
-
-          message += `*$${rej.ticker}* (MC: ${mcStr}):\n`;
-
-          // Market cap
-          const mcEmoji = rej.checks.marketCap.passed ? '✅' : '❌';
-          message += `${mcEmoji} MarketCap: ${mcStr} (range: $${(rej.checks.marketCap.min / 1_000).toFixed(0)}K-$${(rej.checks.marketCap.max / 1_000_000).toFixed(0)}M)\n`;
-
-          // Tier
-          const tierEmoji = rej.checks.tier.passed ? '✅' : '❌';
-          message += `${tierEmoji} Tier: ${rej.checks.tier.tier || 'NONE'}\n`;
-
-          if (rej.checks.tier.passed) {
-            // Volume
-            const volEmoji = rej.checks.volume.passed ? '✅' : '❌';
-            message += `${volEmoji} Volume: $${rej.checks.volume.value.toLocaleString(undefined, {maximumFractionDigits: 0})} (min: $${rej.checks.volume.required.toLocaleString(undefined, {maximumFractionDigits: 0})})\n`;
-
-            // Holders
-            const holdEmoji = rej.checks.holders.passed ? '✅' : '❌';
-            message += `${holdEmoji} Holders: ${rej.checks.holders.value} (min: ${rej.checks.holders.required})\n`;
-
-            // Age
-            const ageEmoji = rej.checks.age.passed ? '✅' : '❌';
-            const ageHrs = (rej.checks.age.value / 60).toFixed(1);
-            message += `${ageEmoji} Age: ${ageHrs}h (min: ${rej.checks.age.required}h)\n`;
-          }
-
-          // Liquidity
-          const liqEmoji = rej.checks.liquidity.passed ? '✅' : '❌';
-          message += `${liqEmoji} Liquidity: $${rej.checks.liquidity.value.toLocaleString(undefined, {maximumFractionDigits: 0})} (min: $${rej.checks.liquidity.required.toLocaleString(undefined, {maximumFractionDigits: 0})})\n`;
-
-          // Liq ratio
-          const lrEmoji = rej.checks.liquidityRatio.passed ? '✅' : '❌';
-          message += `${lrEmoji} Liq Ratio: ${(rej.checks.liquidityRatio.value * 100).toFixed(2)}% (min: ${(rej.checks.liquidityRatio.required * 100).toFixed(1)}%)\n`;
-
-          // Concentration
-          const concEmoji = rej.checks.concentration.passed ? '✅' : '❌';
-          message += `${concEmoji} Top10: ${rej.checks.concentration.value.toFixed(0)}% (max: ${rej.checks.concentration.max}%)\n`;
-
-          // Cooldown
-          if (!rej.checks.cooldown.passed) {
-            message += `❌ On cooldown\n`;
-          }
-
-          message += `Result: Failed ${rej.failedCount}/${rej.failedCount + rej.passedCount} criteria\n\n`;
-        }
-
-        // Telegram message limit is 4096 chars - split if needed
-        if (message.length > 4000) {
-          message = message.slice(0, 3950) + '\n\n_...truncated. Use logs for full details._';
-        }
-
-        await this.bot!.sendMessage(chatId, message, { parse_mode: 'Markdown' });
-      } catch (error) {
-        logger.error({ error }, 'Failed to get funnel debug');
-        await this.bot!.sendMessage(chatId, 'Failed to get funnel debug data.');
-      }
+      await this.bot!.sendMessage(msg.chat.id, 'Funnel debug removed. Mature token scanner was deleted.', { parse_mode: 'Markdown' });
     });
 
     // /set_threshold command - Set individual threshold values
@@ -935,21 +803,13 @@ export class TelegramAlertBot {
       }
     });
 
-    // /bot_status command - Comprehensive health check
+    // /bot_status command - Simplified health check (mature token scanner removed)
     this.bot.onText(/\/bot_status/, async (msg) => {
       const chatId = msg.chat.id;
       try {
-        const { matureTokenScanner } = await import('./mature-token/index.js');
-        const { pool } = await import('../utils/database.js');
-        const { thresholdOptimizer } = await import('./performance/index.js');
-
-        const stats = matureTokenScanner.getFunnelStats();
-        const scannerStats = matureTokenScanner.getStats();
-        const topBlocker = matureTokenScanner.getTopBlocker();
         const thresholds = thresholdOptimizer.getCurrentThresholds();
         const defaults = thresholdOptimizer.getDefaultThresholds();
 
-        // Count non-default thresholds
         let nonDefaultCount = 0;
         if (thresholds.minMomentumScore !== defaults.minMomentumScore) nonDefaultCount++;
         if (thresholds.minOnChainScore !== defaults.minOnChainScore) nonDefaultCount++;
@@ -958,35 +818,11 @@ export class TelegramAlertBot {
         if (thresholds.minLiquidity !== defaults.minLiquidity) nonDefaultCount++;
         if (thresholds.maxTop10Concentration !== defaults.maxTop10Concentration) nonDefaultCount++;
 
-        let message = '*🤖 Rossybot Status*\n\n';
+        let message = '*Rossybot Status*\n\n';
+        message += `Mode: MICRO-CAP FOCUS\n`;
 
-        // Pipeline status
-        const pipelineEmoji = scannerStats.isRunning ? '✅' : '❌';
-        message += `Pipeline: ${pipelineEmoji} ${scannerStats.isRunning ? 'Running' : 'Stopped'}\n`;
-        message += `Last scan: ${stats.lastScanTime || 'Not yet'}\n`;
-        message += `Tokens in funnel: ${stats.fetched} fetched → ${stats.passedAge} age → ${stats.eligible} eligible → ${stats.evaluated} scored → ${stats.signalsSent} signalled\n\n`;
-
-        // Thresholds
         const thresholdStatus = nonDefaultCount > 0 ? `Modified (${nonDefaultCount}/6 non-default)` : 'Default';
-        message += `Thresholds: ${thresholdStatus}\n`;
-        if (topBlocker) {
-          message += `Top blocker: ${topBlocker.criteria} (rejected ${topBlocker.count}/${topBlocker.total} tokens)\n`;
-        }
-        message += '\n';
-
-        // Active tiers (from the tier config)
-        const { TIER_CONFIG, TokenTier } = await import('./mature-token/types.js');
-        const risingEnabled = TIER_CONFIG[TokenTier.RISING].enabled;
-        const emergingEnabled = TIER_CONFIG[TokenTier.EMERGING].enabled;
-        const graduatedEnabled = TIER_CONFIG[TokenTier.GRADUATED].enabled;
-        const establishedEnabled = TIER_CONFIG[TokenTier.ESTABLISHED].enabled;
-        message += `Active tiers: 🚀 RISING ${risingEnabled ? '✅' : '❌'} | ${TIER_CONFIG[TokenTier.EMERGING].alertTag} ${emergingEnabled ? '✅' : '❌'} | ${TIER_CONFIG[TokenTier.GRADUATED].alertTag} ${graduatedEnabled ? '✅' : '❌'} | 🏛 ESTABLISHED ${establishedEnabled ? '❌ (disabled)' : '❌'}\n\n`;
-
-        // Recent signals
-        message += `Signals this hour: ${scannerStats.signalsThisHour}\n`;
-        message += `Signals today: ${scannerStats.signalsToday}\n`;
-        message += `Active signals: ${scannerStats.activeSignals}\n`;
-        message += `Watchlist: ${scannerStats.watchlistSize}\n\n`;
+        message += `Thresholds: ${thresholdStatus}\n\n`;
 
         // Database check
         let dbOk = false;
@@ -1001,13 +837,8 @@ export class TelegramAlertBot {
           tradingTablesOk = parseInt(tableCheck.rows[0].cnt) > 0;
         } catch { /* db check failed */ }
 
-        message += `DB: ${dbOk ? '✅ Connected' : '❌ Disconnected'}\n`;
-        message += `Trading tables: ${tradingTablesOk ? '✅' : '❌ Not migrated'}\n`;
-
-        // API health (check if source stats have data)
-        const dexOk = (stats.sourceStats as any)?.dexscreenerTrending > 0 || (stats.sourceStats as any)?.dexscreener > 0;
-        const jupOk = (stats.sourceStats as any)?.jupiter > 0;
-        message += `APIs: DexScreener ${dexOk ? '✅' : '❌'} | Jupiter ${jupOk ? '✅' : '❌'}`;
+        message += `DB: ${dbOk ? 'Connected' : 'Disconnected'}\n`;
+        message += `Trading tables: ${tradingTablesOk ? 'OK' : 'Not migrated'}`;
 
         await this.bot!.sendMessage(chatId, message, { parse_mode: 'Markdown' });
       } catch (error) {
@@ -1016,63 +847,10 @@ export class TelegramAlertBot {
       }
     });
 
-    // /sources command - Show discovery source health status
+    // /sources command - REMOVED (mature-token scanner deleted)
     this.bot.onText(/\/sources/, async (msg) => {
-      const chatId = msg.chat.id;
-      try {
-        // Get funnel stats which includes source counts
-        const { matureTokenScanner } = await import('./mature-token/index.js');
-        const stats = matureTokenScanner.getFunnelStats();
-        const sourceStats = stats.sourceStats as Record<string, number> || {};
+      await this.bot!.sendMessage(msg.chat.id, 'Sources command removed. Discovery now uses DexScreener + Jupiter + KOL tracker in signal-generator.', { parse_mode: 'Markdown' });
 
-        let message = '*🔌 Discovery Source Health*\n\n';
-
-        // Source status with counts
-        const sources = [
-          { name: 'DexScreener Trending', key: 'dexscreenerTrending', expected: 100 },
-          { name: 'Jupiter Verified', key: 'jupiter', expected: 100 },
-          { name: 'DexScreener New', key: 'dexscreener', expected: 50 },
-        ];
-
-        let totalTokens = 0;
-        let workingSources = 0;
-
-        for (const source of sources) {
-          const count = sourceStats[source.key] || 0;
-          totalTokens += count;
-          const status = count > 0 ? '✅' : '❌';
-          if (count > 0) workingSources++;
-          const pct = source.expected > 0 ? Math.round((count / source.expected) * 100) : 0;
-          message += `${status} *${source.name}*: ${count} tokens`;
-          if (count > 0 && count < source.expected) {
-            message += ` (${pct}% of expected)`;
-          }
-          message += '\n';
-        }
-
-        message += `\n*Summary:*\n`;
-        message += `• Working sources: ${workingSources}/${sources.length}\n`;
-        message += `• Total tokens discovered: ${totalTokens}\n`;
-        message += `• Last scan: ${stats.lastScanTime || 'Not yet'}\n\n`;
-
-        // Health assessment
-        if (workingSources >= 4) {
-          message += '✅ Discovery health: GOOD';
-        } else if (workingSources >= 2) {
-          message += '⚠️ Discovery health: DEGRADED';
-        } else {
-          message += '❌ Discovery health: CRITICAL';
-        }
-
-        await this.bot!.sendMessage(chatId, message, { parse_mode: 'Markdown' });
-      } catch (error) {
-        await this.bot!.sendMessage(chatId,
-          '*🔌 Discovery Source Health*\n\n' +
-          'No source data available yet.\n' +
-          'Wait for the next scan cycle (every 5 minutes).',
-          { parse_mode: 'Markdown' }
-        );
-      }
     });
 
     // /tiers command - Show tier configuration
@@ -1399,27 +1177,9 @@ export class TelegramAlertBot {
       }
     });
 
-    // /report command - Full AI-powered performance analysis with recommendations
-    this.bot.onText(/\/report(?:\s+(\d+))?/, async (msg, match) => {
-      const chatId = msg.chat.id;
-      const hours = match?.[1] ? parseInt(match[1]) : 168; // Default 7 days
-
-      try {
-        await this.bot!.sendMessage(chatId, `📊 Generating AI performance report (last ${Math.round(hours / 24)} days)...`, { parse_mode: 'Markdown' });
-
-        const report = await aiQueryInterface.getPerformanceReport(hours);
-        const formattedReport = this.formatAIReport(report);
-
-        // Split into multiple messages if too long
-        const messages = this.splitLongMessage(formattedReport, 4000);
-        for (const message of messages) {
-          await this.bot!.sendMessage(chatId, message, { parse_mode: 'Markdown' });
-        }
-      } catch (error) {
-        const errorMessage = error instanceof Error ? error.message : 'Unknown error';
-        logger.error({ error, chatId }, 'Failed to generate AI report');
-        await this.bot!.sendMessage(chatId, `Failed to generate report: ${errorMessage}`);
-      }
+    // /report command - REMOVED (AI query interface deleted)
+    this.bot.onText(/\/report(?:\s+(\d+))?/, async (msg) => {
+      await this.bot!.sendMessage(msg.chat.id, 'AI report command removed. Use /daily for performance summary.', { parse_mode: 'Markdown' });
     });
 
     // /recent command - Show recent signals with current performance
@@ -1520,113 +1280,14 @@ export class TelegramAlertBot {
       }
     });
 
-    // /microcap command - Analyze $200K-$500K opportunity
+    // /microcap command - REMOVED (mature-token scanner deleted, bot is now micro-cap focused by default)
     this.bot.onText(/\/microcap/, async (msg) => {
-      const chatId = msg.chat.id;
-
-      try {
-        const { matureTokenScanner } = await import('./mature-token/index.js');
-        const analysis = matureTokenScanner.getMicroCapAnalysis();
-
-        let message = '*🔬 Micro-Cap Opportunity Analysis*\n';
-        message += '*Range: $200K - $500K*\n\n';
-
-        if (analysis.total < 5) {
-          message += '⏳ _Collecting data... Need more scan cycles._\n\n';
-          message += `Tokens tracked so far: ${analysis.total}\n`;
-          message += '_Check back after a few scans._';
-          await this.bot!.sendMessage(chatId, message, { parse_mode: 'Markdown' });
-          return;
-        }
-
-        // Safety stats
-        message += `*📊 Sample Size:* ${analysis.total} tokens\n\n`;
-
-        message += '*Safety Filter Results:*\n';
-        const safetyEmoji = analysis.passedSafetyPct >= 30 ? '✅' :
-          analysis.passedSafetyPct >= 15 ? '⚠️' : '❌';
-        message += `${safetyEmoji} Pass ALL filters: ${analysis.passedSafetyPct.toFixed(0)}% (${analysis.passedSafety}/${analysis.total})\n`;
-        message += `   • Concentration ≤75%: ${analysis.passedConcentrationPct.toFixed(0)}% (${analysis.passedConcentration})\n`;
-        message += `   • Holders ≥250: ${analysis.passedHoldersPct.toFixed(0)}% (${analysis.passedHolders})\n`;
-        message += `   • Liquidity ≥$10K: ${analysis.passedLiquidityPct.toFixed(0)}% (${analysis.passedLiquidity})\n\n`;
-
-        message += '*Averages in this range:*\n';
-        message += `   • Avg Concentration: ${analysis.avgConcentration.toFixed(0)}%\n`;
-        message += `   • Avg Holders: ${analysis.avgHolderCount.toFixed(0)}\n`;
-        message += `   • Avg Liquidity: $${(analysis.avgLiquidity / 1000).toFixed(0)}K\n\n`;
-
-        // Recent samples
-        if (analysis.recentSamples.length > 0) {
-          message += '*Recent Tokens in Range:*\n';
-          for (const sample of analysis.recentSamples.slice(0, 5)) {
-            const safeEmoji = sample.concentration <= 75 && sample.holders >= 250 ? '✅' : '❌';
-            message += `${safeEmoji} $${this.escapeMarkdown(sample.ticker)} - $${(sample.mcap / 1000).toFixed(0)}K | ${sample.holders} holders | ${sample.concentration.toFixed(0)}% conc\n`;
-          }
-          message += '\n';
-        }
-
-        // Recommendation
-        message += '*🎯 Analysis:*\n';
-        message += analysis.recommendation;
-
-        await this.bot!.sendMessage(chatId, message, { parse_mode: 'Markdown' });
-      } catch (error) {
-        const errorMessage = error instanceof Error ? error.message : 'Unknown error';
-        logger.error({ error, chatId }, 'Failed to get micro-cap analysis');
-        await this.bot!.sendMessage(chatId, `Failed to analyze micro-caps: ${errorMessage}`);
-      }
+      await this.bot!.sendMessage(msg.chat.id, 'Micro-cap analysis removed. Bot is now micro-cap focused by default ($30K-$225K primary range).', { parse_mode: 'Markdown' });
     });
 
-    // /volumespikes command - Show tokens with unusual volume activity
+    // /volumespikes command - REMOVED (volume anomaly scanner deleted)
     this.bot.onText(/\/volumespikes/, async (msg) => {
-      const chatId = msg.chat.id;
-
-      try {
-        await this.bot!.sendMessage(chatId, 'Scanning for volume anomalies...', { parse_mode: 'Markdown' });
-
-        const anomalies = await volumeAnomalyScanner.getAnomalies();
-
-        if (anomalies.length === 0) {
-          await this.bot!.sendMessage(chatId,
-            '*📊 Volume Spike Scanner*\n\n' +
-            'No significant volume anomalies detected.\n' +
-            '_Tokens need 5x+ normal volume to trigger._',
-            { parse_mode: 'Markdown' }
-          );
-          return;
-        }
-
-        let message = '*📊 Volume Spike Alerts*\n\n';
-        message += `Found ${anomalies.length} tokens with unusual volume:\n\n`;
-
-        for (const anomaly of anomalies.slice(0, 8)) {
-          const multiplierEmoji = anomaly.volumeMultiplier >= 10 ? '🔥' :
-            anomaly.volumeMultiplier >= 7 ? '🚨' : '📈';
-
-          const washWarning = anomaly.washTradingAnalysis?.isLikelySpoofed ? ' ⚠️' : '';
-
-          message += `${multiplierEmoji} *$${this.escapeMarkdown(anomaly.ticker)}*${washWarning}\n`;
-          message += `   Vol: ${anomaly.volumeMultiplier.toFixed(1)}x normal ($${(anomaly.currentVolume24h / 1000).toFixed(0)}K)\n`;
-          message += `   MCap: $${(anomaly.marketCap / 1_000_000).toFixed(1)}M | Liq: $${(anomaly.liquidity / 1000).toFixed(0)}K\n`;
-
-          if (anomaly.washTradingAnalysis && anomaly.washTradingAnalysis.suspicionScore > 30) {
-            message += `   ⚠️ Wash score: ${anomaly.washTradingAnalysis.suspicionScore}/100\n`;
-          }
-          message += '\n';
-        }
-
-        if (anomalies.length > 8) {
-          message += `_+${anomalies.length - 8} more tokens with volume spikes_\n`;
-        }
-
-        message += '\n_⚠️ = potential wash trading_';
-
-        await this.bot!.sendMessage(chatId, message, { parse_mode: 'Markdown' });
-      } catch (error) {
-        const errorMessage = error instanceof Error ? error.message : 'Unknown error';
-        logger.error({ error, chatId }, 'Failed to get volume spikes');
-        await this.bot!.sendMessage(chatId, `Failed to scan volume: ${errorMessage}`);
-      }
+      await this.bot!.sendMessage(msg.chat.id, 'Volume spikes command removed. Volume anomaly scanner was deleted.', { parse_mode: 'Markdown' });
     });
 
     // /stats command - Historical performance dashboard
@@ -1693,58 +1354,14 @@ export class TelegramAlertBot {
       }
     });
 
-    // /tweaks command - Get AI-suggested threshold adjustments
+    // /tweaks command - REMOVED (AI query interface deleted)
     this.bot.onText(/\/tweaks/, async (msg) => {
-      const chatId = msg.chat.id;
-
-      try {
-        await this.bot!.sendMessage(chatId, '🔧 Analyzing performance data for optimization suggestions...', { parse_mode: 'Markdown' });
-
-        const tweaks = await aiQueryInterface.getSuggestedTweaks();
-
-        if (tweaks.length === 0) {
-          await this.bot!.sendMessage(chatId, '✅ No tweaks suggested - current thresholds appear optimal or insufficient data.', { parse_mode: 'Markdown' });
-          return;
-        }
-
-        let message = '🎯 *AI-SUGGESTED TWEAKS*\n\n';
-        for (const tweak of tweaks) {
-          message += `*${this.escapeMarkdown(tweak.parameter)}*\n`;
-          message += `Current: ${this.escapeMarkdown(String(tweak.currentValue))} → Suggested: ${this.escapeMarkdown(String(tweak.suggestedValue))}\n`;
-          message += `📝 ${this.escapeMarkdown(tweak.reason)}\n`;
-          message += `📈 Expected: ${this.escapeMarkdown(tweak.expectedImpact)}\n\n`;
-        }
-        message += 'Use /adjust\\_thresholds to apply changes manually';
-
-        await this.bot!.sendMessage(chatId, message, { parse_mode: 'Markdown' });
-      } catch (error) {
-        const errorMessage = error instanceof Error ? error.message : 'Unknown error';
-        logger.error({ error, chatId }, 'Failed to get tweaks');
-        await this.bot!.sendMessage(chatId, `Failed to get suggestions: ${errorMessage}`);
-      }
+      await this.bot!.sendMessage(msg.chat.id, 'AI tweaks command removed. Use /optimize for threshold optimization.', { parse_mode: 'Markdown' });
     });
 
-    // /ask command - Ask a specific question about performance
-    this.bot.onText(/\/ask\s+(.+)/, async (msg, match) => {
-      const chatId = msg.chat.id;
-      const question = match?.[1];
-
-      if (!question) {
-        await this.bot!.sendMessage(chatId, 'Usage: /ask <question>\nExample: /ask What is the win rate?', { parse_mode: 'Markdown' });
-        return;
-      }
-
-      try {
-        await this.bot!.sendMessage(chatId, '🤔 Analyzing...', { parse_mode: 'Markdown' });
-
-        const answer = await aiQueryInterface.answerQuestion(question);
-        // Escape markdown in AI-generated answer to prevent parsing errors
-        await this.bot!.sendMessage(chatId, this.escapeMarkdown(answer));
-      } catch (error) {
-        const errorMessage = error instanceof Error ? error.message : 'Unknown error';
-        logger.error({ error, chatId }, 'Failed to answer question');
-        await this.bot!.sendMessage(chatId, `Failed to analyze: ${errorMessage}`);
-      }
+    // /ask command - REMOVED (AI query interface deleted)
+    this.bot.onText(/\/ask\s+(.+)/, async (msg) => {
+      await this.bot!.sendMessage(msg.chat.id, 'AI ask command removed. Use /stats or /daily for performance data.', { parse_mode: 'Markdown' });
     });
 
     // /optimize command - Run threshold optimization
@@ -4837,137 +4454,7 @@ export class TelegramAlertBot {
   /**
    * Format AI performance report for Telegram
    */
-  private formatAIReport(report: import('./performance/ai-query-interface.js').BotPerformanceReport): string {
-    const healthEmoji = {
-      'EXCELLENT': '🟢',
-      'GOOD': '🟢',
-      'FAIR': '🟡',
-      'POOR': '🟠',
-      'CRITICAL': '🔴',
-    }[report.overallHealth] || '⚪';
-
-    let message = `📊 *ROSSYBOT PERFORMANCE REPORT*\n`;
-    message += `_Last ${Math.round(report.reportPeriodHours / 24)} days_\n\n`;
-
-    // Overall Health
-    message += `${healthEmoji} *Overall Health:* ${report.overallHealth} (${report.healthScore}/100)\n\n`;
-
-    // Trading Performance
-    message += `💰 *TRADING PERFORMANCE*\n`;
-    message += `├ Win Rate: *${report.trading.winRate.toFixed(1)}%*\n`;
-    message += `├ Wins: ${report.trading.wins} | Losses: ${report.trading.losses}\n`;
-    message += `├ Pending: ${report.trading.pending}\n`;
-    message += `├ Avg Win: +${report.trading.avgWinRoi.toFixed(1)}%\n`;
-    message += `└ Avg Loss: ${report.trading.avgLossRoi.toFixed(1)}%\n`;
-
-    if (report.trading.bestTrade) {
-      message += `   🏆 Best: ${this.escapeMarkdown(report.trading.bestTrade.token)} (+${report.trading.bestTrade.roi.toFixed(0)}%)\n`;
-    }
-    if (report.trading.worstTrade) {
-      message += `   💔 Worst: ${this.escapeMarkdown(report.trading.worstTrade.token)} (${report.trading.worstTrade.roi.toFixed(0)}%)\n`;
-    }
-    message += '\n';
-
-    // Signal Breakdown
-    message += `📡 *SIGNALS*\n`;
-    message += `├ Generated: ${report.signals.totalGenerated}\n`;
-    message += `├ Sent: ${report.signals.totalSent}\n`;
-    message += `├ Filtered: ${report.signals.totalFiltered} (${report.signals.filterRate.toFixed(0)}%)\n`;
-    message += `└ By Type: On-chain ${report.signals.byType.onchain} | KOL ${report.signals.byType.kol}\n\n`;
-
-    // Track Performance
-    if (report.signals.byTrack.provenRunner.count > 0 || report.signals.byTrack.earlyQuality.count > 0) {
-      message += `🛤 *BY TRACK*\n`;
-      message += `├ PROVEN\\_RUNNER: ${report.signals.byTrack.provenRunner.winRate.toFixed(0)}% win (${report.signals.byTrack.provenRunner.count})\n`;
-      message += `└ EARLY\\_QUALITY: ${report.signals.byTrack.earlyQuality.winRate.toFixed(0)}% win (${report.signals.byTrack.earlyQuality.count})\n\n`;
-    }
-
-    // System Health
-    message += `🖥 *SYSTEM HEALTH*\n`;
-    message += `├ API Score: ${report.systemHealth.apiHealthScore}/100\n`;
-    message += `├ DB Score: ${report.systemHealth.dbHealthScore}/100\n`;
-    message += `├ Memory: ${report.systemHealth.memoryUsageMb.toFixed(0)} MB\n`;
-    message += `└ Errors (24h): ${report.systemHealth.errorCount}\n\n`;
-
-    // Factor Analysis
-    if (report.factorAnalysis.workingWell.length > 0) {
-      message += `✅ *WORKING WELL*\n`;
-      message += `${report.factorAnalysis.workingWell.slice(0, 3).map(s => this.escapeMarkdown(s)).join(', ')}\n\n`;
-    }
-
-    if (report.factorAnalysis.needsImprovement.length > 0) {
-      message += `⚠️ *NEEDS ATTENTION*\n`;
-      message += `${report.factorAnalysis.needsImprovement.slice(0, 3).map(s => this.escapeMarkdown(s)).join(', ')}\n\n`;
-    }
-
-    // Recommendations
-    if (report.recommendations.length > 0) {
-      message += `💡 *RECOMMENDATIONS*\n`;
-      const topRecs = report.recommendations.slice(0, 3);
-      for (const rec of topRecs) {
-        const priorityEmoji = rec.priority === 'HIGH' ? '🔴' : rec.priority === 'MEDIUM' ? '🟡' : '🟢';
-        message += `${priorityEmoji} ${this.escapeMarkdown(rec.issue)}\n`;
-        message += `   ${this.escapeMarkdown(rec.suggestion)}\n`;
-      }
-      message += '\n';
-    }
-
-    // Current Thresholds
-    message += `⚙️ *CURRENT THRESHOLDS*\n`;
-    message += `├ Min OnChain: ${report.currentThresholds.minOnChainScore}\n`;
-    message += `├ Min Momentum: ${report.currentThresholds.minMomentumScore}\n`;
-    message += `├ Min Safety: ${report.currentThresholds.minSafetyScore}\n`;
-    message += `└ Max Bundle Risk: ${report.currentThresholds.maxBundleRiskScore}\n\n`;
-
-    message += `_Use /tweaks for AI-suggested optimizations_`;
-
-    return message;
-  }
-
-  /**
-   * Send a 2x probability signal alert
-   */
-  async sendTwoXSignal(formattedMessage: string, tokenAddress: string): Promise<boolean> {
-    if (!this.bot) {
-      logger.warn('Bot not initialized - cannot send 2x signal');
-      return false;
-    }
-
-    // RACE CONDITION PROTECTION
-    const twoXKey = `twox_${tokenAddress}`;
-    if (this.signalsInProgress.has(twoXKey)) {
-      logger.debug({ tokenAddress }, '2x signal already in progress');
-      return false;
-    }
-    this.signalsInProgress.add(twoXKey);
-
-    try {
-      const chatId = appConfig.telegramChatId;
-
-      await this.bot.sendMessage(chatId, formattedMessage, {
-        disable_web_page_preview: true,
-      });
-
-      // Log the signal
-      try {
-        await pool.query(
-          `INSERT INTO signal_log (token_address, signal_type, sent_at)
-           VALUES ($1, 'TWO_X', NOW())`,
-          [tokenAddress]
-        );
-      } catch (err) {
-        logger.debug({ err }, 'Failed to log 2x signal');
-      }
-
-      logger.info({ tokenAddress: tokenAddress.slice(0, 8) }, '2x probability signal sent');
-      return true;
-    } catch (error) {
-      logger.error({ error, tokenAddress }, 'Failed to send 2x signal');
-      return false;
-    } finally {
-      this.signalsInProgress.delete(twoXKey);
-    }
-  }
+  // formatAIReport and sendTwoXSignal REMOVED (ai-query-interface and probability-signal deleted)
 
   /**
    * Split a long message into multiple messages

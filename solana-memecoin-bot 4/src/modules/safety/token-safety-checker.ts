@@ -76,11 +76,17 @@ export class TokenSafetyChecker {
       safetyScore -= 5; // Reduced from -10
     }
 
-    // 4. Check LP status (reduced penalty - many legit tokens don't lock LP initially)
-    const { lpLocked, lpLockDuration } = await this.checkLpStatus(tokenMint);
-    if (!lpLocked) {
+    // 4. Check LP burn/lock status (key rug-resistance indicator)
+    const { lpLocked, lpLockDuration, lpBurned } = await this.checkLpStatus(tokenMint);
+    if (lpBurned) {
+      flags.push('LP_BURNED');
+      safetyScore += 10; // Bonus for burned LP - strongest rug resistance
+    } else if (lpLocked) {
+      flags.push('LP_LOCKED');
+      safetyScore += 5;  // Bonus for locked LP
+    } else {
       flags.push('LP_NOT_LOCKED');
-      safetyScore -= 10; // Reduced from -15
+      safetyScore -= 15; // Penalty for unlocked LP - rug risk
     }
 
     // 5. Get RugCheck score
@@ -120,6 +126,7 @@ export class TokenSafetyChecker {
       mintAuthorityEnabled,
       freezeAuthorityEnabled,
       lpLocked,
+      lpBurned,
       lpLockDuration,
       top10HolderConcentration,
       deployerHolding,
@@ -281,25 +288,67 @@ export class TokenSafetyChecker {
   }
 
   /**
-   * Check LP lock status
+   * Check LP lock/burn status via RugCheck API
+   * RugCheck reports include LP reserve analysis and burn detection
    */
   private async checkLpStatus(tokenMint: string): Promise<{
     lpLocked: boolean;
     lpLockDuration: number | null;
+    lpBurned: boolean;
   }> {
-    // This would require checking known LP lock protocols
-    // For now, return conservative defaults
-    // In production, integrate with LP lock verification services
     try {
-      // Placeholder: In production, check against known LP lock contracts
-      // like Raydium LP tokens or Streamflow locks
-      return {
-        lpLocked: false,
-        lpLockDuration: null,
-      };
+      const response = await fetch(`${RUGCHECK_API_BASE}/tokens/${tokenMint}/report`, {
+        signal: AbortSignal.timeout(10000),
+      });
+
+      if (!response.ok) {
+        return { lpLocked: false, lpLockDuration: null, lpBurned: false };
+      }
+
+      const data = await response.json() as any;
+
+      // RugCheck reports LP status in markets array and risks
+      let lpBurned = false;
+      let lpLocked = false;
+
+      // Check markets for LP burn status
+      if (data.markets && Array.isArray(data.markets)) {
+        for (const market of data.markets) {
+          // RugCheck flags LP as burned when LP tokens sent to burn address
+          if (market.lp?.lpBurned || market.lp?.burned) {
+            lpBurned = true;
+            lpLocked = true; // Burned LP is the strongest form of lock
+          }
+          if (market.lp?.lpLocked || market.lp?.locked) {
+            lpLocked = true;
+          }
+        }
+      }
+
+      // Also check risks array for LP-related flags
+      if (data.risks && Array.isArray(data.risks)) {
+        for (const risk of data.risks) {
+          const name = (risk.name || '').toLowerCase();
+          if (name.includes('lp burned') || name.includes('lp burnt')) {
+            lpBurned = true;
+            lpLocked = true;
+          }
+          if (name.includes('lp locked')) {
+            lpLocked = true;
+          }
+        }
+      }
+
+      // Check top-level fields (RugCheck API varies by version)
+      if (data.lpBurned || data.lp_burned) {
+        lpBurned = true;
+        lpLocked = true;
+      }
+
+      return { lpLocked, lpLockDuration: null, lpBurned };
     } catch (error) {
-      logger.warn({ error, tokenMint }, 'Failed to check LP status');
-      return { lpLocked: false, lpLockDuration: null };
+      logger.debug({ error, tokenMint }, 'Failed to check LP status via RugCheck');
+      return { lpLocked: false, lpLockDuration: null, lpBurned: false };
     }
   }
 
@@ -454,6 +503,7 @@ export class TokenSafetyChecker {
         mintAuthorityEnabled: row.mint_authority_enabled,
         freezeAuthorityEnabled: row.freeze_authority_enabled,
         lpLocked: row.lp_locked,
+        lpBurned: row.lp_burned || false,
         lpLockDuration: row.lp_lock_duration,
         top10HolderConcentration: parseFloat(row.top10_holder_concentration),
         deployerHolding: parseFloat(row.deployer_holding),

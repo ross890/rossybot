@@ -1,6 +1,6 @@
 // ===========================================
 // MODULE: PERFORMANCE TRACKING INDEX
-// Exports all performance tracking components
+// Stripped: ai-query-interface and deployment-logs-reader REMOVED (unused bloat)
 // ===========================================
 
 export {
@@ -32,31 +32,9 @@ export {
 } from './daily-auto-optimizer.js';
 
 export {
-  DeploymentLogsReader,
-  deploymentLogsReader,
-  DeploymentLog,
-  PerformanceMetric,
-  SystemHealthSnapshot,
-  TradeOutcomeAnalysis,
-  LogQuery,
-  LogSummary,
-  PerformanceSummary,
-  WinLossAnalysis,
-  LogSeverity,
-  LogCategory,
-} from './deployment-logs-reader.js';
-
-export {
   PerformanceLogger,
   performanceLogger,
   SignalLogData,
   TradeLogData,
   ScanCycleData,
 } from './performance-logger.js';
-
-export {
-  AIQueryInterface,
-  aiQueryInterface,
-  BotPerformanceReport,
-  QuickStatus,
-} from './ai-query-interface.js';

@@ -26,6 +26,12 @@ export const THRESHOLDS = {
   ACTIVE_WIN_RATE: 0.40,      // 40%+ to stay ACTIVE
   SUSPEND_WIN_RATE: 0.35,     // Below 35% = suspend
 
+  // ROI override: wallets with high avg ROI stay active despite low win rate
+  // A wallet hitting big winners (e.g. 3500% avg ROI) shouldn't be demoted
+  ROI_OVERRIDE_ACTIVE: 500,      // 500%+ avg ROI = keep ACTIVE minimum
+  ROI_OVERRIDE_TRUSTED: 1500,    // 1500%+ avg ROI = TRUSTED regardless of win rate
+  ROI_OVERRIDE_MIN_TRADES: 5,    // Need at least 5 trades for ROI override to apply
+
   // Signal weights by status
   PROBATION_WEIGHT: 0.30,
   ACTIVE_WEIGHT: 0.60,
@@ -641,7 +647,7 @@ export class AlphaWalletManager {
     let recommendation: 'KEEP' | 'WARN' | 'SUSPEND' | 'REMOVE';
     let reason: string;
 
-    // Status transition logic
+    // Status transition logic (win rate based)
     if (totalTrades < THRESHOLDS.PROBATION_TRADES) {
       // Still in probation - not enough trades
       newStatus = AlphaWalletStatus.PROBATION;
@@ -681,15 +687,36 @@ export class AlphaWalletManager {
       }
     }
 
+    // ROI profitability override: high avg ROI wallets stay active despite low win rate
+    // A "big game hunter" pattern (few wins but each win is massive) is still very profitable
+    if (totalTrades >= THRESHOLDS.ROI_OVERRIDE_MIN_TRADES && avgRoi > 0) {
+      if (avgRoi >= THRESHOLDS.ROI_OVERRIDE_TRUSTED &&
+          (newStatus === AlphaWalletStatus.SUSPENDED || newStatus === AlphaWalletStatus.ACTIVE || recommendation === 'WARN')) {
+        newStatus = AlphaWalletStatus.TRUSTED;
+        newWeight = THRESHOLDS.TRUSTED_WEIGHT;
+        recommendation = 'KEEP';
+        reason = `ROI override: ${avgRoi.toFixed(0)}% avg ROI (win rate ${(winRate * 100).toFixed(1)}% below threshold but highly profitable)`;
+      } else if (avgRoi >= THRESHOLDS.ROI_OVERRIDE_ACTIVE &&
+                 (newStatus === AlphaWalletStatus.SUSPENDED || newStatus === AlphaWalletStatus.REMOVED)) {
+        newStatus = AlphaWalletStatus.ACTIVE;
+        newWeight = THRESHOLDS.ACTIVE_WEIGHT;
+        recommendation = 'KEEP';
+        reason = `ROI override: ${avgRoi.toFixed(0)}% avg ROI (win rate ${(winRate * 100).toFixed(1)}% below threshold but profitable)`;
+      }
+    }
+
     // Check if suspended wallet can recover
     if (previousStatus === AlphaWalletStatus.SUSPENDED && wallet.suspendedAt) {
       const daysSinceSuspension = (Date.now() - wallet.suspendedAt.getTime()) / (1000 * 60 * 60 * 24);
       if (daysSinceSuspension >= THRESHOLDS.SUSPENSION_RECOVERY_DAYS) {
-        if (winRate >= THRESHOLDS.ACTIVE_WIN_RATE) {
+        if (winRate >= THRESHOLDS.ACTIVE_WIN_RATE ||
+            (totalTrades >= THRESHOLDS.ROI_OVERRIDE_MIN_TRADES && avgRoi >= THRESHOLDS.ROI_OVERRIDE_ACTIVE)) {
           newStatus = AlphaWalletStatus.ACTIVE;
           newWeight = THRESHOLDS.ACTIVE_WEIGHT;
           recommendation = 'KEEP';
-          reason = `Recovered from suspension with ${(winRate * 100).toFixed(1)}% win rate`;
+          reason = winRate >= THRESHOLDS.ACTIVE_WIN_RATE
+            ? `Recovered from suspension with ${(winRate * 100).toFixed(1)}% win rate`
+            : `Recovered from suspension with ${avgRoi.toFixed(0)}% avg ROI (profitable despite low win rate)`;
         } else {
           // Failed to recover
           newStatus = AlphaWalletStatus.REMOVED;

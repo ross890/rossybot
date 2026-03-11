@@ -78,16 +78,15 @@ const KOL_ACTIVITY_WINDOW_MS = 2 * 60 * 60 * 1000; // 2 hours
 const DISCOVERY_SIGNAL_EXPIRY_MS = 24 * 60 * 60 * 1000; // Track discovery for 24 hours
 
 // ============ TIER-AWARE FILTERING ============
-// Based on performance data: EMERGING tier ($8M-$20M) has 11% win rate vs 47% for RISING
-// This indicates tokens in the $8M-$20M range are poor risk/reward
+// RECALIBRATED: Micro-cap focus for quick-flip edge.
+// The formula targets MCAP ≤ $225K as the sweet spot for 80% win rate.
+// We keep MICRO as primary, allow RISING up to $1M, and disable everything above.
+// Larger caps = more bots, less edge, worse risk/reward.
 //
 // TIER BOUNDARIES (based on entry market cap):
-// - RISING:      $500K - $8M   (best performance: 47% win rate)
-// - EMERGING:    $8M - $20M    (worst performance: 11% win rate, -72% avg return)
-// - GRADUATED:   $20M - $50M   (insufficient data)
-// - ESTABLISHED: $50M - $150M  (insufficient data)
-//
-// STRATEGY: Skip or heavily penalize EMERGING tier signals
+// - MICRO:   $30K - $225K   (PRIMARY: sweet spot for quick flips)
+// - RISING:  $225K - $1M    (SECONDARY: still viable, reduced size)
+// - ABOVE:   $1M+           (DISABLED: no edge vs institutional bots)
 
 type MarketCapTier = 'MICRO' | 'RISING' | 'EMERGING' | 'GRADUATED' | 'ESTABLISHED' | 'UNKNOWN';
 
@@ -100,63 +99,63 @@ interface TierConfig {
   positionSizeMultiplier: number;  // Scale position size for tier
 }
 
-// Tier configuration - LOOSENED for memecoin signal generation
+// Tier configuration - MICRO-CAP FOCUSED
 const TIER_CONFIGS: Record<MarketCapTier, TierConfig> = {
   MICRO: {
-    minMcap: 50_000,             // No tokens below $50K MC
-    maxMcap: 500_000,
+    minMcap: 30_000,              // Lowered floor - catch earlier
+    maxMcap: 225_000,             // Sweet spot ceiling per formula
     enabled: true,
-    minLiquidity: 500,           // Was $5K - early gems start tiny
-    minSafetyScore: 20,          // Was 50 - memecoins are inherently risky
-    positionSizeMultiplier: 0.5,  // Half size for micro caps
+    minLiquidity: 500,            // Early gems start tiny
+    minSafetyScore: 20,           // Memecoins are inherently risky
+    positionSizeMultiplier: 1.0,  // Full size - this is our edge
   },
   RISING: {
-    minMcap: 500_000,
-    maxMcap: 8_000_000,
+    minMcap: 225_000,
+    maxMcap: 1_000_000,           // Hard cap at $1M
     enabled: true,
-    minLiquidity: 2000,          // Was $10K
-    minSafetyScore: 25,          // Was 50
-    positionSizeMultiplier: 1.0,  // Full position size
+    minLiquidity: 2000,
+    minSafetyScore: 25,
+    positionSizeMultiplier: 0.5,  // Half size - diminishing edge
   },
   EMERGING: {
-    minMcap: 8_000_000,
-    maxMcap: 20_000_000,
-    enabled: true,
-    minLiquidity: 5000,          // Was $20K
-    minSafetyScore: 30,          // Was 55
-    positionSizeMultiplier: 0.5,
+    minMcap: 1_000_000,
+    maxMcap: 5_000_000,
+    enabled: false,               // DISABLED: no edge above $1M
+    minLiquidity: 5000,
+    minSafetyScore: 30,
+    positionSizeMultiplier: 0,
   },
   GRADUATED: {
-    minMcap: 20_000_000,
-    maxMcap: 50_000_000,
-    enabled: true,
-    minLiquidity: 15000,         // Was $50K
-    minSafetyScore: 35,          // Was 60
-    positionSizeMultiplier: 0.75,
+    minMcap: 5_000_000,
+    maxMcap: 25_000_000,
+    enabled: false,               // DISABLED
+    minLiquidity: 15000,
+    minSafetyScore: 35,
+    positionSizeMultiplier: 0,
   },
   ESTABLISHED: {
-    minMcap: 50_000_000,
+    minMcap: 25_000_000,
     maxMcap: 150_000_000,
-    enabled: false,              // DISABLED: 0% win rate, -43% avg return on 2 signals
+    enabled: false,               // DISABLED
     minLiquidity: 30000,
     minSafetyScore: 35,
-    positionSizeMultiplier: 0.5,
+    positionSizeMultiplier: 0,
   },
   UNKNOWN: {
     minMcap: 0,
     maxMcap: Infinity,
-    enabled: false,  // Block tokens outside known ranges
+    enabled: false,
     minLiquidity: 50000,
     minSafetyScore: 70,
-    positionSizeMultiplier: 0.25,
+    positionSizeMultiplier: 0,
   },
 };
 
 function getMarketCapTier(marketCap: number): MarketCapTier {
-  if (marketCap < 500_000) return 'MICRO';
-  if (marketCap < 8_000_000) return 'RISING';
-  if (marketCap < 20_000_000) return 'EMERGING';
-  if (marketCap < 50_000_000) return 'GRADUATED';
+  if (marketCap < 225_000) return 'MICRO';
+  if (marketCap < 1_000_000) return 'RISING';
+  if (marketCap < 5_000_000) return 'EMERGING';
+  if (marketCap < 25_000_000) return 'GRADUATED';
   if (marketCap < 150_000_000) return 'ESTABLISHED';
   return 'UNKNOWN';
 }

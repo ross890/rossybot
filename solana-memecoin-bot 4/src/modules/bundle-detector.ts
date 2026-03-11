@@ -27,6 +27,9 @@ export interface BundleAnalysisResult {
   deployerFundedBuyers: number;     // Buyers funded by deployer
   freshWalletBuyers: number;        // Brand new wallets buying
 
+  // Distribution Evenness (Bubblemaps-style)
+  distributionEvennessScore: number; // 0-1 where 1 = perfectly uniform (suspicious)
+
   // Risk Assessment (informational only - reported but never blocks signals)
   riskScore: number;                // 0-100 (higher = more risk) - informational only
   riskLevel: 'CRITICAL' | 'HIGH' | 'MEDIUM' | 'LOW'; // informational only
@@ -128,11 +131,15 @@ export class BundleDetector {
         buyerAnalysis.earlyBuyers
       );
 
+      // Analyze distribution evenness (Bubblemaps-style)
+      const evennessScore = await this.calculateDistributionEvenness(tokenAddress);
+
       // Calculate risk score and determine result
       const result = this.calculateResult(
         buyerAnalysis,
         insiderSupply,
-        fundingAnalysis
+        fundingAnalysis,
+        evennessScore
       );
 
       // Cache result
@@ -333,6 +340,59 @@ export class BundleDetector {
     };
   }
 
+  /**
+   * Calculate distribution evenness score (Bubblemaps-style analysis)
+   * Artificially uniform distributions indicate bot coordination / bundling.
+   * Returns 0-1 where 1 = perfectly uniform (highly suspicious).
+   *
+   * Uses coefficient of variation (CV) of top holder balances.
+   * Organic distributions have high variance (CV > 1). Bot-created distributions
+   * have low variance (CV < 0.3) because bots split evenly.
+   */
+  private async calculateDistributionEvenness(tokenAddress: string): Promise<number> {
+    try {
+      let holderData: { total: number; topHolders: { address: string; amount: number; percentage: number }[] };
+      try {
+        holderData = solscanClient.isAvailable()
+          ? await solscanClient.getTokenHolders(tokenAddress)
+          : await heliusClient.getTokenHolders(tokenAddress);
+      } catch {
+        return 0; // Can't calculate - assume organic
+      }
+
+      if (!holderData || holderData.topHolders.length < 5) {
+        return 0; // Not enough data
+      }
+
+      // Get the top 20 non-whale holders (exclude #1 which is often deployer/LP)
+      const holdings = holderData.topHolders
+        .slice(1, 21) // Skip largest, take next 20
+        .map(h => h.percentage)
+        .filter(p => p > 0);
+
+      if (holdings.length < 4) return 0;
+
+      // Calculate coefficient of variation (std dev / mean)
+      const mean = holdings.reduce((sum, h) => sum + h, 0) / holdings.length;
+      if (mean === 0) return 0;
+
+      const variance = holdings.reduce((sum, h) => sum + Math.pow(h - mean, 2), 0) / holdings.length;
+      const stdDev = Math.sqrt(variance);
+      const cv = stdDev / mean;
+
+      // Convert CV to evenness score:
+      // CV < 0.2 = nearly identical holdings = score ~1.0 (very suspicious)
+      // CV 0.2-0.5 = somewhat uniform = score 0.5-0.8 (moderate concern)
+      // CV > 1.0 = organic distribution = score ~0 (normal)
+      const evennessScore = Math.max(0, Math.min(1, 1 - (cv / 1.2)));
+
+      return Math.round(evennessScore * 100) / 100;
+    } catch (error) {
+      logger.debug({ error, tokenAddress }, 'Failed to calculate distribution evenness');
+      return 0;
+    }
+  }
+
   private calculateResult(
     buyerAnalysis: {
       earlyBuyers: Set<string>;
@@ -348,7 +408,8 @@ export class BundleDetector {
       fundingSourceCount: number;
       deployerFundedBuyers: number;
       freshWalletBuyers: number;
-    }
+    },
+    distributionEvennessScore: number = 0
   ): BundleAnalysisResult {
     const flags: string[] = [];
     let riskScore = 0;
@@ -396,6 +457,19 @@ export class BundleDetector {
       flags.push('ELEVATED_FRESH_WALLETS');
     }
 
+    // Distribution evenness risk (Bubblemaps-style)
+    // Artificially even distributions indicate bot coordination
+    if (distributionEvennessScore >= 0.85) {
+      riskScore += 25;
+      flags.push('ARTIFICIAL_DISTRIBUTION');
+    } else if (distributionEvennessScore >= 0.65) {
+      riskScore += 15;
+      flags.push('SUSPICIOUS_DISTRIBUTION_UNIFORMITY');
+    } else if (distributionEvennessScore >= 0.5) {
+      riskScore += 8;
+      flags.push('ELEVATED_DISTRIBUTION_UNIFORMITY');
+    }
+
     // Determine bundle confidence and risk level
     riskScore = Math.min(100, riskScore);
 
@@ -431,6 +505,7 @@ export class BundleDetector {
       fundingSourceCount: fundingAnalysis.fundingSourceCount,
       deployerFundedBuyers: fundingAnalysis.deployerFundedBuyers,
       freshWalletBuyers: fundingAnalysis.freshWalletBuyers,
+      distributionEvennessScore,
       riskScore,
       riskLevel,
       flags,
@@ -451,6 +526,7 @@ export class BundleDetector {
       fundingSourceCount: 0,
       deployerFundedBuyers: 0,
       freshWalletBuyers: 0,
+      distributionEvennessScore: 0,
       riskScore: 0,
       riskLevel: 'LOW',
       flags: [reason],

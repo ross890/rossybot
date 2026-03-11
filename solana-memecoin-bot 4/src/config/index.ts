@@ -45,11 +45,10 @@ const envSchema = z.object({
   // Set to false once you have enough data and want stricter signal quality
   LEARNING_MODE: z.coerce.boolean().default(true),
 
-  // Strategy toggles - control which signal generation strategies are active
-  // EARLY_STRATEGY: Original strategy for new tokens (5min-90min old, high volume signals)
-  // MATURE_STRATEGY: New strategy for established tokens (21+ days old, high quality signals)
+  // Strategy toggles
   ENABLE_EARLY_STRATEGY: z.string().optional().transform(val => val?.toLowerCase() !== 'false').default('true'),
-  ENABLE_MATURE_STRATEGY: z.string().optional().transform(val => val?.toLowerCase() === 'true').default('false'),
+  // MATURE_STRATEGY removed - micro-cap focus only
+  ENABLE_MATURE_STRATEGY: z.string().optional().transform(() => false).default('false'),
   
   // Pump.fun Dev Tracker
   PUMPFUN_DEV_TRACKER_ENABLED: z.string().optional().transform(val => val?.toLowerCase() !== 'false').default('true'),
@@ -62,15 +61,15 @@ const envSchema = z.object({
   DEV_SIGNAL_COOLDOWN_MS: z.coerce.number().default(300000),           // 5 minutes
   SOLSCAN_API_KEY: z.string().optional().default(''),
 
-  // Screening (with defaults) - Aggressively optimized for early entries
-  MIN_MARKET_CAP: z.coerce.number().default(50000),       // No tokens below $50K MC
-  MAX_MARKET_CAP: z.coerce.number().default(25000000),   // Raised from 15M for broader range
-  MIN_24H_VOLUME: z.coerce.number().default(3000),        // Raised from 500 — need real volume
-  MIN_VOLUME_MCAP_RATIO: z.coerce.number().default(0.03), // Raised from 0.01 — need active trading
-  MIN_HOLDER_COUNT: z.coerce.number().default(15),        // Raised from 5 — need some distribution
-  MAX_TOP10_CONCENTRATION: z.coerce.number().default(80), // Tightened from 90% — less whale risk
-  MIN_LIQUIDITY_POOL: z.coerce.number().default(5000),    // Raised from 500 — avoid illiquid traps
-  MIN_TOKEN_AGE_MINUTES: z.coerce.number().default(1),   // Lowered from 5 mins - only reject truly instant tokens
+  // Screening (with defaults) - MICRO-CAP FOCUSED for quick-flip edge
+  MIN_MARKET_CAP: z.coerce.number().default(30000),       // Lowered to $30K - catch tokens earlier
+  MAX_MARKET_CAP: z.coerce.number().default(1000000),    // Hard cap $1M - no large caps, no edge above this
+  MIN_24H_VOLUME: z.coerce.number().default(2000),        // Lowered from 3K - micro-caps have less volume
+  MIN_VOLUME_MCAP_RATIO: z.coerce.number().default(0.03), // Need active trading
+  MIN_HOLDER_COUNT: z.coerce.number().default(10),        // Lowered from 15 — micro-caps start smaller
+  MAX_TOP10_CONCENTRATION: z.coerce.number().default(50), // Tightened from 80% — formula says >50% = avoid
+  MIN_LIQUIDITY_POOL: z.coerce.number().default(500),     // Lowered from 5K — micro-caps have smaller pools
+  MIN_TOKEN_AGE_MINUTES: z.coerce.number().default(1),   // Only reject truly instant tokens
 });
 
 function loadConfig(): AppConfig {

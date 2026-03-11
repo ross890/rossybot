@@ -61,6 +61,7 @@ function printStartupDiagnostics(): void {
   }
   logger.info('   DexScreener: FREE (token discovery, metrics, boost status)');
   logger.info('   Jupiter: FREE (recent tokens, verified list)');
+  logger.info('   GMGN: FREE (trending tokens, smart money activity)');
   logger.info('   RugCheck: FREE (contract safety hard gate)');
   logger.info(`   Solscan Pro: ${appConfig.solscanApiKey ? 'CONFIGURED (dev wallet monitoring)' : 'NOT SET - dev tracker limited'}`);
   logger.info(`   Telegram: ${appConfig.telegramBotToken ? 'CONFIGURED' : 'MISSING - alerts disabled'}`);

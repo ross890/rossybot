@@ -38,6 +38,7 @@ import { autoTrader } from './trading/index.js';
 
 // Multi-source token discovery
 import { discoveryEngine } from './discovery/index.js';
+import { gmgnClient } from './gmgn-client.js';
 
 // RugCheck integration — hard-gate for DANGER tokens
 import { rugCheckClient } from './rugcheck.js';
@@ -555,7 +556,7 @@ export class SignalGenerator {
       logger.debug({ error }, 'DexScreener trending failed');
     }
 
-    // ===== SOURCE 4: Discovery Engine (volume anomalies, holder growth, narratives) =====
+    // ===== SOURCE 4: Discovery Engine (smart money scanner) =====
     try {
       const discoveryTokens = await discoveryEngine.getAllDiscoveredTokens();
 
@@ -573,10 +574,28 @@ export class SignalGenerator {
       logger.debug({ error }, 'Discovery engine failed');
     }
 
+    // ===== SOURCE 5: GMGN Trending (smart money + swap activity) =====
+    try {
+      const gmgnTokens = await gmgnClient.getTrendingSolanaTokens(50);
+
+      for (const address of gmgnTokens) {
+        candidates.add(address);
+      }
+
+      if (gmgnTokens.length > 0) {
+        logger.debug({
+          count: gmgnTokens.length,
+          source: 'GMGN trending'
+        }, 'Candidates from GMGN');
+      }
+    } catch (error) {
+      logger.debug({ error }, 'GMGN trending failed');
+    }
+
     // Log final candidate pool composition
     logger.debug({
       totalCandidates: candidates.size,
-      sources: 'DexScreener + Jupiter + Discovery Engine (volume/holder/narrative)',
+      sources: 'DexScreener + Jupiter + Discovery Engine + GMGN',
     }, 'Candidate token pool assembled');
 
     return Array.from(candidates);

@@ -61,7 +61,8 @@ export enum SignalType {
   WATCH = 'WATCH',
   ALERT = 'ALERT',
   DISCOVERY = 'DISCOVERY',        // Metrics-based early signal (no KOL required)
-  KOL_VALIDATION = 'KOL_VALIDATION' // Follow-up when KOL buys a discovered token
+  KOL_VALIDATION = 'KOL_VALIDATION', // Follow-up when KOL buys a discovered token
+  ALPHA_WALLET = 'ALPHA_WALLET'   // Alpha wallet buy detected
 }
 
 // Signal track for dual-strategy system
@@ -467,8 +468,20 @@ export interface BuySignal {
   volumeAuthenticity: VolumeAuthenticityScore;
   scamFilter: ScamFilterOutput;
 
-  // KOL Activity (REQUIRED)
-  kolActivity: KolWalletActivity;
+  // KOL Activity (null for non-KOL signals like ALPHA_WALLET/DISCOVERY)
+  kolActivity: KolWalletActivity | null;
+
+  // Alpha wallet activity (for ALPHA_WALLET signals)
+  alphaWalletActivity?: {
+    wallet: AlphaWallet;
+    transaction: {
+      signature: string;
+      solAmount: number;
+      tokensAcquired: number;
+      timestamp: Date;
+    };
+    signalWeight: number;
+  };
 
   // DexScreener & CTO Info
   dexScreenerInfo?: DexScreenerTokenInfo;

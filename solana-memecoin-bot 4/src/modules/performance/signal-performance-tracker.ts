@@ -273,7 +273,7 @@ export class SignalPerformanceTracker {
     signalId: string,
     tokenAddress: string,
     tokenTicker: string,
-    signalType: 'ONCHAIN' | 'KOL' | 'DISCOVERY',
+    signalType: 'ONCHAIN' | 'KOL' | 'DISCOVERY' | 'ALPHA_WALLET',
     entryPrice: number,
     entryMcap: number,
     momentumScore: number,

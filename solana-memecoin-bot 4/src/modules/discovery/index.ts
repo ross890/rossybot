@@ -1,7 +1,6 @@
 // ===========================================
 // TOKEN DISCOVERY MODULE
-// Stripped down: Only Smart Money Scanner remains.
-// Volume anomaly, holder growth, narrative scanners REMOVED (bloat).
+// Smart Money Scanner + Wallet Discovery Engine
 // ===========================================
 
 export {
@@ -12,7 +11,13 @@ export {
   SmartMoneyStatus,
 } from './smart-money-scanner.js';
 
+export {
+  walletDiscoveryEngine,
+  WalletDiscoveryEngine,
+} from './wallet-discovery.js';
+
 import { smartMoneyScanner } from './smart-money-scanner.js';
+import { walletDiscoveryEngine } from './wallet-discovery.js';
 import { logger } from '../../utils/logger.js';
 
 // ============ UNIFIED DISCOVERY ENGINE ============
@@ -21,7 +26,7 @@ class DiscoveryEngine {
   private isRunning = false;
 
   async initialize(): Promise<void> {
-    logger.info('Initializing discovery engine (smart money only)...');
+    logger.info('Initializing discovery engine...');
     await smartMoneyScanner.initialize();
     logger.info('Discovery engine initialized');
   }
@@ -30,13 +35,15 @@ class DiscoveryEngine {
     if (this.isRunning) return;
     this.isRunning = true;
     smartMoneyScanner.start();
-    logger.info('Discovery engine started (smart money scanner active)');
+    walletDiscoveryEngine.start();
+    logger.info('Discovery engine started (smart money + wallet discovery active)');
   }
 
   stop(): void {
     if (!this.isRunning) return;
     this.isRunning = false;
     smartMoneyScanner.stop();
+    walletDiscoveryEngine.stop();
     logger.info('Discovery engine stopped');
   }
 

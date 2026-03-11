@@ -30,6 +30,7 @@ import {
   SignalType,
   DexScreenerTokenInfo,
   CTOAnalysis,
+  AlphaWallet,
 } from '../types/index.js';
 
 // Trading commands (conditionally enabled when wallet key is present)
@@ -2154,11 +2155,13 @@ export class TelegramAlertBot {
         signal.tokenAddress,
         signal.signalType,
         signal.score.compositeScore,
-        signal.kolActivity.kol.handle
+        signal.kolActivity?.kol.handle || 'unknown'
       );
 
       // Update KOL cooldown
-      this.lastKolSignalTime.set(signal.kolActivity.kol.handle, Date.now());
+      if (signal.kolActivity) {
+        this.lastKolSignalTime.set(signal.kolActivity.kol.handle, Date.now());
+      }
 
       // Record signal in history for follow-up tracking
       this.recordSignalHistory(signal, prediction);
@@ -2167,7 +2170,7 @@ export class TelegramAlertBot {
         tokenAddress: signal.tokenAddress,
         ticker: signal.tokenTicker,
         score: signal.score.compositeScore,
-        kol: signal.kolActivity.kol.handle,
+        kol: signal.kolActivity?.kol.handle || 'alpha',
         isFollowUp: followUpContext.isFollowUp,
         classification: followUpContext.classification,
         narrative: followUpContext.narrative,
@@ -2189,9 +2192,9 @@ export class TelegramAlertBot {
    */
   private formatBuySignal(signal: BuySignal, followUpContext?: FollowUpContext): string {
     const { kolActivity, score, tokenMetrics, socialMetrics, scamFilter, dexScreenerInfo, ctoAnalysis } = signal;
-    const wallet = kolActivity.wallet;
-    const tx = kolActivity.transaction;
-    const perf = kolActivity.performance;
+    const wallet = kolActivity!.wallet;
+    const tx = kolActivity!.transaction;
+    const perf = kolActivity!.performance;
 
     // Build the message with clear visual hierarchy
     let msg = `\n`;
@@ -2273,8 +2276,8 @@ export class TelegramAlertBot {
     // KOL Wallet Activity (MANDATORY)
     msg += `👛 *KOL WALLET ACTIVITY*\n`;
     msg += `├─ Status: ✅ CONFIRMED BUY DETECTED\n`;
-    msg += `├─ KOL: @${kolActivity.kol.handle}\n`;
-    msg += `├─ KOL Tier: ${kolActivity.kol.tier}\n`;
+    msg += `├─ KOL: @${kolActivity!.kol.handle}\n`;
+    msg += `├─ KOL Tier: ${kolActivity!.kol.tier}\n`;
     msg += `├─ *Wallet Type: ${wallet.walletType === WalletType.MAIN ? '🟢 MAIN WALLET' : '🟡 SIDE WALLET'}*\n`;
     msg += `├─ Wallet: \`${this.truncateAddress(wallet.address)}\`\n`;
     msg += `├─ Buy Amount: ${tx.solAmount.toFixed(2)} SOL ($${tx.usdValue.toFixed(0)})\n`;
@@ -2643,12 +2646,14 @@ export class TelegramAlertBot {
       }
     }
 
-    // Check KOL cooldown
-    const lastKolTime = this.lastKolSignalTime.get(signal.kolActivity.kol.handle);
-    if (lastKolTime) {
-      const timeSince = Date.now() - lastKolTime;
-      if (timeSince < RATE_LIMITS.KOL_COOLDOWN_MS) {
-        return { allowed: false, reason: 'KOL cooldown active' };
+    // Check KOL cooldown (skip for non-KOL signals like ALPHA_WALLET)
+    if (signal.kolActivity) {
+      const lastKolTime = this.lastKolSignalTime.get(signal.kolActivity.kol.handle);
+      if (lastKolTime) {
+        const timeSince = Date.now() - lastKolTime;
+        if (timeSince < RATE_LIMITS.KOL_COOLDOWN_MS) {
+          return { allowed: false, reason: 'KOL cooldown active' };
+        }
       }
     }
 
@@ -2682,7 +2687,7 @@ export class TelegramAlertBot {
       compositeScore: signal.score.compositeScore,
       socialMomentum: signal.score.factors.socialMomentum,
       mentionVelocity: signal.socialMetrics.mentionVelocity1h,
-      kolHandle: signal.kolActivity.kol.handle,
+      kolHandle: signal.kolActivity?.kol.handle || (signal.alphaWalletActivity?.wallet.address.slice(0, 8) ?? 'unknown'),
       kolCount: 1,
       // Enhanced fields - use optional chaining for momentum data
       buySellRatio: (signal as any).momentumData?.buySellRatio,
@@ -2961,7 +2966,8 @@ export class TelegramAlertBot {
     if (existing) {
       // Keep original timestamp, update metrics, increment KOL count
       snapshot.timestamp = existing.timestamp;
-      snapshot.kolCount = existing.kolCount + (signal.kolActivity.kol.handle !== existing.kolHandle ? 1 : 0);
+      const currentHandle = signal.kolActivity?.kol.handle || signal.alphaWalletActivity?.wallet.address.slice(0, 8) || 'unknown';
+      snapshot.kolCount = existing.kolCount + (currentHandle !== existing.kolHandle ? 1 : 0);
       // Preserve original prediction if new one not provided
       if (!snapshot.prediction && existing.prediction) {
         snapshot.prediction = existing.prediction;
@@ -4168,18 +4174,18 @@ export class TelegramAlertBot {
         signal.tokenAddress,
         SignalType.KOL_VALIDATION,
         signal.score.compositeScore,
-        signal.kolActivity.kol.handle
+        signal.kolActivity!.kol.handle
       );
 
       // Update KOL cooldown
-      this.lastKolSignalTime.set(signal.kolActivity.kol.handle, Date.now());
+      this.lastKolSignalTime.set(signal.kolActivity!.kol.handle, Date.now());
 
       logger.info({
         tokenAddress: signal.tokenAddress,
         ticker: signal.tokenTicker,
         originalScore: previousDiscovery.score.compositeScore,
         boostedScore: signal.score.compositeScore,
-        kol: signal.kolActivity.kol.handle,
+        kol: signal.kolActivity!.kol.handle,
       }, 'KOL validation signal sent');
 
       return true;
@@ -4190,13 +4196,220 @@ export class TelegramAlertBot {
   }
 
   /**
+   * Send alpha wallet buy signal
+   */
+  async sendAlphaWalletSignal(
+    signal: BuySignal,
+    alphaActivities: Array<{
+      wallet: AlphaWallet;
+      transaction: {
+        signature: string;
+        solAmount: number;
+        tokensAcquired: number;
+        timestamp: Date;
+      };
+      signalWeight: number;
+    }>
+  ): Promise<boolean> {
+    if (!this.bot) {
+      logger.warn('Bot not initialized - cannot send alpha wallet signal');
+      return false;
+    }
+
+    try {
+      const message = this.formatAlphaWalletSignal(signal, alphaActivities);
+
+      await this.bot.sendMessage(this.chatId, message, {
+        parse_mode: 'Markdown',
+        disable_web_page_preview: true,
+        reply_markup: createTelegramInlineKeyboard(signal.tokenAddress),
+      });
+
+      // Log the signal
+      const primaryWallet = alphaActivities[0]?.wallet;
+      await Database.logSignal(
+        signal.tokenAddress,
+        SignalType.ALPHA_WALLET,
+        signal.score.compositeScore,
+        primaryWallet?.label || primaryWallet?.address.slice(0, 8) || 'alpha'
+      );
+
+      logger.info({
+        tokenAddress: signal.tokenAddress,
+        ticker: signal.tokenTicker,
+        score: signal.score.compositeScore,
+        alphaWallets: alphaActivities.length,
+      }, 'Alpha wallet signal sent');
+
+      // Record in signal history for follow-up suppression
+      this.recordSignalHistory(signal);
+
+      return true;
+    } catch (error) {
+      logger.error({ error, signal: signal.tokenAddress }, 'Failed to send alpha wallet signal');
+      return false;
+    }
+  }
+
+  /**
+   * Format alpha wallet signal message
+   */
+  private formatAlphaWalletSignal(
+    signal: BuySignal,
+    alphaActivities: Array<{
+      wallet: AlphaWallet;
+      transaction: {
+        signature: string;
+        solAmount: number;
+        tokensAcquired: number;
+        timestamp: Date;
+      };
+      signalWeight: number;
+    }>
+  ): string {
+    const { score, tokenMetrics, socialMetrics, scamFilter, dexScreenerInfo, ctoAnalysis } = signal;
+
+    // Calculate total SOL deployed across all alpha wallets
+    const totalSolDeployed = alphaActivities.reduce((sum, a) => sum + a.transaction.solAmount, 0);
+    const bestWallet = alphaActivities.reduce((best, curr) =>
+      curr.signalWeight > best.signalWeight ? curr : best
+    );
+
+    // Conviction level based on wallet count + total SOL
+    const convictionLevel = alphaActivities.length >= 3 ? 'ULTRA' :
+                            alphaActivities.length >= 2 ? 'HIGH' :
+                            totalSolDeployed >= 5 ? 'HIGH' : 'MODERATE';
+    const convictionEmoji = convictionLevel === 'ULTRA' ? '🔥🔥🔥' :
+                            convictionLevel === 'HIGH' ? '🔥🔥' : '🔥';
+
+    let msg = `\n`;
+    msg += `═══════════════════════════════\n`;
+    msg += `💎  *ALPHA WALLET BUY SIGNAL*  💎\n`;
+    msg += `    Score: *${score.compositeScore}/100* · ${score.confidence}\n`;
+    msg += `    ${convictionEmoji} ${convictionLevel} CONVICTION\n`;
+    msg += `═══════════════════════════════\n\n`;
+
+    // Token info
+    msg += `*Token:* \`$${signal.tokenTicker}\` (${this.truncateAddress(signal.tokenAddress)})\n`;
+    msg += `*Chain:* Solana\n\n`;
+
+    // DexScreener & CTO Status
+    msg += this.formatDexScreenerCTOStatus(dexScreenerInfo, ctoAnalysis);
+    msg += `\n`;
+
+    msg += `───────────────────────────────\n`;
+    // Signal metrics
+    msg += `📊 *SIGNAL METRICS*\n`;
+    msg += `├─ Composite Score: *${score.compositeScore}/100*\n`;
+    msg += `├─ Confidence: *${score.confidence}*\n`;
+    msg += `├─ Risk Level: *${score.riskLevel}/5*\n`;
+    msg += `└─ Signal Type: ALPHA\\_WALLET\n\n`;
+
+    msg += `───────────────────────────────\n`;
+    // Alpha wallet activity — the main event
+    const walletCountLabel = alphaActivities.length === 1 ? '1 WALLET' : `${alphaActivities.length} WALLETS`;
+    msg += `💎 *ALPHA WALLET ACTIVITY* (${walletCountLabel})\n`;
+    msg += `├─ Status: ✅ *CONFIRMED BUY${alphaActivities.length > 1 ? 'S' : ''} DETECTED*\n`;
+    msg += `├─ Total Deployed: *${totalSolDeployed.toFixed(2)} SOL*\n`;
+    msg += `├─ Conviction: ${convictionEmoji} *${convictionLevel}*\n`;
+
+    for (let i = 0; i < alphaActivities.length; i++) {
+      const activity = alphaActivities[i];
+      const w = activity.wallet;
+      const tx = activity.transaction;
+      const isLast = i === alphaActivities.length - 1;
+      const prefix = isLast ? '└' : '├';
+      const cont = isLast ? ' ' : '│';
+
+      // Status badge
+      const statusBadge = w.status === 'TRUSTED' ? '⭐ TRUSTED' :
+                          w.status === 'ACTIVE' ? '🟢 ACTIVE' : '🔄 PROBATION';
+      const label = w.label ? ` "${w.label}"` : '';
+
+      msg += `${prefix}─ *Wallet ${i + 1}:* ${statusBadge}${label}\n`;
+      msg += `${cont}  ├─ Address: \`${this.truncateAddress(w.address)}\`\n`;
+      msg += `${cont}  ├─ Buy: *${tx.solAmount.toFixed(2)} SOL*\n`;
+      msg += `${cont}  ├─ Tokens: ${this.formatNumber(tx.tokensAcquired)}\n`;
+      msg += `${cont}  ├─ TX: \`${this.truncateAddress(tx.signature)}\`\n`;
+      msg += `${cont}  ├─ Time: ${tx.timestamp.toISOString().replace('T', ' ').slice(0, 19)} UTC\n`;
+      msg += `${cont}  ├─ Win Rate: *${(w.winRate * 100).toFixed(0)}%* (${w.totalTrades} trades)\n`;
+      msg += `${cont}  ├─ Avg ROI: *${w.avgRoi.toFixed(0)}%*\n`;
+      msg += `${cont}  └─ Signal Weight: *${(activity.signalWeight * 100).toFixed(0)}%*\n`;
+    }
+    msg += `\n`;
+
+    msg += `───────────────────────────────\n`;
+    // On-chain data
+    msg += `📈 *ON-CHAIN DATA*\n`;
+    msg += `├─ Price: $${this.formatPrice(tokenMetrics.price)}\n`;
+    msg += `├─ Market Cap: $${this.formatNumber(tokenMetrics.marketCap)}\n`;
+    msg += `├─ 24h Volume: $${this.formatNumber(tokenMetrics.volume24h)}\n`;
+    msg += `├─ Holders: ${tokenMetrics.holderCount} (${tokenMetrics.holderChange1h >= 0 ? '+' : ''}${tokenMetrics.holderChange1h}% 1h)\n`;
+    msg += `├─ Top 10: ${tokenMetrics.top10Concentration.toFixed(1)}%\n`;
+    msg += `├─ Vol Auth: ${signal.volumeAuthenticity.score}/100\n`;
+    msg += `└─ Bundle Risk: ${scamFilter.bundleAnalysis?.riskLevel === 'LOW' ? '🟢 CLEAR' : scamFilter.bundleAnalysis?.riskLevel === 'MEDIUM' ? '🟡 FLAGGED' : '🔴 HIGH'}\n\n`;
+
+    msg += `───────────────────────────────\n`;
+    // Social signals
+    msg += `𝕏 *X/SOCIAL SIGNALS*\n`;
+
+    const velocityEmoji = socialMetrics.mentionVelocity1h >= 50 ? '🔥' :
+                          socialMetrics.mentionVelocity1h >= 20 ? '📈' :
+                          socialMetrics.mentionVelocity1h >= 5 ? '📊' : '📉';
+    const velocityLabel = socialMetrics.mentionVelocity1h >= 50 ? 'VIRAL' :
+                          socialMetrics.mentionVelocity1h >= 20 ? 'HIGH' :
+                          socialMetrics.mentionVelocity1h >= 5 ? 'MODERATE' : 'LOW';
+    msg += `├─ Velocity: ${velocityEmoji} *${socialMetrics.mentionVelocity1h}* mentions/hr (${velocityLabel})\n`;
+
+    const engagementPercent = Math.round(socialMetrics.engagementQuality * 100);
+    const engagementEmoji = engagementPercent >= 70 ? '🟢' : engagementPercent >= 40 ? '🟡' : '🔴';
+    msg += `├─ Engagement: ${engagementEmoji} ${engagementPercent}/100\n`;
+
+    const authPercent = Math.round(socialMetrics.accountAuthenticity * 100);
+    const authEmoji = authPercent >= 70 ? '✅' : authPercent >= 40 ? '⚠️' : '🚨';
+    msg += `├─ Authenticity: ${authEmoji} ${authPercent}/100\n`;
+
+    msg += `├─ Sentiment: ${socialMetrics.sentimentPolarity > 0.3 ? '🟢 POSITIVE' : socialMetrics.sentimentPolarity > -0.3 ? '🟡 NEUTRAL' : '🔴 NEGATIVE'}\n`;
+    msg += `└─ Narrative: ${socialMetrics.narrativeFit || 'N/A'}\n\n`;
+
+    msg += `───────────────────────────────\n`;
+    // Suggested action
+    msg += `⚡ *SUGGESTED ACTION*\n`;
+    msg += `├─ Entry Zone: $${this.formatPrice(signal.entryZone.low)} - $${this.formatPrice(signal.entryZone.high)}\n`;
+    msg += `├─ Position Size: ${signal.positionSizePercent}% of portfolio\n`;
+    msg += `├─ Stop Loss: $${this.formatPrice(signal.stopLoss.price)} (-${signal.stopLoss.percent}%)\n`;
+    msg += `├─ Take Profit 1: $${this.formatPrice(signal.takeProfit1.price)} (+${signal.takeProfit1.percent}%)\n`;
+    msg += `├─ Take Profit 2: $${this.formatPrice(signal.takeProfit2.price)} (+${signal.takeProfit2.percent}%)\n`;
+    msg += `└─ Time Limit: ${signal.timeLimitHours}h max hold\n\n`;
+
+    // Flags
+    if (score.flags.length > 0) {
+      msg += `⚠️ *FLAGS:* ${score.flags.join(', ')}\n\n`;
+    }
+
+    msg += `───────────────────────────────\n`;
+    // Trade Links
+    msg += `*Quick Trade:*\n`;
+    msg += formatLinksAsMarkdown(signal.tokenAddress);
+    msg += `\n\n`;
+
+    // Footer
+    msg += `⏱️ _Signal: ${signal.generatedAt.toISOString().replace('T', ' ').slice(0, 19)} UTC_\n`;
+    msg += `💎 _Alpha wallet signal — tracked wallets with proven edge._\n`;
+    msg += `⚠️ _DYOR. Not financial advice. Smart money buys ≠ guaranteed profits._\n`;
+    msg += `═══════════════════════════════\n`;
+
+    return msg;
+  }
+
+  /**
    * Format KOL validation signal message
    */
   private formatKolValidationSignal(signal: BuySignal, previousDiscovery: DiscoverySignal): string {
     const { kolActivity, score, tokenMetrics, scamFilter, socialMetrics, dexScreenerInfo, ctoAnalysis } = signal;
-    const wallet = kolActivity.wallet;
-    const tx = kolActivity.transaction;
-    const perf = kolActivity.performance;
+    const wallet = kolActivity!.wallet;
+    const tx = kolActivity!.transaction;
+    const perf = kolActivity!.performance;
 
     // Calculate time since discovery
     const timeSinceDiscovery = Math.round(
@@ -4241,8 +4454,8 @@ export class TelegramAlertBot {
     // KOL Wallet Activity
     msg += `👛 *KOL WALLET ACTIVITY*\n`;
     msg += `├─ Status: ✅ KOL BUY CONFIRMED\n`;
-    msg += `├─ KOL: @${kolActivity.kol.handle}\n`;
-    msg += `├─ KOL Tier: ${kolActivity.kol.tier}\n`;
+    msg += `├─ KOL: @${kolActivity!.kol.handle}\n`;
+    msg += `├─ KOL Tier: ${kolActivity!.kol.tier}\n`;
     msg += `├─ *Wallet Type: ${wallet.walletType === WalletType.MAIN ? '🟢 MAIN WALLET' : '🟡 SIDE WALLET'}*\n`;
     msg += `├─ Wallet: \`${this.truncateAddress(wallet.address)}\`\n`;
     msg += `├─ Buy Amount: ${tx.solAmount.toFixed(2)} SOL ($${tx.usdValue.toFixed(0)})\n`;

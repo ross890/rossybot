@@ -82,7 +82,7 @@ export interface SignalPerformance {
   hitStopLoss: boolean;
   hitTakeProfit: boolean;
   finalReturn: number;
-  outcome: 'WIN' | 'LOSS' | 'PENDING';
+  outcome: 'WIN' | 'LOSS' | 'EXPIRED_PROFIT' | 'PENDING';
 
   // Timing
   signalTime: Date;
@@ -97,6 +97,7 @@ export interface PerformanceStats {
   // Win/Loss
   wins: number;
   losses: number;
+  expiredProfitable: number; // Timed out but were profitable (never hit TP or SL)
   winRate: number;
 
   // Returns
@@ -175,10 +176,56 @@ export class SignalPerformanceTracker {
     // Ensure database tables exist
     await this.ensureTablesExist();
 
+    // One-time backfill: reclassify incorrectly categorized signals
+    // Previously, all timed-out signals were marked LOSS even if profitable,
+    // and signals that hit TP during tracking but finalized later were missed
+    await this.backfillOutcomes();
+
     // Start background tracking
     this.startTracking();
 
     logger.info('Signal Performance Tracker initialized');
+  }
+
+  /**
+   * Backfill: reclassify historical signals that were incorrectly marked
+   * 1. LOSS signals where max_return >= 100% should be WIN (hit TP during life)
+   * 2. LOSS signals where final_return > 0 should be EXPIRED_PROFIT
+   */
+  private async backfillOutcomes(): Promise<void> {
+    try {
+      // Reclassify signals that hit take profit during tracking but were marked LOSS
+      const tpResult = await pool.query(`
+        UPDATE signal_performance
+        SET final_outcome = 'WIN',
+            hit_take_profit = true
+        WHERE final_outcome = 'LOSS'
+          AND max_return >= $1
+          AND tracked = false
+      `, [TAKE_PROFIT_PERCENT]);
+
+      // Reclassify signals that expired profitable but never hit TP
+      const epResult = await pool.query(`
+        UPDATE signal_performance
+        SET final_outcome = 'EXPIRED_PROFIT'
+        WHERE final_outcome = 'LOSS'
+          AND final_return > 0
+          AND (max_return IS NULL OR max_return < $1)
+          AND tracked = false
+      `, [TAKE_PROFIT_PERCENT]);
+
+      const reclassifiedWins = tpResult.rowCount || 0;
+      const reclassifiedExpired = epResult.rowCount || 0;
+
+      if (reclassifiedWins > 0 || reclassifiedExpired > 0) {
+        logger.info({
+          reclassifiedWins,
+          reclassifiedExpired,
+        }, 'Backfill complete: reclassified incorrectly marked signals');
+      }
+    } catch (error) {
+      logger.warn({ error }, 'Backfill outcome reclassification failed (non-fatal)');
+    }
   }
 
   /**
@@ -436,11 +483,38 @@ export class SignalPerformanceTracker {
       const timeExpired = hoursElapsed >= MAX_TRACKING_HOURS;
 
       if (hitStopLoss || hitTakeProfit || timeExpired) {
-        await this.finalizeSignal(
-          signal.signal_id,
-          hitTakeProfit ? 'WIN' : 'LOSS',
-          priceChange
-        );
+        // Determine outcome correctly:
+        // - If price ever hit take profit (check max_return from DB) → WIN
+        // - If current price hit take profit → WIN
+        // - If hit stop loss → LOSS
+        // - If timed out but was profitable (never hit TP) → EXPIRED_PROFIT
+        // - If timed out at a loss → LOSS
+        let outcome: 'WIN' | 'LOSS' | 'EXPIRED_PROFIT';
+
+        if (hitTakeProfit) {
+          outcome = 'WIN';
+        } else if (hitStopLoss) {
+          outcome = 'LOSS';
+        } else {
+          // Time expired — check if the token ever hit TP during tracking
+          const maxReturnResult = await pool.query(
+            'SELECT max_return FROM signal_performance WHERE signal_id = $1',
+            [signal.signal_id]
+          );
+          const maxReturn = parseFloat(maxReturnResult.rows[0]?.max_return) || 0;
+
+          if (maxReturn >= TAKE_PROFIT_PERCENT) {
+            // Token DID hit TP during its life but we're only now finalizing
+            outcome = 'WIN';
+          } else if (priceChange > 0) {
+            // Never hit TP but is still profitable at expiry
+            outcome = 'EXPIRED_PROFIT';
+          } else {
+            outcome = 'LOSS';
+          }
+        }
+
+        await this.finalizeSignal(signal.signal_id, outcome, priceChange);
         // Clean up milestone tracking for finalized signal
         this.cleanupMilestoneTracking(signal.signal_id);
       }
@@ -538,7 +612,7 @@ export class SignalPerformanceTracker {
    */
   private async finalizeSignal(
     signalId: string,
-    outcome: 'WIN' | 'LOSS',
+    outcome: 'WIN' | 'LOSS' | 'EXPIRED_PROFIT',
     finalReturn: number
   ): Promise<void> {
     try {
@@ -629,7 +703,7 @@ export class SignalPerformanceTracker {
         SELECT entry_mcap, final_outcome, final_return
         FROM signal_performance
         WHERE signal_time > NOW() - INTERVAL '${hours} hours'
-        AND final_outcome IN ('WIN', 'LOSS')
+        AND final_outcome IN ('WIN', 'LOSS', 'EXPIRED_PROFIT')
       `);
 
       // Tier boundaries (in USD)
@@ -664,7 +738,7 @@ export class SignalPerformanceTracker {
 
         tierStats[tier].count++;
         tierStats[tier].returns.push(returnPct);
-        if (outcome === 'WIN') {
+        if (outcome === 'WIN' || outcome === 'EXPIRED_PROFIT') {
           tierStats[tier].wins++;
         } else {
           tierStats[tier].losses++;
@@ -713,6 +787,7 @@ export class SignalPerformanceTracker {
       const completed = signals.filter((s: any) => s.final_outcome !== 'PENDING');
       const wins = completed.filter((s: any) => s.final_outcome === 'WIN');
       const losses = completed.filter((s: any) => s.final_outcome === 'LOSS');
+      const expiredProfitable = completed.filter((s: any) => s.final_outcome === 'EXPIRED_PROFIT');
 
       // Calculate returns
       const returns = completed.map((s: any) => parseFloat(s.final_return) || 0);
@@ -764,7 +839,8 @@ export class SignalPerformanceTracker {
 
         wins: wins.length,
         losses: losses.length,
-        winRate: completed.length > 0 ? (wins.length / completed.length) * 100 : 0,
+        expiredProfitable: expiredProfitable.length,
+        winRate: completed.length > 0 ? ((wins.length + expiredProfitable.length) / completed.length) * 100 : 0,
 
         avgReturn: returns.length > 0 ? returns.reduce((a, b) => a + b, 0) / returns.length : 0,
         avgWinReturn: winReturns.length > 0 ? winReturns.reduce((a, b) => a + b, 0) / winReturns.length : 0,
@@ -794,12 +870,15 @@ export class SignalPerformanceTracker {
       return { count: 0, winRate: 0, avgReturn: 0 };
     }
 
-    const wins = signals.filter((s: any) => s.final_outcome === 'WIN');
+    // Count both WIN and EXPIRED_PROFIT as profitable outcomes
+    const profitable = signals.filter((s: any) =>
+      s.final_outcome === 'WIN' || s.final_outcome === 'EXPIRED_PROFIT'
+    );
     const returns = signals.map((s: any) => parseFloat(s.final_return) || 0);
 
     return {
       count: signals.length,
-      winRate: (wins.length / signals.length) * 100,
+      winRate: (profitable.length / signals.length) * 100,
       avgReturn: returns.reduce((a, b) => a + b, 0) / returns.length,
     };
   }
@@ -816,10 +895,13 @@ export class SignalPerformanceTracker {
     try {
       const result = await pool.query(`
         SELECT * FROM signal_performance
-        WHERE final_outcome IN ('WIN', 'LOSS')
+        WHERE final_outcome IN ('WIN', 'LOSS', 'EXPIRED_PROFIT')
       `);
 
-      const wins = result.rows.filter((s: any) => s.final_outcome === 'WIN');
+      // WIN and EXPIRED_PROFIT are both profitable outcomes
+      const wins = result.rows.filter((s: any) =>
+        s.final_outcome === 'WIN' || s.final_outcome === 'EXPIRED_PROFIT'
+      );
       const losses = result.rows.filter((s: any) => s.final_outcome === 'LOSS');
 
       if (wins.length === 0 || losses.length === 0) {

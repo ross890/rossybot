@@ -146,8 +146,9 @@ export class DailyReportGenerator {
     // Win/Loss Section
     msg += `🎯 **Performance**\n`;
     msg += `• Wins: ${stats.wins} ✅\n`;
+    msg += `• Expired Profitable: ${stats.expiredProfitable} 📈\n`;
     msg += `• Losses: ${stats.losses} ❌\n`;
-    msg += `• Win Rate: ${stats.winRate.toFixed(1)}%\n`;
+    msg += `• Profitable Rate: ${stats.winRate.toFixed(1)}%\n`;
 
     // Performance indicator
     if (stats.completedSignals > 0) {

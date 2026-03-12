@@ -3702,9 +3702,10 @@ export class TelegramAlertBot {
     // RACE CONDITION PROTECTION: Synchronous check BEFORE any async operations
     // This prevents two parallel processes from both passing the history check
     if (this.signalsInProgress.has(signal.tokenAddress)) {
-      logger.debug({
+      logger.info({
         tokenAddress: signal.tokenAddress,
-      }, 'Signal already in progress (race condition prevented)');
+        ticker: signal.tokenTicker,
+      }, 'Signal BLOCKED: already in progress (race condition prevented)');
       return false;
     }
 
@@ -3732,10 +3733,12 @@ export class TelegramAlertBot {
       if (previousSnapshot) {
         const timeSince = Date.now() - previousSnapshot.timestamp;
         if (timeSince < this.MIN_FOLLOWUP_INTERVAL_MS) {
-          logger.debug({
+          logger.info({
             tokenAddress: signal.tokenAddress,
+            ticker: signal.tokenTicker,
             timeSinceMs: timeSince,
-          }, 'On-chain follow-up too soon (10 min minimum)');
+            minIntervalMs: this.MIN_FOLLOWUP_INTERVAL_MS,
+          }, 'Signal BLOCKED: follow-up too soon (10 min minimum)');
           return false;
         }
       }

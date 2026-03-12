@@ -1463,7 +1463,13 @@ export class SignalGenerator {
     }
 
     // Send on-chain signal via Telegram
-    await telegramBot.sendOnChainSignal(onChainSignal);
+    const signalDelivered = await telegramBot.sendOnChainSignal(onChainSignal);
+    if (!signalDelivered) {
+      logger.warn({
+        tokenAddress,
+        ticker: metrics.ticker,
+      }, 'Signal generated but Telegram delivery BLOCKED (check signal delivery logs above)');
+    }
 
     // Record signal for performance tracking with additional metrics
     try {

@@ -65,9 +65,9 @@ const envSchema = z.object({
   MIN_MARKET_CAP: z.coerce.number().default(30000),       // Lowered to $30K - catch tokens earlier
   MAX_MARKET_CAP: z.coerce.number().default(1000000),    // Hard cap $1M - no large caps, no edge above this
   MIN_24H_VOLUME: z.coerce.number().default(2000),        // Lowered from 3K - micro-caps have less volume
-  MIN_VOLUME_MCAP_RATIO: z.coerce.number().default(0.03), // Need active trading
+  MIN_VOLUME_MCAP_RATIO: z.coerce.number().default(0.01), // Lowered from 3% — new micro-caps have thin volume in first hour
   MIN_HOLDER_COUNT: z.coerce.number().default(10),        // Lowered from 15 — micro-caps start smaller
-  MAX_TOP10_CONCENTRATION: z.coerce.number().default(50), // Tightened from 80% — formula says >50% = avoid
+  MAX_TOP10_CONCENTRATION: z.coerce.number().default(80), // Micro-caps always have concentrated holders early — 50% was filtering 80%+ of viable tokens
   MIN_LIQUIDITY_POOL: z.coerce.number().default(500),     // Lowered from 5K — micro-caps have smaller pools
   MIN_TOKEN_AGE_MINUTES: z.coerce.number().default(1),   // Only reject truly instant tokens
 });

@@ -437,7 +437,7 @@ export class SignalGenerator {
       const prioritizedCandidates = [...surgeTokens, ...normalTokens];
 
       // Diagnostic logging - show pipeline stats every cycle
-      logger.debug({
+      logger.info({
         candidates: candidates.length,
         passed: preFiltered.length,
         failed: quickFilterFails,
@@ -728,7 +728,7 @@ export class SignalGenerator {
     const safetyBlock = tokenSafetyChecker.shouldBlockSignal(safetyResult);
 
     if (safetyBlock.blocked) {
-      logger.debug({ tokenAddress: shortAddr, reason: safetyBlock.reason }, 'EVAL: Safety blocked');
+      logger.info({ tokenAddress: shortAddr, reason: safetyBlock.reason }, 'EVAL: Safety blocked');
       return SignalGenerator.EVAL_RESULTS.SAFETY_BLOCKED;
     }
 
@@ -807,7 +807,7 @@ export class SignalGenerator {
     // Run full scam filter
     const scamResult = await scamFilter.filterToken(tokenAddress);
     if (scamResult.result === 'REJECT') {
-      logger.debug({ tokenAddress: shortAddr, ticker: metrics.ticker, flags: scamResult.flags }, 'EVAL: Scam filter rejected');
+      logger.info({ tokenAddress: shortAddr, ticker: metrics.ticker, flags: scamResult.flags }, 'EVAL: Scam filter rejected');
       return SignalGenerator.EVAL_RESULTS.SCAM_REJECTED;
     }
 
@@ -822,13 +822,12 @@ export class SignalGenerator {
       const rugDecision = rugCheckClient.getDecision(rugCheckResult);
 
       if (rugDecision.action === 'AUTO_SKIP') {
-        logger.debug({
+        logger.info({
           tokenAddress: shortAddr,
           ticker: metrics.ticker,
           rugCheckScore: rugCheckResult.score,
           reason: rugDecision.reason,
-          risks: rugCheckResult.risks.slice(0, 5),
-        }, 'EVAL: BLOCKED by RugCheck - DANGER/critical risk');
+        }, 'EVAL: RugCheck BLOCKED');
         return SignalGenerator.EVAL_RESULTS.RUGCHECK_BLOCKED;
       }
 
@@ -900,13 +899,12 @@ export class SignalGenerator {
       // This fires even in learning mode — compound rugs are too risky
       const COMPOUND_RUG_THRESHOLD = 3;
       if (rugIndicatorCount >= COMPOUND_RUG_THRESHOLD) {
-        logger.debug({
+        logger.info({
           tokenAddress: shortAddr,
           ticker: metrics.ticker,
           rugIndicatorCount,
           rugIndicators,
-          threshold: COMPOUND_RUG_THRESHOLD,
-        }, 'EVAL: BLOCKED by compound rug detection - multiple red flags');
+        }, 'EVAL: Compound rug BLOCKED');
         return SignalGenerator.EVAL_RESULTS.COMPOUND_RUG_BLOCKED;
       }
 
@@ -1323,17 +1321,14 @@ export class SignalGenerator {
     // Use adjustedTotal (which includes social verification bonus) for threshold comparison
     // This rewards tokens with verified social presence (Twitter, Telegram, etc.)
     if (adjustedTotal < effectiveMinScore || shouldBlockByRecommendation) {
-      logger.debug({
-        tokenAddress,
+      logger.info({
+        tokenAddress: tokenAddress.slice(0, 8),
         ticker: metrics.ticker,
-        onChainScore: onChainScore.total,
-        socialBonus,
-        adjustedTotal,
+        score: adjustedTotal,
         minRequired: effectiveMinScore,
         recommendation: onChainScore.recommendation,
-        learningMode: isLearningMode,
         blockedBy: adjustedTotal < effectiveMinScore ? 'SCORE_TOO_LOW' : 'RECOMMENDATION',
-      }, 'Token filtered by on-chain score requirements');
+      }, 'EVAL: On-chain score too low');
       return SignalGenerator.EVAL_RESULTS.DISCOVERY_FAILED;
     }
 
@@ -2359,18 +2354,11 @@ export class SignalGenerator {
     }
 
     if (failedCriteria.length > 0) {
-      logger.debug({
+      logger.info({
         ticker: metrics.ticker,
         address: metrics.address?.slice(0, 8),
         failedCriteria,
-        metrics: {
-          marketCap: metrics.marketCap,
-          volume24h: metrics.volume24h,
-          holders: metrics.holderCount,
-          liquidity: metrics.liquidityPool,
-          tokenAge: metrics.tokenAge,
-        },
-      }, 'Token failed screening criteria');
+      }, 'EVAL: Screening failed');
       return false;
     }
 

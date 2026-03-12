@@ -2,7 +2,7 @@
 // MODULE: DYNAMIC WALLET DISCOVERY
 // Auto-discovers smart money wallets from two sources:
 // 1. Winner backtracking — scrape early buyers from winning signals
-// 2. GMGN top traders — external smart money wallet feed
+// 2. GeckoTerminal trending pool trades — free smart money wallet feed
 //
 // Creates a self-improving flywheel:
 // Good signals → discover early buyers → track them → better signals
@@ -25,116 +25,189 @@ const DISCOVERY_CONFIG = {
   MIN_BUY_SIZE_SOL: 0.5,                    // Skip dust buys
   MAX_BACKTRACK_WINNERS: 10,                // Process up to 10 winners per cycle
 
-  // GMGN top traders
-  GMGN_INTERVAL_MS: 4 * 60 * 60 * 1000,    // Every 4 hours (aggressive = rate limited)
-  GMGN_TOP_TRADERS_LIMIT: 50,              // Top 50 wallets per fetch
+  // GeckoTerminal trending trader discovery
+  GECKO_INTERVAL_MS: 2 * 60 * 60 * 1000,   // Every 2 hours
+  GECKO_MAX_POOLS: 10,                      // Scan top 10 trending pools per cycle
+  GECKO_MIN_APPEARANCES: 2,                 // Wallet must appear in 2+ pools to be interesting
 
   // Dedup
   PROCESSED_WINNERS_TTL_MS: 7 * 24 * 60 * 60 * 1000, // Remember processed winners for 7 days
 };
 
-// ============ GMGN WALLET DISCOVERY ============
+// ============ GECKO TERMINAL WALLET DISCOVERY ============
 
-const GMGN_BASE_URL = 'https://gmgn.ai';
+const GECKO_API_BASE = 'https://api.geckoterminal.com/api/v2';
 
-interface GmgnWalletData {
-  address?: string;
-  wallet_address?: string;
-  realized_profit?: number;
-  unrealized_profit?: number;
-  total_profit?: number;
-  win_rate?: number;
-  buy_count?: number;
-  sell_count?: number;
-  token_count?: number;
-  pnl_7d?: number;
-  pnl_30d?: number;
-  last_active_timestamp?: number;
+interface GeckoTrade {
+  tx_from_address: string;
+  tx_hash: string;
+  kind: 'buy' | 'sell';
+  volume_in_usd: string;
+  from_token_amount: string;
+  to_token_amount: string;
+  block_timestamp: string;
 }
 
-interface GmgnWalletResponse {
-  code: number;
-  msg: string;
-  data?: {
-    rank?: GmgnWalletData[];
+interface GeckoPoolData {
+  id: string;
+  attributes: {
+    address: string;
+    name: string;
+    base_token_price_usd: string;
+    volume_usd: { h24: string };
   };
 }
 
 /**
- * Fetch top trading wallets from GMGN's smart money ranking
+ * Fetch trending Solana pool addresses from GeckoTerminal
  */
-async function fetchGmgnTopTraders(limit: number = 50): Promise<Array<{
-  address: string;
-  winRate: number;
-  profitSol: number;
-  tradeCount: number;
-}>> {
-  const results: Array<{
-    address: string;
-    winRate: number;
-    profitSol: number;
-    tradeCount: number;
-  }> = [];
-
-  // Try multiple GMGN wallet ranking endpoints
-  const endpoints = [
-    `/defi/quotation/v1/rank/sol/walletActivities/7d?orderby=pnl_7d&direction=desc&limit=${limit}`,
-    `/defi/quotation/v1/rank/sol/walletActivities/30d?orderby=realized_profit&direction=desc&limit=${limit}`,
-  ];
-
-  for (const endpoint of endpoints) {
-    try {
-      const url = `${GMGN_BASE_URL}${endpoint}`;
-
-      const response = await fetch(url, {
-        headers: {
-          'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36',
-          'Accept': 'application/json',
-          'Referer': 'https://gmgn.ai/',
-        },
+async function fetchGeckoTrendingPools(limit: number = 10): Promise<string[]> {
+  try {
+    const response = await fetch(
+      `${GECKO_API_BASE}/networks/solana/trending_pools?page=1`,
+      {
+        headers: { 'Accept': 'application/json' },
         signal: AbortSignal.timeout(15_000),
-      });
+      }
+    );
 
-      if (!response.ok) {
-        logger.debug({ status: response.status, endpoint }, 'GMGN wallet ranking API non-OK');
-        continue;
+    if (!response.ok) {
+      logger.debug({ status: response.status }, 'GeckoTerminal trending pools API non-OK');
+      return [];
+    }
+
+    const json = await response.json() as { data?: GeckoPoolData[] };
+    if (!json.data || !Array.isArray(json.data)) return [];
+
+    return json.data
+      .slice(0, limit)
+      .map(pool => pool.attributes.address)
+      .filter(addr => addr && addr.length > 20);
+  } catch (error) {
+    logger.debug({ error }, 'GeckoTerminal trending pools fetch failed');
+    return [];
+  }
+}
+
+/**
+ * Fetch recent trades for a specific pool from GeckoTerminal
+ * Returns wallet addresses with trade details
+ */
+async function fetchGeckoPoolTrades(poolAddress: string): Promise<Array<{
+  walletAddress: string;
+  kind: 'buy' | 'sell';
+  volumeUsd: number;
+  txHash: string;
+}>> {
+  try {
+    const response = await fetch(
+      `${GECKO_API_BASE}/networks/solana/pools/${poolAddress}/trades`,
+      {
+        headers: { 'Accept': 'application/json' },
+        signal: AbortSignal.timeout(15_000),
+      }
+    );
+
+    if (!response.ok) {
+      logger.debug({ status: response.status, pool: poolAddress.slice(0, 8) }, 'GeckoTerminal pool trades API non-OK');
+      return [];
+    }
+
+    const json = await response.json() as { data?: Array<{ attributes: any }> };
+    if (!json.data || !Array.isArray(json.data)) return [];
+
+    return json.data
+      .filter(trade => trade.attributes?.tx_from_address)
+      .map(trade => ({
+        walletAddress: trade.attributes.tx_from_address,
+        kind: trade.attributes.kind || 'buy',
+        volumeUsd: parseFloat(trade.attributes.volume_in_usd || '0'),
+        txHash: trade.attributes.tx_hash || '',
+      }));
+  } catch (error) {
+    logger.debug({ error, pool: poolAddress.slice(0, 8) }, 'GeckoTerminal pool trades fetch failed');
+    return [];
+  }
+}
+
+/**
+ * Discover active traders across trending pools.
+ * Wallets that appear in multiple trending pools are likely smart money.
+ * Returns deduplicated wallet addresses with trade counts.
+ */
+async function discoverActiveTraders(maxPools: number = 10): Promise<Array<{
+  address: string;
+  poolCount: number;
+  totalTrades: number;
+  totalVolumeUsd: number;
+  buyCount: number;
+}>> {
+  const poolAddresses = await fetchGeckoTrendingPools(maxPools);
+  if (poolAddresses.length === 0) return [];
+
+  // Aggregate trades per wallet across pools
+  const walletStats: Map<string, {
+    pools: Set<string>;
+    totalTrades: number;
+    totalVolumeUsd: number;
+    buyCount: number;
+  }> = new Map();
+
+  for (const poolAddr of poolAddresses) {
+    try {
+      const trades = await fetchGeckoPoolTrades(poolAddr);
+
+      for (const trade of trades) {
+        if (!trade.walletAddress || trade.walletAddress.length < 32) continue;
+
+        const existing = walletStats.get(trade.walletAddress);
+        if (existing) {
+          existing.pools.add(poolAddr);
+          existing.totalTrades++;
+          existing.totalVolumeUsd += trade.volumeUsd;
+          if (trade.kind === 'buy') existing.buyCount++;
+        } else {
+          walletStats.set(trade.walletAddress, {
+            pools: new Set([poolAddr]),
+            totalTrades: 1,
+            totalVolumeUsd: trade.volumeUsd,
+            buyCount: trade.kind === 'buy' ? 1 : 0,
+          });
+        }
       }
 
-      const data = (await response.json()) as GmgnWalletResponse;
-
-      if (data.code !== 0 || !data.data?.rank) {
-        logger.debug({ code: data.code, msg: data.msg }, 'GMGN wallet ranking error');
-        continue;
-      }
-
-      for (const wallet of data.data.rank) {
-        const addr = wallet.address || wallet.wallet_address;
-        if (!addr || addr.length < 32) continue;
-
-        // Skip if already in results
-        if (results.some(r => r.address === addr)) continue;
-
-        const totalTrades = (wallet.buy_count || 0) + (wallet.sell_count || 0);
-        const profit = wallet.realized_profit || wallet.total_profit || wallet.pnl_7d || 0;
-
-        results.push({
-          address: addr,
-          winRate: wallet.win_rate || 0,
-          profitSol: profit,
-          tradeCount: totalTrades,
-        });
-      }
-
-      logger.info({
-        count: data.data.rank.length,
-        endpoint: endpoint.split('?')[0],
-      }, 'GMGN top traders fetched');
+      // Rate limit: GeckoTerminal allows 30 req/min, so ~2s between calls
+      await new Promise(resolve => setTimeout(resolve, 2500));
     } catch (error) {
-      logger.debug({ error }, 'GMGN wallet fetch failed');
+      logger.debug({ error, pool: poolAddr.slice(0, 8) }, 'Error fetching pool trades');
     }
   }
 
-  return results;
+  // Filter to wallets active in multiple pools (likely smart money, not random traders)
+  const results: Array<{
+    address: string;
+    poolCount: number;
+    totalTrades: number;
+    totalVolumeUsd: number;
+    buyCount: number;
+  }> = [];
+
+  for (const [address, stats] of walletStats) {
+    if (stats.pools.size >= DISCOVERY_CONFIG.GECKO_MIN_APPEARANCES) {
+      results.push({
+        address,
+        poolCount: stats.pools.size,
+        totalTrades: stats.totalTrades,
+        totalVolumeUsd: stats.totalVolumeUsd,
+        buyCount: stats.buyCount,
+      });
+    }
+  }
+
+  // Sort by pool count (most active across pools first), then by volume
+  return results.sort((a, b) =>
+    b.poolCount - a.poolCount || b.totalVolumeUsd - a.totalVolumeUsd
+  );
 }
 
 // ============ WALLET DISCOVERY ENGINE ============
@@ -142,7 +215,7 @@ async function fetchGmgnTopTraders(limit: number = 50): Promise<Array<{
 export class WalletDiscoveryEngine {
   private isRunning = false;
   private backtrackTimer: NodeJS.Timeout | null = null;
-  private gmgnTimer: NodeJS.Timeout | null = null;
+  private geckoTimer: NodeJS.Timeout | null = null;
 
   // Track which winning signals we've already backtracked
   private processedWinners: Map<string, number> = new Map(); // signalId -> timestamp
@@ -160,19 +233,19 @@ export class WalletDiscoveryEngine {
       DISCOVERY_CONFIG.BACKTRACK_INTERVAL_MS
     );
 
-    // GMGN top traders — run every 4 hours
-    this.gmgnTimer = setInterval(
-      () => this.runGmgnDiscovery(),
-      DISCOVERY_CONFIG.GMGN_INTERVAL_MS
+    // GeckoTerminal trending trader discovery — run every 2 hours
+    this.geckoTimer = setInterval(
+      () => this.runGeckoDiscovery(),
+      DISCOVERY_CONFIG.GECKO_INTERVAL_MS
     );
 
-    // Run initial GMGN scan after 2 minutes (let other systems boot first)
-    setTimeout(() => this.runGmgnDiscovery(), 2 * 60 * 1000);
+    // Run initial GeckoTerminal scan after 2 minutes (let other systems boot first)
+    setTimeout(() => this.runGeckoDiscovery(), 2 * 60 * 1000);
 
     // Run initial backtrack after 5 minutes
     setTimeout(() => this.runWinnerBacktracking(), 5 * 60 * 1000);
 
-    logger.info('Wallet Discovery Engine started (backtrack: 1h, GMGN: 4h)');
+    logger.info('Wallet Discovery Engine started (backtrack: 1h, GeckoTerminal: 2h)');
   }
 
   /**
@@ -186,9 +259,9 @@ export class WalletDiscoveryEngine {
       clearInterval(this.backtrackTimer);
       this.backtrackTimer = null;
     }
-    if (this.gmgnTimer) {
-      clearInterval(this.gmgnTimer);
-      this.gmgnTimer = null;
+    if (this.geckoTimer) {
+      clearInterval(this.geckoTimer);
+      this.geckoTimer = null;
     }
 
     logger.info('Wallet Discovery Engine stopped');
@@ -428,24 +501,26 @@ export class WalletDiscoveryEngine {
     }
   }
 
-  // ============ GMGN TOP TRADER DISCOVERY ============
+  // ============ GECKO TERMINAL TRENDING TRADER DISCOVERY ============
 
   /**
-   * Fetch top traders from GMGN and feed into smart money pipeline
+   * Discover active traders from GeckoTerminal trending pools.
+   * Wallets trading across multiple trending pools are likely smart money.
+   * Free API, no key required, 30 req/min rate limit.
    */
-  private async runGmgnDiscovery(): Promise<void> {
+  private async runGeckoDiscovery(): Promise<void> {
     try {
-      const topTraders = await fetchGmgnTopTraders(DISCOVERY_CONFIG.GMGN_TOP_TRADERS_LIMIT);
+      const activeTraders = await discoverActiveTraders(DISCOVERY_CONFIG.GECKO_MAX_POOLS);
 
-      if (topTraders.length === 0) {
-        logger.debug('GMGN discovery: no top traders returned');
+      if (activeTraders.length === 0) {
+        logger.debug('GeckoTerminal discovery: no multi-pool traders found');
         return;
       }
 
       let newCandidates = 0;
       let alreadyTracked = 0;
 
-      for (const trader of topTraders) {
+      for (const trader of activeTraders) {
         try {
           // Skip if already tracked as KOL or alpha wallet
           const isKol = await Database.getWalletByAddress(trader.address);
@@ -457,8 +532,7 @@ export class WalletDiscoveryEngine {
             continue;
           }
 
-          // Create as smart money candidate with GMGN source
-          const reason = `GMGN top trader: ${trader.winRate > 0 ? (trader.winRate * 100).toFixed(0) + '% WR, ' : ''}${trader.profitSol.toFixed(1)} SOL profit`;
+          const reason = `GeckoTerminal: active in ${trader.poolCount} trending pools, ${trader.totalTrades} trades, $${trader.totalVolumeUsd.toFixed(0)} volume`;
 
           await Database.createSmartMoneyCandidate(
             trader.address,
@@ -474,18 +548,18 @@ export class WalletDiscoveryEngine {
 
       if (newCandidates > 0) {
         logger.info({
-          fetched: topTraders.length,
+          tradersFound: activeTraders.length,
           newCandidates,
           alreadyTracked,
-        }, 'GMGN top trader discovery complete — new candidates added');
+        }, 'GeckoTerminal trader discovery complete — new candidates added');
       } else {
         logger.debug({
-          fetched: topTraders.length,
+          tradersFound: activeTraders.length,
           alreadyTracked,
-        }, 'GMGN discovery: all traders already tracked');
+        }, 'GeckoTerminal discovery: all traders already tracked');
       }
     } catch (error) {
-      logger.error({ error }, 'Error in GMGN trader discovery');
+      logger.error({ error }, 'Error in GeckoTerminal trader discovery');
     }
   }
 }

@@ -410,6 +410,15 @@ export class MomentumAnalyzer {
       const buys1m = pair.txns?.m1?.buys || Math.ceil(buys5m / 5);
       const sells1m = pair.txns?.m1?.sells || Math.ceil(sells5m / 5);
 
+      // SCORING AUDIT: uniqueBuyers was set to buys5m (every buy = unique wallet),
+      // which wildly overstates organic activity. A single wallet can make 10 buys.
+      // Conservative estimate: ~60% of buys are unique wallets for memecoins.
+      // smallTradeRatio and largeTradeCount defaulted to meaningless values,
+      // which corrupted trade quality scoring. Use honest defaults that
+      // produce neutral (not inflated) quality scores.
+      const estimatedUniqueBuyers = Math.ceil(buys5m * 0.6);
+      const estimatedUniqueSellers = Math.ceil(sells5m * 0.6);
+
       return {
         buyCount5m: buys5m,
         sellCount5m: sells5m,
@@ -422,11 +431,11 @@ export class MomentumAnalyzer {
         sellCount1m: sells1m,
         volumeAcceleration: this.calculateVolumeAcceleration(pair),
         avgTradeSize: (buys5m + sells5m) > 0 ? vol5m / (buys5m + sells5m) : 0,
-        medianTradeSize: 0, // Not available from DexScreener
-        largeTradeCount: 0,
-        smallTradeRatio: 0.5, // Default estimate
-        uniqueBuyers5m: buys5m, // Approximate
-        uniqueSellers5m: sells5m,
+        medianTradeSize: 0,           // Not available from DexScreener
+        largeTradeCount: 0,           // Not available — scores neutral
+        smallTradeRatio: 0.5,         // Default — produces neutral quality score
+        uniqueBuyers5m: estimatedUniqueBuyers,   // Conservative estimate (was buys5m)
+        uniqueSellers5m: estimatedUniqueSellers, // Conservative estimate (was sells5m)
       };
     } catch (error) {
       logger.error({ error, tokenAddress }, 'Failed to get trade metrics');

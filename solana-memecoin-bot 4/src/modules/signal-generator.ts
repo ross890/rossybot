@@ -1268,19 +1268,9 @@ export class SignalGenerator {
     const MIN_MOMENTUM_SCORE = thresholds.minMomentumScore;
     const MIN_ONCHAIN_SCORE = thresholds.minOnChainScore;
 
-    // LEARNING MODE v2: Skip momentum hard gate entirely in learning mode
-    //
-    // PROBLEM: Momentum is already weighted at 30% in the total on-chain score.
-    // Using a separate hard gate on momentum was double-penalizing low-momentum tokens
-    // and blocking signals that might have excellent safety/structure fundamentals.
-    //
-    // Example: Token with momentum=15, safety=90, bundle=85, structure=70, timing=80
-    // Weighted total = 0.30(15) + 0.25(90) + 0.20(85) + 0.15(70) + 0.10(80) = 66.5 (good score!)
-    // But it was blocked before this calculation because momentum < threshold
-    //
-    // SOLUTION: In learning mode, rely on the weighted total score to evaluate tokens.
-    // This lets the ML model learn actual correlations between components and outcomes.
-    // In production mode, keep the momentum hard gate for quality filtering.
+    // Momentum hard gate: skip in learning mode, enforce in production.
+    // Momentum is weighted at only 5% in the total score (anti-predictive),
+    // so the hard gate prevents truly dead tokens from generating signals.
 
     if (!isLearningMode && onChainScore.components.momentum < MIN_MOMENTUM_SCORE) {
       logger.debug({

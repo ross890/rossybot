@@ -327,7 +327,8 @@ export class AlphaWalletManager {
     for (const wallet of wallets) {
       const emoji = statusEmoji[wallet.status] || '';
       const shortAddr = `${wallet.address.slice(0, 6)}...${wallet.address.slice(-4)}`;
-      const winRateStr = wallet.totalTrades > 0
+      const completedRoundTrips = wallet.wins + wallet.losses;
+      const winRateStr = completedRoundTrips > 0
         ? `${(wallet.winRate * 100).toFixed(0)}%`
         : 'N/A';
 
@@ -335,7 +336,11 @@ export class AlphaWalletManager {
       if (wallet.label) message += ` (${wallet.label})`;
       message += `\n`;
       message += `   Status: ${wallet.status} | Weight: ${(wallet.signalWeight * 100).toFixed(0)}%\n`;
-      message += `   Trades: ${wallet.totalTrades} | Win Rate: ${winRateStr}\n\n`;
+      message += `   Trades: ${wallet.totalTrades} detected`;
+      if (completedRoundTrips > 0) {
+        message += ` | ${completedRoundTrips} round-trips | Win: ${winRateStr}`;
+      }
+      message += `\n\n`;
     }
 
     const probation = wallets.filter(w => w.status === 'PROBATION').length;
@@ -343,7 +348,8 @@ export class AlphaWalletManager {
     const trusted = wallets.filter(w => w.status === 'TRUSTED').length;
     const suspended = wallets.filter(w => w.status === 'SUSPENDED').length;
 
-    message += `_Summary: ${trusted} trusted, ${active} active, ${probation} probation, ${suspended} suspended_`;
+    message += `_Summary: ${trusted} trusted, ${active} active, ${probation} probation, ${suspended} suspended_\n`;
+    message += `_Promotion requires ${THRESHOLDS.PROBATION_TRADES}+ completed round-trips_`;
 
     return message;
   }
@@ -811,6 +817,9 @@ export class AlphaWalletManager {
     );
 
     // Calculate performance metrics
+    // totalRawTrades = all detected trades (buys + sells)
+    // completedTrades = round-trips with ROI (buy matched with sell)
+    const totalRawTrades = trades.length;
     const completedTrades = trades.filter(t => t.roi !== null);
     const totalTrades = completedTrades.length;
     const wins = completedTrades.filter(t => t.isWin).length;
@@ -821,9 +830,10 @@ export class AlphaWalletManager {
       : 0;
 
     // Update performance metrics in DB
+    // Store totalRawTrades so the display shows actual activity even before round-trips complete
     await Database.updateAlphaWalletPerformance(
       wallet.id,
-      totalTrades,
+      totalRawTrades,
       wins,
       losses,
       winRate,

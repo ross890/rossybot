@@ -16,6 +16,11 @@ export {
   WalletDiscoveryEngine,
 } from './wallet-discovery.js';
 
+export { rotationDetector, type RotationSignal } from './rotation-detector.js';
+export { firstBuyerQuality, type FirstBuyerQuality } from './first-buyer-quality.js';
+export { bondingVelocityTracker, type BondingVelocity } from './bonding-velocity.js';
+export { walletClustering, type ClusterAnalysis } from './wallet-clustering.js';
+
 import { smartMoneyScanner } from './smart-money-scanner.js';
 import { walletDiscoveryEngine } from './wallet-discovery.js';
 import { logger } from '../../utils/logger.js';

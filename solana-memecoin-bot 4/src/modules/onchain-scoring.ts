@@ -68,26 +68,27 @@ export interface OnChainScore {
 
 // ============ SCORING WEIGHTS ============
 
-// HIT RATE IMPROVEMENT: Reweighted based on deeper correlation analysis
+// SCORING AUDIT — Weight rationale:
 //
-// Key insight: Token Age +0.84 correlation is MISLEADING - it's selection bias
-// (older tokens survived, not that age predicts success). The actionable signals are:
-// - Holder Count: +0.36 (genuine predictor - more holders = more organic)
-// - Momentum: Actionable signal (buy pressure, volume velocity)
-// - Safety: Avoids rugs (critical for loss prevention)
-// - Bundle Safety: Insider detection (critical for avoiding dumps)
+// Correlation data from performance tracker:
+// - Holder Count: +0.37 (strongest genuine predictor)
+// - Liquidity sweet spot $5K-$15K: +6522 diff between wins/losses
+// - Momentum: ANTI-PREDICTIVE (wins avg 35, losses avg 39, diff -4)
+// - Safety/Bundle: prevent catastrophic losses (loss prevention edge)
+// - Token Age: +0.84 correlation is SELECTION BIAS (not predictive)
 //
-// Previous weights over-emphasized timing (25%) which doesn't help prediction.
-// Weights rebalanced 2026-03-13 based on overnight data:
-// Momentum was ANTI-PREDICTIVE (wins: 35 avg, losses: 39 avg, diff: -4)
-// Safety/bundle scores were flat between wins/losses — they prevent catastrophic losses
-// Liquidity had the strongest positive signal (+6522 diff)
+// Timing was contributing 5.5-9.5 inflated points to every score equally,
+// adding no discrimination. Converted to a gate (pass/fail in signal-generator)
+// so its weight here is redistributed to factors with actual predictive power.
+//
+// Momentum demoted to 5% — it's anti-predictive as entry signal,
+// but kept non-zero so the optimizer can still learn from the data.
 const WEIGHTS = {
-  momentum: 0.10,           // 10% - DEMOTED: anti-predictive, high momentum = late entry
-  safety: 0.30,             // 30% - PROMOTED: loss prevention is the edge
-  bundleSafety: 0.25,       // 25% - PROMOTED: insider detection critical
-  marketStructure: 0.25,    // 25% - PROMOTED: liquidity correlation +6522
-  timing: 0.10,             // 10% - Unchanged
+  momentum: 0.05,           // 5% - DEMOTED: anti-predictive, high momentum = late entry
+  safety: 0.30,             // 30% - loss prevention edge
+  bundleSafety: 0.25,       // 25% - insider detection critical
+  marketStructure: 0.35,    // 35% - PROMOTED: holder count (+0.37) + liquidity sweet spot
+  timing: 0.05,             // 5% - DEMOTED: inflated scores equally, no discrimination
 } as const;
 
 // ============ THRESHOLDS ============
@@ -376,58 +377,33 @@ export class OnChainScoringEngine {
   }
 
   private calculateTimingScore(ageMinutes: number): number {
-    // AUDIT FIX: Rebalanced to not overly penalize early tokens
-    // The system is designed for early detection (MIN_TOKEN_AGE: 5 min)
-    // Old scoring gave 30-50 to early tokens, making them unlikely to signal
-    // New scoring: early tokens start at 60, optimal window expanded
+    // SCORING AUDIT: Timing was giving 55-95 to every token, adding 2.75-4.75 points
+    // to every score equally (at 5% weight). This inflated all scores without
+    // discriminating between good and bad tokens.
+    //
+    // New approach: binary-ish scoring. Tokens in the tradeable window get 60 (neutral),
+    // tokens at the edges get penalized. The signal-generator's dual-track routing
+    // (EARLY_QUALITY vs PROVEN_RUNNER) handles the actual timing strategy.
+    //
+    // At 5% weight: optimal = 3 points, penalty = 0-1.5 points.
+
+    if (ageMinutes < 2) {
+      return 0;    // Hard block handled elsewhere, but score should reflect danger
+    }
 
     if (ageMinutes < 5) {
-      // < 5 min: Very early, still risky but not disqualifying
-      return 55 + (ageMinutes * 2); // 55-65
-    }
-
-    if (ageMinutes < THRESHOLDS.TOO_EARLY_MIN) {
-      // 5-15 min: Early but tradeable
-      return 65 + ((ageMinutes - 5) / 10) * 10; // 65-75
-    }
-
-    if (ageMinutes < THRESHOLDS.OPTIMAL_AGE_MIN) {
-      // 15-30 min: Good early entry window
-      return 75 + ((ageMinutes - THRESHOLDS.TOO_EARLY_MIN) / 15) * 10; // 75-85
-    }
-
-    if (ageMinutes < 60) {
-      // 30-60 min: Sweet spot for early entries
-      return 85;
-    }
-
-    if (ageMinutes < 120) {
-      // 1-2 hours: Strong timing
-      return 90;
-    }
-
-    if (ageMinutes <= THRESHOLDS.OPTIMAL_AGE_MAX) {
-      // 2-4 hours: Proven with good upside
-      return 95;
+      return 30;   // Very early — risky but signal-generator allows it
     }
 
     if (ageMinutes <= 720) {
-      // 4-12 hours: Established, good for follow-up
-      return 85;
+      return 60;   // 5 min to 12 hours: tradeable window, neutral score
     }
 
-    if (ageMinutes <= THRESHOLDS.TOO_LATE_HOURS * 60) {
-      // 12-24 hours: Mature token
-      return 75;
+    if (ageMinutes <= 2880) {
+      return 40;   // 12h-2 days: late, reduced
     }
 
-    if (ageMinutes <= 4320) {
-      // 1-3 days: Established
-      return 65;
-    }
-
-    // > 3 days - Older token, limited upside
-    return 55;
+    return 20;     // > 2 days: stale
   }
 
   // ============ ASSESSMENT HELPERS ============

@@ -22,21 +22,25 @@ import {
 // ============ SCORING WEIGHTS ============
 
 // KOL-validated signal weights
-// NOTE: socialMomentum uses on-chain proxy (no Twitter connected) — kept at reduced weight
+// SCORING AUDIT: socialMomentum was getting 10% weight but uses phantom data
+// (no Twitter connected — mentionVelocity, engagementQuality are stubs).
+// Redistributed to factors with actual predictive power.
+// onChainHealth contains holder count (+0.37 correlation) — boosted.
 const FACTOR_WEIGHTS = {
-  onChainHealth: 0.25,
-  socialMomentum: 0.10,     // On-chain proxy only, capped at 0.6
+  onChainHealth: 0.30,       // PROMOTED: contains holder count (strongest predictor)
+  socialMomentum: 0.00,      // REMOVED: phantom data, no Twitter connected
   kolConvictionMain: 0.25,
   kolConvictionSide: 0.15,
-  scamRiskInverse: 0.25,
+  scamRiskInverse: 0.30,     // PROMOTED: loss prevention edge
 } as const;
 
 // Discovery weights (metrics-only, no KOL)
-// NOTE: socialMomentum uses on-chain proxy (no Twitter connected)
+// SCORING AUDIT: socialMomentum removed (phantom data). Without KOL,
+// the edge comes from on-chain fundamentals and safety.
 const DISCOVERY_WEIGHTS = {
-  onChainHealth: 0.40,
-  socialMomentum: 0.15,     // On-chain proxy only, capped at 0.6
-  scamRiskInverse: 0.45,
+  onChainHealth: 0.50,       // PROMOTED: holder count is strongest predictor
+  socialMomentum: 0.00,      // REMOVED: phantom data
+  scamRiskInverse: 0.50,     // Loss prevention
 } as const;
 
 // KOL multiplier configuration
@@ -533,7 +537,12 @@ export class ScoringEngine {
   }
   
   /**
-   * Calculate narrative bonus (0-30)
+   * Calculate narrative bonus (0-15)
+   *
+   * SCORING AUDIT: Previously gave +25 free points for matching static theme list
+   * (any token named "pepe" or "trump" got boosted). This added noise —
+   * narrative fit doesn't predict price action, it just correlates with volume.
+   * Reduced to max +15 and only when KOL activity confirms the narrative.
    */
   private calculateNarrativeBonus(
     metrics: TokenMetrics,
@@ -542,56 +551,52 @@ export class ScoringEngine {
     if (!socialMetrics.narrativeFit) {
       return 0;
     }
-    
+
     const narrative = socialMetrics.narrativeFit.toLowerCase();
-    
-    // Check if narrative matches current meta themes
-    const isStrongMatch = CURRENT_META_THEMES.some(theme => 
-      narrative.includes(theme.toLowerCase()) || 
+
+    // Only give narrative bonus when KOL conviction backs it up
+    // Theme match alone is not predictive
+    const isThemeMatch = CURRENT_META_THEMES.some(theme =>
+      narrative.includes(theme.toLowerCase()) ||
       metrics.name.toLowerCase().includes(theme.toLowerCase()) ||
       metrics.ticker.toLowerCase().includes(theme.toLowerCase())
     );
-    
-    if (isStrongMatch) {
-      return 25;
+
+    if (isThemeMatch && socialMetrics.kolMentions.length > 0) {
+      return 15; // Theme + KOL confirmation
     }
-    
-    // Moderate match if KOL mentions align with narrative
+
     if (socialMetrics.kolMentions.length > 0) {
-      return 15;
+      return 10; // KOL mentions without theme match
     }
-    
-    return 5;
+
+    // No bonus for theme match alone — name matching is not signal
+    return 0;
   }
   
   /**
-   * Calculate timing bonus (0-20)
+   * Calculate timing bonus (0-10)
    *
-   * EARLY ENTRY EDGE: The bot's alpha comes from catching tokens before the crowd.
-   * Data shows Early Quality track (< 45 min) had 14% win rate vs 5% for Proven Runner.
-   * Scoring now heavily rewards early detection — the earlier you catch it, the better.
-   * Older tokens have already been discovered by the market; less upside remains.
+   * SCORING AUDIT: Previously gave 2-20 points, with peak at 20 for 5-15 min tokens.
+   * This was redundant with the dual-track routing (EARLY_QUALITY vs PROVEN_RUNNER)
+   * which already handles timing strategy. The bonus was inflating scores for early
+   * tokens that hadn't proven anything yet.
+   *
+   * Reduced to max 10. Early tokens get a small edge but must prove themselves
+   * through on-chain fundamentals and safety.
    */
   private calculateTimingBonus(metrics: TokenMetrics): number {
     const ageMinutes = metrics.tokenAge;
 
     if (ageMinutes < 5) {
-      return 18; // < 5 min - extremely early, high edge
-    } else if (ageMinutes < 15) {
-      return 20; // 5-15 min - ideal entry window, max bonus
-    } else if (ageMinutes < 30) {
-      return 18; // 15-30 min - still early, strong edge
-    } else if (ageMinutes < 60) {
-      return 15; // 30-60 min - moderate edge remaining
+      return 5;   // Very early — risky, small bonus
+    } else if (ageMinutes < 45) {
+      return 10;  // Early quality window
     } else if (ageMinutes < 180) {
-      return 10; // 1-3 hours - most of the move may be done
-    } else if (ageMinutes < 720) {
-      return 6;  // 3-12 hours - late entry, limited upside
-    } else if (ageMinutes < 1440) {
-      return 4;  // 12-24 hours - very late
+      return 5;   // Moderate
     }
 
-    return 2; // > 1 day - stale, minimal timing edge
+    return 0;     // > 3 hours — timing edge is gone
   }
   
   /**

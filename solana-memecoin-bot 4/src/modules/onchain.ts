@@ -1520,6 +1520,12 @@ export async function getTokenMetrics(address: string): Promise<TokenMetrics | n
     const hasAnyData = dexPairs.length > 0 || holderData.total > 0;
 
     if (!hasAnyData) {
+      // Fallback: check if this is a pre-bond pump.fun token
+      const pumpMetrics = await fetchPumpfunTokenMetrics(address, holderData);
+      if (pumpMetrics) {
+        logger.debug({ address: address.slice(0, 8), mcap: pumpMetrics.marketCap }, 'Pre-bond pump.fun token — metrics from pump.fun API');
+        return pumpMetrics;
+      }
       logger.debug({ address: address.slice(0, 8) }, 'No data found for token from any source');
       return null;
     }
@@ -1569,6 +1575,69 @@ export async function getTokenMetrics(address: string): Promise<TokenMetrics | n
     };
   } catch (error) {
     logger.error({ error, address: address.slice(0, 8) }, 'Failed to get token metrics');
+    return null;
+  }
+}
+
+/**
+ * Fetch metrics for pre-bond pump.fun tokens that aren't on DexScreener yet.
+ * Uses the free pump.fun API to get name, symbol, market cap, and creation time.
+ */
+async function fetchPumpfunTokenMetrics(
+  address: string,
+  holderData: { total: number; topHolders: { percentage: number }[] },
+): Promise<TokenMetrics | null> {
+  try {
+    const response = await fetch(`https://frontend-api.pump.fun/coins/${address}`, {
+      signal: AbortSignal.timeout(5000),
+    });
+
+    if (!response.ok) return null;
+
+    const data = await response.json() as any;
+
+    // Confirm this is actually a pump.fun token
+    if (!data.symbol && !data.name) return null;
+
+    const marketCap = data.usd_market_cap || 0;
+    const isMigrated = data.complete || data.raydium_pool !== null;
+
+    // Skip migrated tokens — they should show up on DexScreener
+    if (isMigrated) return null;
+
+    // Calculate age from creation timestamp
+    let ageMinutes = 5;
+    if (data.created_timestamp) {
+      ageMinutes = (Date.now() - data.created_timestamp) / (1000 * 60);
+    }
+
+    const holderCount = holderData.total || 25;
+    const top10Concentration = holderData.topHolders.length > 0
+      ? holderData.topHolders.reduce((sum, h) => sum + h.percentage, 0)
+      : 60; // Pre-bond tokens tend to be more concentrated
+
+    return {
+      address,
+      ticker: data.symbol || 'NEW',
+      name: data.name || 'New Token',
+      price: data.virtual_sol_reserves && data.virtual_token_reserves
+        ? (data.virtual_sol_reserves / data.virtual_token_reserves) * (data.sol_price || 150)
+        : 0.000001,
+      marketCap: marketCap || 5000,
+      volume24h: 0, // No volume data from pump.fun API
+      volumeMarketCapRatio: 0,
+      holderCount,
+      holderChange1h: 0,
+      top10Concentration,
+      liquidityPool: data.virtual_sol_reserves
+        ? (data.virtual_sol_reserves / 1e9) * (data.sol_price || 150) // Convert lamports to USD
+        : 1000,
+      tokenAge: ageMinutes,
+      lpLocked: false,
+      lpLockDuration: null,
+    };
+  } catch (error) {
+    logger.debug({ error, address: address.slice(0, 8) }, 'Pump.fun API fallback failed');
     return null;
   }
 }

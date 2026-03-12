@@ -20,6 +20,7 @@ export { rotationDetector, type RotationSignal } from './rotation-detector.js';
 export { firstBuyerQuality, type FirstBuyerQuality } from './first-buyer-quality.js';
 export { bondingVelocityTracker, type BondingVelocity } from './bonding-velocity.js';
 export { walletClustering, type ClusterAnalysis } from './wallet-clustering.js';
+export { trendingScanner, type TrendingDigest, type TrendingToken } from './trending-scanner.js';
 
 import { smartMoneyScanner } from './smart-money-scanner.js';
 import { walletDiscoveryEngine } from './wallet-discovery.js';

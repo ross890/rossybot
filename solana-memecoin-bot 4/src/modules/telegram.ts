@@ -16,6 +16,7 @@ import { kolAnalytics } from './kol/kol-analytics.js';
 import { alphaWalletManager } from './alpha/index.js';
 import { bondingCurveMonitor } from './pumpfun/bonding-monitor.js';
 import { dailyReportGenerator, signalPerformanceTracker, thresholdOptimizer } from './performance/index.js';
+import { trendingScanner } from './discovery/index.js';
 import {
   BuySignal,
   KolWalletActivity,
@@ -268,6 +269,10 @@ export class TelegramAlertBot {
     } catch (error) {
       logger.warn({ error }, 'Failed to wire smart money notifications');
     }
+
+    // Start trending ticker scanner (runs every 12 hours, sends digest to chat)
+    trendingScanner.start(12 * 60 * 60 * 1000);
+    logger.info('Trending scanner started (12h interval)');
 
     logger.info({ mode: this.isWebhookMode ? 'webhook' : 'polling' }, 'Telegram bot (rossybot) initialized');
   }
@@ -553,6 +558,7 @@ export class TelegramAlertBot {
         '/safety <token> - Safety check\n' +
         '/devscore <token> - Dev wallet score\n' +
         '/rugcheck <token> - RugCheck safety\n' +
+        '/trending - Trending ticker scan\n' +
         '/thresholds - Scoring thresholds\n' +
         '/optimize - Run threshold optimization\n\n' +
         '*Wallet Tracking:*\n' +
@@ -569,6 +575,23 @@ export class TelegramAlertBot {
       );
     });
 
+
+    // /trending command - Run trending ticker scan
+    this.bot.onText(/\/trending/, async (msg) => {
+      const chatId = msg.chat.id;
+      try {
+        await this.bot!.sendMessage(chatId, '📡 _Scanning trending tickers..._', { parse_mode: 'Markdown' });
+        const digest = await trendingScanner.scan();
+        const message = trendingScanner.formatDigest(digest);
+        await this.bot!.sendMessage(chatId, message, {
+          parse_mode: 'Markdown',
+          disable_web_page_preview: true,
+        });
+      } catch (error) {
+        logger.error({ error }, 'Trending scan command failed');
+        await this.bot!.sendMessage(chatId, 'Trending scan failed. Try again later.');
+      }
+    });
 
     // /devscore <token> command - Check dev wallet score for a token
     this.bot.onText(/\/devscore\s+(\S+)/, async (msg, match) => {
@@ -3998,51 +4021,6 @@ export class TelegramAlertBot {
     // Predictive enrichment section (only shows sections with data)
     msg += this.formatEnrichment(signal.enrichment);
 
-    // Social/X Indicators Section
-    const socialMetrics = signal.socialMetrics;
-    if (socialMetrics) {
-      const velocity = socialMetrics.mentionVelocity1h || 0;
-      const engagementPercent = Math.round((socialMetrics.engagementQuality || 0) * 100);
-      const authPercent = Math.round((socialMetrics.accountAuthenticity || 0) * 100);
-      const hasKolMentions = socialMetrics.kolMentions && socialMetrics.kolMentions.length > 0;
-      const hasSocialData = velocity > 0 || engagementPercent > 0 || authPercent > 0 || hasKolMentions;
-
-      if (hasSocialData) {
-        msg += `───────────────────────────────\n`;
-        msg += `𝕏 *SOCIAL SIGNALS*\n`;
-
-        // Mention velocity with visual indicator
-        const velocityEmoji = velocity >= 50 ? '🔥' : velocity >= 20 ? '📈' : velocity >= 5 ? '📊' : '📉';
-        const velocityLabel = velocity >= 50 ? 'VIRAL' : velocity >= 20 ? 'HIGH' : velocity >= 5 ? 'MODERATE' : 'LOW';
-        msg += `├─ Velocity: ${velocityEmoji} *${velocity}* mentions/hr (${velocityLabel})\n`;
-
-        // Engagement quality score
-        const engagementEmoji = engagementPercent >= 70 ? '🟢' : engagementPercent >= 40 ? '🟡' : '🔴';
-        msg += `├─ Engagement: ${engagementEmoji} ${engagementPercent}/100\n`;
-
-        // Account authenticity
-        const authEmoji = authPercent >= 70 ? '✅' : authPercent >= 40 ? '⚠️' : '🚨';
-        msg += `├─ Authenticity: ${authEmoji} ${authPercent}/100\n`;
-
-        // KOL mentions with tiers (if any)
-        if (hasKolMentions) {
-          const kolDisplay = socialMetrics.kolMentions.slice(0, 3).map((k: any) => {
-            const tierBadge = k.tier ? `[${k.tier}]` : '';
-            return `@${this.escapeMarkdown(k.handle || '')}${tierBadge}`;
-          }).join(', ');
-          msg += `├─ KOL Mentions: 👑 ${kolDisplay}\n`;
-        }
-
-        // Sentiment
-        const sentiment = socialMetrics.sentimentPolarity || 0;
-        const sentimentLabel = sentiment > 0.3 ? '🟢 POSITIVE' : sentiment > -0.3 ? '🟡 NEUTRAL' : '🔴 NEGATIVE';
-        msg += `└─ Sentiment: ${sentimentLabel}\n\n`;
-      } else {
-        msg += `───────────────────────────────\n`;
-        msg += `𝕏 *Social:* No data yet\n\n`;
-      }
-    }
-
     msg += `───────────────────────────────\n`;
 
     // ML Prediction Section (NEW)
@@ -4351,29 +4329,6 @@ export class TelegramAlertBot {
     msg += `├─ Top 10: ${tokenMetrics.top10Concentration.toFixed(1)}%\n`;
     msg += `├─ Vol Auth: ${signal.volumeAuthenticity.score}/100\n`;
     msg += `└─ Bundle Risk: ${scamFilter.bundleAnalysis?.riskLevel === 'LOW' ? '🟢 CLEAR' : scamFilter.bundleAnalysis?.riskLevel === 'MEDIUM' ? '🟡 FLAGGED' : '🔴 HIGH'}\n\n`;
-
-    msg += `───────────────────────────────\n`;
-    // Social signals
-    msg += `𝕏 *X/SOCIAL SIGNALS*\n`;
-
-    const velocityEmoji = socialMetrics.mentionVelocity1h >= 50 ? '🔥' :
-                          socialMetrics.mentionVelocity1h >= 20 ? '📈' :
-                          socialMetrics.mentionVelocity1h >= 5 ? '📊' : '📉';
-    const velocityLabel = socialMetrics.mentionVelocity1h >= 50 ? 'VIRAL' :
-                          socialMetrics.mentionVelocity1h >= 20 ? 'HIGH' :
-                          socialMetrics.mentionVelocity1h >= 5 ? 'MODERATE' : 'LOW';
-    msg += `├─ Velocity: ${velocityEmoji} *${socialMetrics.mentionVelocity1h}* mentions/hr (${velocityLabel})\n`;
-
-    const engagementPercent = Math.round(socialMetrics.engagementQuality * 100);
-    const engagementEmoji = engagementPercent >= 70 ? '🟢' : engagementPercent >= 40 ? '🟡' : '🔴';
-    msg += `├─ Engagement: ${engagementEmoji} ${engagementPercent}/100\n`;
-
-    const authPercent = Math.round(socialMetrics.accountAuthenticity * 100);
-    const authEmoji = authPercent >= 70 ? '✅' : authPercent >= 40 ? '⚠️' : '🚨';
-    msg += `├─ Authenticity: ${authEmoji} ${authPercent}/100\n`;
-
-    msg += `├─ Sentiment: ${socialMetrics.sentimentPolarity > 0.3 ? '🟢 POSITIVE' : socialMetrics.sentimentPolarity > -0.3 ? '🟡 NEUTRAL' : '🔴 NEGATIVE'}\n`;
-    msg += `└─ Narrative: ${socialMetrics.narrativeFit || 'N/A'}\n\n`;
 
     msg += `───────────────────────────────\n`;
     // Suggested action

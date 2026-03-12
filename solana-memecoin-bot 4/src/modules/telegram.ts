@@ -2626,16 +2626,22 @@ export class TelegramAlertBot {
       }
     }
 
+    // High-conviction signals bypass rate limits (score >= 70 or high confidence)
+    const isStrong = signal.score?.compositeScore >= 70 || signal.score?.confidence === 'HIGH';
+
     // Hourly and daily rate limits apply in ALL modes (including learning mode)
     // Learning mode relaxes score thresholds, NOT volume caps
-    const hourlyCount = await Database.getRecentSignalCount(1);
-    if (hourlyCount >= RATE_LIMITS.MAX_SIGNALS_PER_HOUR) {
-      return { allowed: false, reason: 'Hourly signal limit reached' };
-    }
+    // STRONG signals are exempt from rate limits
+    if (!isStrong) {
+      const hourlyCount = await Database.getRecentSignalCount(1);
+      if (hourlyCount >= RATE_LIMITS.MAX_SIGNALS_PER_HOUR) {
+        return { allowed: false, reason: 'Hourly signal limit reached' };
+      }
 
-    const dailyCount = await Database.getRecentSignalCount(24);
-    if (dailyCount >= RATE_LIMITS.MAX_SIGNALS_PER_DAY) {
-      return { allowed: false, reason: 'Daily signal limit reached' };
+      const dailyCount = await Database.getRecentSignalCount(24);
+      if (dailyCount >= RATE_LIMITS.MAX_SIGNALS_PER_DAY) {
+        return { allowed: false, reason: 'Daily signal limit reached' };
+      }
     }
 
     // In learning mode, skip token/KOL cooldowns to collect more diverse data
@@ -3713,16 +3719,22 @@ export class TelegramAlertBot {
     this.signalsInProgress.add(signal.tokenAddress);
 
     try {
-      // Check hourly/daily rate limits (shared with KOL signals)
-      const hourlyCount = await Database.getRecentSignalCount(1);
-      if (hourlyCount >= RATE_LIMITS.MAX_SIGNALS_PER_HOUR) {
-        logger.info({ hourlyCount, limit: RATE_LIMITS.MAX_SIGNALS_PER_HOUR }, 'On-chain signal blocked: hourly limit reached');
-        return false;
-      }
-      const dailyCount = await Database.getRecentSignalCount(24);
-      if (dailyCount >= RATE_LIMITS.MAX_SIGNALS_PER_DAY) {
-        logger.info({ dailyCount, limit: RATE_LIMITS.MAX_SIGNALS_PER_DAY }, 'On-chain signal blocked: daily limit reached');
-        return false;
+      // STRONG signals bypass rate limits — always deliver high-conviction signals
+      const isStrong = signal.signalStrength === 'STRONG' ||
+        signal.onChainScore?.recommendation === 'STRONG_BUY';
+
+      // Check hourly/daily rate limits (STRONG signals exempt)
+      if (!isStrong) {
+        const hourlyCount = await Database.getRecentSignalCount(1);
+        if (hourlyCount >= RATE_LIMITS.MAX_SIGNALS_PER_HOUR) {
+          logger.info({ hourlyCount, limit: RATE_LIMITS.MAX_SIGNALS_PER_HOUR }, 'On-chain signal blocked: hourly limit reached (MODERATE only)');
+          return false;
+        }
+        const dailyCount = await Database.getRecentSignalCount(24);
+        if (dailyCount >= RATE_LIMITS.MAX_SIGNALS_PER_DAY) {
+          logger.info({ dailyCount, limit: RATE_LIMITS.MAX_SIGNALS_PER_DAY }, 'On-chain signal blocked: daily limit reached (MODERATE only)');
+          return false;
+        }
       }
 
       // Clean up signal history

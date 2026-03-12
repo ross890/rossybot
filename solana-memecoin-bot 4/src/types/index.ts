@@ -514,6 +514,9 @@ export interface BuySignal {
   // Dual-track strategy
   signalTrack: SignalTrack;
   kolReputation?: KolReputationTier;  // For EARLY_QUALITY track
+
+  // Predictive enrichment data
+  enrichment?: SignalEnrichment;
 }
 
 // ============ POSITION TYPES ============
@@ -898,6 +901,49 @@ export interface DiscoverySignal {
   // For tracking KOL follow-up
   discoveredAt: Date;
   kolValidatedAt: Date | null;
+
+  // Predictive enrichment data (optional — populated when available)
+  enrichment?: SignalEnrichment;
+}
+
+// ============ SIGNAL ENRICHMENT (from discovery modules) ============
+
+export interface SignalEnrichment {
+  /** First Buyer Quality Index — scores early buyers by win rate/PnL */
+  buyerQuality?: {
+    score: number;
+    grade: 'A' | 'B' | 'C' | 'D' | 'F';
+    freshWalletPercent: number;
+    collectiveWinRate: number;
+    highPnlBuyers: number;
+    knownDumperCount: number;
+    flags: string[];
+  };
+  /** Wallet clustering — detects coordinated wallets via funding ancestry */
+  clustering?: {
+    score: number;
+    independentPercent: number;
+    largestClusterPercent: number;
+    clustersFound: number;
+    flags: string[];
+  };
+  /** Smart money rotation — sell→buy pattern detection across tracked wallets */
+  rotation?: {
+    score: number;
+    walletCount: number;
+    totalSolDeployed: number;
+    sourceTokens: string[];
+    confidence: 'HIGH' | 'MEDIUM' | 'LOW';
+  };
+  /** Bonding curve velocity — rate of progress towards migration */
+  bondingVelocity?: {
+    score: number;
+    currentProgress: number;
+    velocityPerMinute: number;
+    accelerating: boolean;
+    timeToMigrationMinutes: number | null;
+    tier: 'ROCKET' | 'FAST' | 'STEADY' | 'STALLING' | 'UNKNOWN';
+  };
 }
 
 // ============ PUMP.FUN DEV TRACKER TYPES ============

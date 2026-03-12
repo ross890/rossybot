@@ -3995,6 +3995,9 @@ export class TelegramAlertBot {
       msg += `📈 *Momentum:* ${buySellRatio.toFixed(1)}x buy/sell · ${uniqueBuyers} buyers (5m)\n\n`;
     }
 
+    // Predictive enrichment section (only shows sections with data)
+    msg += this.formatEnrichment(signal.enrichment);
+
     // Social/X Indicators Section
     const socialMetrics = signal.socialMetrics;
     if (socialMetrics) {
@@ -4335,6 +4338,9 @@ export class TelegramAlertBot {
     }
     msg += `\n`;
 
+    // Predictive enrichment
+    msg += this.formatEnrichment(signal.enrichment);
+
     msg += `───────────────────────────────\n`;
     // On-chain data
     msg += `📈 *ON-CHAIN DATA*\n`;
@@ -4580,6 +4586,66 @@ export class TelegramAlertBot {
     }
 
     return status ? `${status}\n` : '';
+  }
+
+  /**
+   * Format predictive enrichment data for Telegram display.
+   * Only renders sections that have meaningful data — no empty noise.
+   */
+  private formatEnrichment(enrichment?: any): string {
+    if (!enrichment) return '';
+
+    const sections: string[] = [];
+
+    // Smart Money Rotation (highest signal value)
+    if (enrichment.rotation) {
+      const r = enrichment.rotation;
+      const conf = r.confidence === 'HIGH' ? '🔥' : r.confidence === 'MEDIUM' ? '✨' : '📊';
+      sections.push(
+        `🔄 *Rotation:* ${r.walletCount} wallets rotating in · ${r.totalSolDeployed.toFixed(1)} SOL ${conf}`
+      );
+    }
+
+    // First Buyer Quality
+    if (enrichment.buyerQuality && enrichment.buyerQuality.grade !== 'C') {
+      const bq = enrichment.buyerQuality;
+      const gradeEmoji = bq.grade === 'A' ? '🟢' : bq.grade === 'B' ? '🟡' : bq.grade === 'D' ? '🟠' : '🔴';
+      let line = `👤 *Buyer Quality:* ${gradeEmoji} Grade ${bq.grade}`;
+      if (bq.collectiveWinRate > 0) line += ` · ${(bq.collectiveWinRate * 100).toFixed(0)}% WR`;
+      if (bq.freshWalletPercent > 50) line += ` · ⚠️ ${bq.freshWalletPercent.toFixed(0)}% fresh`;
+      if (bq.knownDumperCount > 0) line += ` · 🚨 ${bq.knownDumperCount} dumpers`;
+      if (bq.highPnlBuyers > 0) line += ` · 💰 ${bq.highPnlBuyers} whales`;
+      sections.push(line);
+    }
+
+    // Wallet Clustering (rug avoidance)
+    if (enrichment.clustering && enrichment.clustering.score !== 50) {
+      const c = enrichment.clustering;
+      const clusterEmoji = c.score >= 70 ? '🟢' : c.score >= 40 ? '🟡' : '🔴';
+      let line = `🕸️ *Clustering:* ${clusterEmoji} ${c.independentPercent.toFixed(0)}% independent`;
+      if (c.clustersFound > 0) line += ` · ${c.clustersFound} clusters`;
+      if (c.largestClusterPercent > 30) line += ` · ⚠️ ${c.largestClusterPercent.toFixed(0)}% in largest`;
+      sections.push(line);
+    }
+
+    // Bonding Curve Velocity (pump.fun specific)
+    if (enrichment.bondingVelocity && enrichment.bondingVelocity.tier !== 'UNKNOWN') {
+      const bv = enrichment.bondingVelocity;
+      const tierEmoji = bv.tier === 'ROCKET' ? '🚀' : bv.tier === 'FAST' ? '⚡' : bv.tier === 'STEADY' ? '📈' : '🐌';
+      let line = `${tierEmoji} *Bonding:* ${bv.currentProgress.toFixed(0)}% @ ${bv.velocityPerMinute}%/min`;
+      if (bv.accelerating) line += ` ↗️`;
+      if (bv.timeToMigrationMinutes && bv.timeToMigrationMinutes < 120) {
+        line += ` · ~${bv.timeToMigrationMinutes}min to migrate`;
+      }
+      sections.push(line);
+    }
+
+    if (sections.length === 0) return '';
+
+    let msg = `───────────────────────────────\n`;
+    msg += `🧬 *PREDICTIVE ANALYSIS*\n`;
+    msg += sections.join('\n') + '\n\n';
+    return msg;
   }
 
   private truncateAddress(address: string): string {

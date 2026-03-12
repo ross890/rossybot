@@ -38,7 +38,7 @@ import { signalPerformanceTracker, thresholdOptimizer, performanceLogger } from 
 import { autoTrader } from './trading/index.js';
 
 // Multi-source token discovery
-import { discoveryEngine } from './discovery/index.js';
+import { discoveryEngine, firstBuyerQuality, walletClustering, rotationDetector, bondingVelocityTracker } from './discovery/index.js';
 import { gmgnClient } from './gmgn-client.js';
 
 // RugCheck integration — hard-gate for DANGER tokens
@@ -62,6 +62,7 @@ import {
   CTOAnalysis,
   KolReputationTier,
   AlphaWallet,
+  SignalEnrichment,
 } from '../types/index.js';
 
 // ============ CONFIGURATION ============
@@ -950,6 +951,9 @@ export class SignalGenerator {
       }, 'DexScreener/CTO status detected');
     }
 
+    // Enrichment: run predictive analysis modules in parallel
+    const enrichment = await this.getSignalEnrichment(tokenAddress);
+
     // Get KOL activity for this token
     const kolActivities = await kolWalletMonitor.getKolActivityForToken(
       tokenAddress,
@@ -1060,7 +1064,8 @@ export class SignalGenerator {
         alphaActivity,
         safetyResult,
         dexScreenerInfo,
-        ctoAnalysis
+        ctoAnalysis,
+        enrichment
       );
     }
 
@@ -1480,6 +1485,7 @@ export class SignalGenerator {
       ctoAnalysis,
       signalTrack!,      // Track type (PROVEN_RUNNER or EARLY_QUALITY)
       kolReputationTier, // KOL tier (for EARLY_QUALITY track)
+      enrichment,        // Predictive enrichment data
     );
 
     // Track for KOL follow-up (optional validation)
@@ -1591,6 +1597,7 @@ export class SignalGenerator {
     ctoAnalysis?: CTOAnalysis,
     signalTrack: SignalTrack = SignalTrack.PROVEN_RUNNER,
     kolReputation?: KolReputationTier,
+    enrichment?: SignalEnrichment,
   ): Promise<DiscoverySignal> {
     // Build risk warnings
     const riskWarnings: string[] = [];
@@ -1768,6 +1775,9 @@ export class SignalGenerator {
 
       // ML Prediction removed
       prediction: null,
+
+      // Predictive enrichment
+      enrichment,
     } as any;
   }
 
@@ -2009,7 +2019,8 @@ export class SignalGenerator {
     }>,
     safetyResult: TokenSafetyResult,
     dexScreenerInfo?: DexScreenerTokenInfo,
-    ctoAnalysis?: CTOAnalysis
+    ctoAnalysis?: CTOAnalysis,
+    enrichment?: SignalEnrichment,
   ): Promise<string> {
     // Use the highest-weight alpha wallet as primary
     const primaryAlpha = alphaActivities.reduce((best, curr) =>
@@ -2092,6 +2103,7 @@ export class SignalGenerator {
       generatedAt: new Date(),
       signalType: SignalType.ALPHA_WALLET,
       signalTrack: SignalTrack.EARLY_QUALITY,
+      enrichment,
     };
 
     // Send via telegram
@@ -2488,6 +2500,74 @@ export class SignalGenerator {
       signalTrack,
       kolReputation,
     };
+  }
+
+  /**
+   * Collect predictive enrichment data from discovery modules.
+   * All four analyses run in parallel to minimize latency.
+   */
+  private async getSignalEnrichment(tokenAddress: string): Promise<SignalEnrichment> {
+    const enrichment: SignalEnrichment = {};
+
+    try {
+      const [buyerResult, clusterResult, rotationResult, velocityResult] = await Promise.allSettled([
+        firstBuyerQuality.analyze(tokenAddress),
+        walletClustering.analyze(tokenAddress),
+        rotationDetector.getRotationContext(tokenAddress),
+        bondingVelocityTracker.getVelocity(tokenAddress),
+      ]);
+
+      if (buyerResult.status === 'fulfilled' && buyerResult.value.buyersAnalyzed > 0) {
+        const b = buyerResult.value;
+        enrichment.buyerQuality = {
+          score: b.score,
+          grade: b.grade,
+          freshWalletPercent: b.freshWalletPercent,
+          collectiveWinRate: b.collectiveWinRate,
+          highPnlBuyers: b.highPnlBuyers,
+          knownDumperCount: b.knownDumperCount,
+          flags: b.flags,
+        };
+      }
+
+      if (clusterResult.status === 'fulfilled' && clusterResult.value.buyersAnalyzed > 0) {
+        const c = clusterResult.value;
+        enrichment.clustering = {
+          score: c.score,
+          independentPercent: c.independentPercent,
+          largestClusterPercent: c.largestClusterPercent,
+          clustersFound: c.clustersFound,
+          flags: c.flags,
+        };
+      }
+
+      if (rotationResult.status === 'fulfilled' && rotationResult.value) {
+        const r = rotationResult.value;
+        enrichment.rotation = {
+          score: r.score,
+          walletCount: r.walletCount,
+          totalSolDeployed: r.totalSolDeployed,
+          sourceTokens: r.sourceTokens,
+          confidence: r.confidence,
+        };
+      }
+
+      if (velocityResult.status === 'fulfilled' && velocityResult.value.tier !== 'UNKNOWN') {
+        const v = velocityResult.value;
+        enrichment.bondingVelocity = {
+          score: v.score,
+          currentProgress: v.currentProgress,
+          velocityPerMinute: v.velocityPerMinute,
+          accelerating: v.accelerating,
+          timeToMigrationMinutes: v.timeToMigrationMinutes,
+          tier: v.tier,
+        };
+      }
+    } catch (error) {
+      logger.debug({ error, tokenAddress }, 'Signal enrichment partially failed');
+    }
+
+    return enrichment;
   }
 }
 

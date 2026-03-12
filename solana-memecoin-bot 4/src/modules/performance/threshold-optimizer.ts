@@ -61,12 +61,12 @@ export interface FactorAnalysis {
 // Phase 1 let too many weak signals through. Now focusing on higher quality:
 // fewer signals, better hit rate, less noise.
 const DEFAULT_THRESHOLDS: ThresholdSet = {
-  minMomentumScore: 35,      // Raised from 25 — require real momentum
-  minOnChainScore: 50,       // Raised from 35 — only send genuinely strong setups
-  minSafetyScore: 60,        // Raised from 50 — filter out sketchy contracts
-  maxBundleRiskScore: 40,    // Tightened from 50 — less tolerance for insider activity
-  minLiquidity: 15000,       // Raised from 8K — avoid illiquid traps
-  maxTop10Concentration: 55, // Tightened from 60 — less whale-dominated tokens
+  minMomentumScore: 20,      // Lenient — momentum is already 30% of weighted score
+  minOnChainScore: 40,       // Moderate — let optimizer learn from corrected win/loss data
+  minSafetyScore: 40,        // Moderate — memecoins are inherently risky
+  maxBundleRiskScore: 50,    // Moderate — with Helius, bundle detection is accurate
+  minLiquidity: 10000,       // Reasonable floor — avoid truly illiquid traps
+  maxTop10Concentration: 60, // Moderate — early tokens are naturally concentrated
 };
 
 // Target performance
@@ -511,10 +511,11 @@ export class ThresholdOptimizer {
         )
       `);
 
-      // One-time migration: Reset to PHASE 1 loosened defaults (v4 - Feb 2026)
-      // Previous v3 thresholds created impossible combined filter (0 tokens passing)
-      // Phase 1: Moderate loosening to unblock the funnel while keeping quality
-      const migrationKey = 'threshold_migration_v4_phase1_unblock';
+      // One-time migration: Reset thresholds after fixing win/loss classification (v5 - Mar 2026)
+      // Previous thresholds were optimized against broken data (all timeouts = LOSS).
+      // Now that EXPIRED_PROFIT exists and win rate is corrected, reset to moderate
+      // defaults and let the optimizer re-learn from accurate data.
+      const migrationKey = 'threshold_migration_v5_corrected_winloss';
       const migrationCheck = await pool.query(`
         SELECT 1 FROM threshold_history
         WHERE thresholds->>'_migration' = $1
@@ -523,14 +524,14 @@ export class ThresholdOptimizer {
 
       if (migrationCheck.rows.length === 0) {
         // Migration not applied - reset to new defaults
-        logger.info('Applying threshold migration v4: Phase 1 loosened defaults to unblock funnel');
+        logger.info('Applying threshold migration v5: Reset after win/loss classification fix');
         await pool.query('DELETE FROM threshold_history');
         await pool.query(`
           INSERT INTO threshold_history (thresholds)
           VALUES ($1)
         `, [JSON.stringify({ ...DEFAULT_THRESHOLDS, _migration: migrationKey })]);
         this.currentThresholds = { ...DEFAULT_THRESHOLDS };
-        logger.info({ thresholds: this.currentThresholds }, 'Migration complete: Phase 1 loosened thresholds applied');
+        logger.info({ thresholds: this.currentThresholds }, 'Migration v5 complete: thresholds reset for corrected win/loss data');
         return;
       }
 

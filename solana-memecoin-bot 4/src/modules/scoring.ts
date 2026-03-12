@@ -567,32 +567,31 @@ export class ScoringEngine {
   /**
    * Calculate timing bonus (0-20)
    *
-   * AUDIT FIX: Rebalanced to not overly penalize early tokens
-   * Previous scoring gave only 5 points to < 30min tokens, making them unlikely to signal
-   * The system is designed for early detection (MIN_TOKEN_AGE: 5 min in config)
-   * New scoring provides more balanced bonuses across the age range
+   * EARLY ENTRY EDGE: The bot's alpha comes from catching tokens before the crowd.
+   * Data shows Early Quality track (< 45 min) had 14% win rate vs 5% for Proven Runner.
+   * Scoring now heavily rewards early detection — the earlier you catch it, the better.
+   * Older tokens have already been discovered by the market; less upside remains.
    */
   private calculateTimingBonus(metrics: TokenMetrics): number {
     const ageMinutes = metrics.tokenAge;
 
-    // Very new tokens: reasonable bonus (early but tradeable)
-    if (ageMinutes < 15) {
-      return 8; // < 15 min - very early, some caution
+    if (ageMinutes < 5) {
+      return 18; // < 5 min - extremely early, high edge
+    } else if (ageMinutes < 15) {
+      return 20; // 5-15 min - ideal entry window, max bonus
     } else if (ageMinutes < 30) {
-      return 12; // 15-30 min - early entry window
+      return 18; // 15-30 min - still early, strong edge
     } else if (ageMinutes < 60) {
-      return 15; // 30-60 min - sweet spot for early entries
+      return 15; // 30-60 min - moderate edge remaining
     } else if (ageMinutes < 180) {
-      return 18; // 1-3 hours - proven with upside
+      return 10; // 1-3 hours - most of the move may be done
     } else if (ageMinutes < 720) {
-      return 20; // 3-12 hours - established, still good
+      return 6;  // 3-12 hours - late entry, limited upside
     } else if (ageMinutes < 1440) {
-      return 17; // 12-24 hours - mature
-    } else if (ageMinutes < 4320) {
-      return 14; // 1-3 days - established, less upside
+      return 4;  // 12-24 hours - very late
     }
 
-    return 10; // > 3 days - older token
+    return 2; // > 1 day - stale, minimal timing edge
   }
   
   /**

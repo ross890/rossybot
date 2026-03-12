@@ -2337,6 +2337,11 @@ export class SignalGenerator {
     const cfg = appConfig.screening;
     const failedCriteria: string[] = [];
 
+    // Pre-bond pump.fun tokens have no volume data from DexScreener.
+    // Detect them: mcap < $69K (pump.fun migration target) and zero volume.
+    const isPreBond = metrics.marketCap > 0 && metrics.marketCap < 69_000
+      && metrics.volume24h === 0 && metrics.volumeMarketCapRatio === 0;
+
     if (metrics.marketCap < cfg.minMarketCap) {
       failedCriteria.push(`marketCap (${metrics.marketCap}) < min (${cfg.minMarketCap})`);
     }
@@ -2344,12 +2349,15 @@ export class SignalGenerator {
       failedCriteria.push(`marketCap (${metrics.marketCap}) > max (${cfg.maxMarketCap})`);
     }
 
-    if (metrics.volume24h < cfg.min24hVolume) {
-      failedCriteria.push(`volume24h (${metrics.volume24h}) < min (${cfg.min24hVolume})`);
-    }
+    // Skip volume checks for pre-bond tokens — pump.fun API doesn't provide volume
+    if (!isPreBond) {
+      if (metrics.volume24h < cfg.min24hVolume) {
+        failedCriteria.push(`volume24h (${metrics.volume24h}) < min (${cfg.min24hVolume})`);
+      }
 
-    if (metrics.volumeMarketCapRatio < cfg.minVolumeMarketCapRatio) {
-      failedCriteria.push(`volumeRatio (${metrics.volumeMarketCapRatio.toFixed(3)}) < min (${cfg.minVolumeMarketCapRatio})`);
+      if (metrics.volumeMarketCapRatio < cfg.minVolumeMarketCapRatio) {
+        failedCriteria.push(`volumeRatio (${metrics.volumeMarketCapRatio.toFixed(3)}) < min (${cfg.minVolumeMarketCapRatio})`);
+      }
     }
 
     if (metrics.holderCount < cfg.minHolderCount) {
@@ -2373,8 +2381,17 @@ export class SignalGenerator {
         ticker: metrics.ticker,
         address: metrics.address?.slice(0, 8),
         failedCriteria,
+        isPreBond,
       }, 'EVAL: Screening failed');
       return false;
+    }
+
+    if (isPreBond) {
+      logger.info({
+        ticker: metrics.ticker,
+        address: metrics.address?.slice(0, 8),
+        mcap: metrics.marketCap,
+      }, 'EVAL: Pre-bond pump.fun token passed screening (volume checks skipped)');
     }
 
     return true;

@@ -692,6 +692,7 @@ export class SignalPerformanceTracker {
    * Get performance statistics by tier (based on entry market cap)
    */
   async getTierPerformance(hours: number = 168): Promise<{
+    MICRO: { count: number; wins: number; losses: number; winRate: number; avgReturn: number };
     RISING: { count: number; wins: number; losses: number; winRate: number; avgReturn: number };
     EMERGING: { count: number; wins: number; losses: number; winRate: number; avgReturn: number };
     GRADUATED: { count: number; wins: number; losses: number; winRate: number; avgReturn: number };
@@ -706,15 +707,17 @@ export class SignalPerformanceTracker {
         AND final_outcome IN ('WIN', 'LOSS', 'EXPIRED_PROFIT')
       `);
 
-      // Tier boundaries (in USD)
+      // Tier boundaries (in USD) — must match signal-generator.ts TIER_CONFIGS
       const tierBoundaries = {
-        RISING: { min: 500_000, max: 8_000_000 },
-        EMERGING: { min: 8_000_000, max: 20_000_000 },
-        GRADUATED: { min: 20_000_000, max: 50_000_000 },
-        ESTABLISHED: { min: 50_000_000, max: 150_000_000 },
+        MICRO: { min: 0, max: 225_000 },
+        RISING: { min: 225_000, max: 1_000_000 },
+        EMERGING: { min: 1_000_000, max: 5_000_000 },
+        GRADUATED: { min: 5_000_000, max: 25_000_000 },
+        ESTABLISHED: { min: 25_000_000, max: 150_000_000 },
       };
 
       const tierStats: any = {
+        MICRO: { count: 0, wins: 0, losses: 0, returns: [] },
         RISING: { count: 0, wins: 0, losses: 0, returns: [] },
         EMERGING: { count: 0, wins: 0, losses: 0, returns: [] },
         GRADUATED: { count: 0, wins: 0, losses: 0, returns: [] },
@@ -764,6 +767,7 @@ export class SignalPerformanceTracker {
     } catch (error) {
       logger.error({ error }, 'Failed to get tier performance');
       return {
+        MICRO: { count: 0, wins: 0, losses: 0, winRate: 0, avgReturn: 0 },
         RISING: { count: 0, wins: 0, losses: 0, winRate: 0, avgReturn: 0 },
         EMERGING: { count: 0, wins: 0, losses: 0, winRate: 0, avgReturn: 0 },
         GRADUATED: { count: 0, wins: 0, losses: 0, winRate: 0, avgReturn: 0 },

@@ -65,8 +65,8 @@ const DEFAULT_THRESHOLDS: ThresholdSet = {
   minOnChainScore: 40,       // Moderate — let optimizer learn from corrected win/loss data
   minSafetyScore: 40,        // Moderate — memecoins are inherently risky
   maxBundleRiskScore: 50,    // Moderate — with Helius, bundle detection is accurate
-  minLiquidity: 10000,       // Reasonable floor — avoid truly illiquid traps
-  maxTop10Concentration: 60, // Moderate — early tokens are naturally concentrated
+  minLiquidity: 500,         // Aligned with MICRO tier config — micro-caps have small pools
+  maxTop10Concentration: 80, // Aligned with config — micro-caps are naturally concentrated
 };
 
 // Target performance

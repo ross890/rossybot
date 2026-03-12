@@ -2039,6 +2039,9 @@ export class SignalGenerator {
     const alphaBoost = Math.min(15, alphaActivities.length * 5); // Up to +15 for 3+ wallets
     score.compositeScore = Math.min(100, score.compositeScore + alphaBoost);
 
+    // No score gate for alpha signals — smart money buying IS the signal.
+    // Score is still calculated for display/tracking but doesn't filter.
+
     // Position size scaled by alpha wallet signal weight (lower than KOL)
     let positionSize = appConfig.trading.defaultPositionSizePercent * 0.75; // 75% of normal
     positionSize *= primaryAlpha.signalWeight; // Scale by wallet performance weight

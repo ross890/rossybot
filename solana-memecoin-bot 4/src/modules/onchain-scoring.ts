@@ -78,12 +78,16 @@ export interface OnChainScore {
 // - Bundle Safety: Insider detection (critical for avoiding dumps)
 //
 // Previous weights over-emphasized timing (25%) which doesn't help prediction.
+// Weights rebalanced 2026-03-13 based on overnight data:
+// Momentum was ANTI-PREDICTIVE (wins: 35 avg, losses: 39 avg, diff: -4)
+// Safety/bundle scores were flat between wins/losses — they prevent catastrophic losses
+// Liquidity had the strongest positive signal (+6522 diff)
 const WEIGHTS = {
-  momentum: 0.30,           // 30% - INCREASED (most actionable signal)
-  safety: 0.25,             // 25% - Keep high (avoids rugs)
-  bundleSafety: 0.20,       // 20% - INCREASED (insider detection critical)
-  marketStructure: 0.15,    // 15% - INCREASED (holder count is +0.36 correlation)
-  timing: 0.10,             // 10% - DECREASED (age is selection bias, not predictive)
+  momentum: 0.10,           // 10% - DEMOTED: anti-predictive, high momentum = late entry
+  safety: 0.30,             // 30% - PROMOTED: loss prevention is the edge
+  bundleSafety: 0.25,       // 25% - PROMOTED: insider detection critical
+  marketStructure: 0.25,    // 25% - PROMOTED: liquidity correlation +6522
+  timing: 0.10,             // 10% - Unchanged
 } as const;
 
 // ============ THRESHOLDS ============

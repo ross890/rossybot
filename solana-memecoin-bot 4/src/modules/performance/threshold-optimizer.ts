@@ -60,11 +60,15 @@ export interface FactorAnalysis {
 // Default thresholds — Phase 2 quality tightening
 // Phase 1 let too many weak signals through. Now focusing on higher quality:
 // fewer signals, better hit rate, less noise.
+// RECALIBRATED (March 2026): After scoring audit demoted momentum to 5% weight
+// and removed double-penalization, overall scores shifted downward. Old thresholds
+// produced zero signals. Lowered to let the scoring weights + RugCheck/compound
+// rug detection handle quality control, while the optimizer can still learn and tighten.
 const DEFAULT_THRESHOLDS: ThresholdSet = {
-  minMomentumScore: 20,      // Lenient — momentum is already 30% of weighted score
-  minOnChainScore: 40,       // Moderate — let optimizer learn from corrected win/loss data
-  minSafetyScore: 40,        // Moderate — memecoins are inherently risky
-  maxBundleRiskScore: 50,    // Moderate — with Helius, bundle detection is accurate
+  minMomentumScore: 15,      // Lowered from 20 — momentum is only 5% weight, soft gate
+  minOnChainScore: 35,       // Lowered from 40 — social/surge bonuses help push over
+  minSafetyScore: 30,        // Lowered from 40 — RugCheck hard gate catches real dangers
+  maxBundleRiskScore: 55,    // Raised from 50 — some bundling is normal on micro-caps
   minLiquidity: 500,         // Aligned with MICRO tier config — micro-caps have small pools
   maxTop10Concentration: 80, // Aligned with config — micro-caps are naturally concentrated
 };

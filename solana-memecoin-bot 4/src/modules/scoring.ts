@@ -60,7 +60,7 @@ const THRESHOLDS = {
   // Score requirements
   MIN_SCORE_BUY: appConfig.trading.minScoreBuySignal,
   MIN_SCORE_WATCH: appConfig.trading.minScoreWatchSignal,
-  MIN_SCORE_DISCOVERY: 45,  // Raised from 30 — quality over quantity
+  MIN_SCORE_DISCOVERY: 35,  // Lowered from 45 — scoring audit shifted scores down, RugCheck handles safety
 
   // Risk levels
   RISK_VERY_LOW_MAX_SCORE: 85,

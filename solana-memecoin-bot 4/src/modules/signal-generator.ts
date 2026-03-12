@@ -2039,6 +2039,19 @@ export class SignalGenerator {
     const alphaBoost = Math.min(15, alphaActivities.length * 5); // Up to +15 for 3+ wallets
     score.compositeScore = Math.min(100, score.compositeScore + alphaBoost);
 
+    // Minimum quality gate — alpha wallet buys still need a baseline score
+    const MIN_ALPHA_SCORE = 35;
+    if (score.compositeScore < MIN_ALPHA_SCORE) {
+      logger.info({
+        tokenAddress: tokenAddress.slice(0, 8),
+        ticker: metrics.ticker,
+        compositeScore: score.compositeScore,
+        minRequired: MIN_ALPHA_SCORE,
+        wallet: primaryAlpha.wallet.label || primaryAlpha.wallet.address.slice(0, 8),
+      }, 'EVAL: Alpha signal filtered — score too low');
+      return SignalGenerator.EVAL_RESULTS.SCORING_FAILED;
+    }
+
     // Position size scaled by alpha wallet signal weight (lower than KOL)
     let positionSize = appConfig.trading.defaultPositionSizePercent * 0.75; // 75% of normal
     positionSize *= primaryAlpha.signalWeight; // Scale by wallet performance weight

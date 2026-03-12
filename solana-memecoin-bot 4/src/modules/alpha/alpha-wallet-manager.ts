@@ -112,17 +112,19 @@ export class AlphaWalletManager {
    * Called by signal generator's getCandidateTokens() each scan cycle.
    */
   drainDiscoveredTokens(): string[] {
-    const tokens = Array.from(this.alphaDiscoveredTokens.keys());
-
-    // Expire entries older than 30 minutes
     const now = Date.now();
     const EXPIRY_MS = 30 * 60 * 1000;
+
+    // Expire entries older than 30 minutes
     for (const [token, info] of this.alphaDiscoveredTokens) {
       if (now - info.discoveredAt > EXPIRY_MS) {
         this.alphaDiscoveredTokens.delete(token);
       }
     }
 
+    // Drain: return tokens and clear map to prevent re-sending the same candidates
+    const tokens = Array.from(this.alphaDiscoveredTokens.keys());
+    this.alphaDiscoveredTokens.clear();
     return tokens;
   }
 

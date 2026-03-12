@@ -402,11 +402,46 @@ export class SignalGenerator {
         }
       }
 
+      // Step 2b: Surge detection — prioritize tokens with active micro-surges
+      // Surging tokens get evaluated FIRST (before the per-cycle cap is hit)
+      const surgeTokens: string[] = [];
+      const normalTokens: string[] = [];
+
+      // Only run surge detection on a sample to avoid rate limit pressure
+      // Check up to 15 candidates for surges (newest/alpha sources prioritized)
+      const surgeCheckLimit = Math.min(preFiltered.length, 15);
+      for (let i = 0; i < surgeCheckLimit; i++) {
+        try {
+          const surge = await momentumAnalyzer.detectSurge(preFiltered[i]);
+          if (surge.detected) {
+            surgeTokens.push(preFiltered[i]);
+            logger.info({
+              tokenAddress: preFiltered[i].slice(0, 8),
+              surgeType: surge.type,
+              confidence: surge.confidence,
+              multiplier: surge.multiplier.toFixed(1),
+            }, 'SURGE: Token prioritized for immediate evaluation');
+          } else {
+            normalTokens.push(preFiltered[i]);
+          }
+        } catch {
+          normalTokens.push(preFiltered[i]);
+        }
+      }
+      // Add unchecked tokens to normal queue
+      for (let i = surgeCheckLimit; i < preFiltered.length; i++) {
+        normalTokens.push(preFiltered[i]);
+      }
+
+      // Surging tokens first, then normal candidates
+      const prioritizedCandidates = [...surgeTokens, ...normalTokens];
+
       // Diagnostic logging - show pipeline stats every cycle
       logger.debug({
         candidates: candidates.length,
         passed: preFiltered.length,
         failed: quickFilterFails,
+        surging: surgeTokens.length,
       }, 'Scan cycle: pre-filter complete');
 
       // Step 3: Evaluate each token (KOL signals + on-chain signals)
@@ -427,7 +462,7 @@ export class SignalGenerator {
       let compoundRugBlocked = 0;
 
       let onchainSignalsThisCycle = 0;
-      for (const tokenAddress of preFiltered) {
+      for (const tokenAddress of prioritizedCandidates) {
         // Stop evaluating once we hit the per-cycle signal cap
         if (onchainSignalsThisCycle >= MAX_ONCHAIN_SIGNALS_PER_CYCLE) {
           logger.debug({ cap: MAX_ONCHAIN_SIGNALS_PER_CYCLE }, 'Per-cycle on-chain signal cap reached, skipping remaining');
@@ -1045,13 +1080,35 @@ export class SignalGenerator {
 
     // Add social score as a bonus to the total (max +25 points)
     const socialBonus = Math.min(25, socialScore.score);
-    const adjustedTotal = Math.min(100, onChainScore.total + socialBonus);
+
+    // Surge detection bonus — tokens with active micro-surges get a score boost
+    // This helps surging tokens clear thresholds faster (catching the ignition, not the peak)
+    let surgeBonus = 0;
+    try {
+      const surge = await momentumAnalyzer.detectSurge(tokenAddress);
+      if (surge.detected) {
+        surgeBonus = surge.confidence === 'HIGH' ? 15 :
+                     surge.confidence === 'MEDIUM' ? 10 : 5;
+        logger.info({
+          tokenAddress: shortAddr,
+          ticker: metrics.ticker,
+          surgeType: surge.type,
+          surgeConfidence: surge.confidence,
+          surgeBonus,
+        }, 'SURGE BONUS applied to on-chain score');
+      }
+    } catch {
+      // Surge detection is best-effort — don't block evaluation
+    }
+
+    const adjustedTotal = Math.min(100, onChainScore.total + socialBonus + surgeBonus);
 
     logger.debug({
       tokenAddress: shortAddr,
       ticker: metrics.ticker,
       onChainTotal: onChainScore.total,
       socialBonus,
+      surgeBonus,
       adjustedTotal,
       recommendation: onChainScore.recommendation,
       riskLevel: onChainScore.riskLevel,

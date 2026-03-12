@@ -482,16 +482,14 @@ export class TelegramAlertBot {
       { command: 'status', description: 'Bot status & strategy info' },
       { command: 'stats', description: 'Signal performance dashboard' },
       { command: 'recent', description: 'Recent signals & outcomes' },
+      { command: 'daily', description: 'Daily performance report' },
       { command: 'tierperf', description: 'Win rate by signal tier' },
-      { command: 'funnel', description: 'Token filtering funnel stats' },
-      { command: 'sources', description: 'Discovery source health' },
       { command: 'safety', description: 'Safety check: /safety <token>' },
       { command: 'thresholds', description: 'View scoring thresholds' },
+      { command: 'optimize', description: 'Run threshold optimization' },
       { command: 'addwallet', description: 'Track wallet: /addwallet <address>' },
       { command: 'wallets', description: 'List tracked wallets' },
       { command: 'removewallet', description: 'Remove tracked wallet' },
-      { command: 'pause', description: 'Pause signal scanning' },
-      { command: 'resume', description: 'Resume signal scanning' },
       { command: 'devs', description: 'List tracked pump.fun devs' },
       { command: 'adddev', description: 'Track dev: /adddev <wallet> [alias]' },
       { command: 'removedev', description: 'Remove tracked dev' },
@@ -510,11 +508,12 @@ export class TelegramAlertBot {
       const chatId = msg.chat.id;
       await this.bot!.sendMessage(chatId,
         '*🤖 rossybot - On-Chain Signal Scanner*\n\n' +
-        'Scanning for momentum signals:\n' +
-        '• On-chain momentum analysis\n' +
+        'Scanning for early momentum signals:\n' +
+        '• DexScreener + Jupiter token discovery\n' +
+        '• Smart money wallet tracking\n' +
         '• KOL wallet tracking\n' +
-        '• Safety & scam filtering\n' +
-        '• Social signal detection\n\n' +
+        '• Micro-surge detection\n' +
+        '• Safety & scam filtering\n\n' +
         '*Quick Commands:*\n' +
         '/status - Bot status & strategy\n' +
         '/stats - Performance dashboard\n' +
@@ -544,34 +543,32 @@ export class TelegramAlertBot {
       const chatId = msg.chat.id;
       await this.bot!.sendMessage(chatId,
         '*🤖 rossybot Help*\n\n' +
-        '*Signal Performance:*\n' +
+        '*Performance:*\n' +
         '/status - Bot status & strategy\n' +
         '/stats - Performance dashboard\n' +
         '/recent - Recent signals & outcomes\n' +
+        '/daily - Daily performance report\n' +
         '/tierperf - Win rate by tier\n\n' +
-        '*Discovery & Analysis:*\n' +
-        '/funnel - Filtering funnel stats\n' +
-        '/sources - Discovery source health\n' +
+        '*Analysis:*\n' +
         '/safety <token> - Safety check\n' +
-        '/thresholds - Scoring thresholds\n' +
         '/devscore <token> - Dev wallet score\n' +
-        '/rugcheck <token> - RugCheck safety\n\n' +
+        '/rugcheck <token> - RugCheck safety\n' +
+        '/thresholds - Scoring thresholds\n' +
+        '/optimize - Run threshold optimization\n\n' +
         '*Wallet Tracking:*\n' +
-        '/addwallet <addr> - Track wallet\n' +
+        '/addwallet <addr> - Track smart wallet\n' +
         '/wallets - List tracked wallets\n' +
         '/removewallet <addr> - Remove wallet\n\n' +
-        '*System:*\n' +
-        '/pause - Pause scanning\n' +
-        '/resume - Resume scanning\n\n' +
+        '*Dev Tracking:*\n' +
+        '/devs - List tracked pump.fun devs\n' +
+        '/adddev <wallet> [alias] - Track dev\n' +
+        '/removedev <wallet> - Remove dev\n' +
+        '/devstats <wallet> - Dev performance\n\n' +
         '_Signals are auto-delivered. DYOR._',
         { parse_mode: 'Markdown' }
       );
     });
 
-    // /backtest command - REMOVED (probability-signal module deleted)
-    this.bot.onText(/\/backtest/, async (msg) => {
-      await this.bot!.sendMessage(msg.chat.id, 'Backtest module has been removed (was over-engineered bloat).', { parse_mode: 'Markdown' });
-    });
 
     // /devscore <token> command - Check dev wallet score for a token
     this.bot.onText(/\/devscore\s+(\S+)/, async (msg, match) => {
@@ -675,15 +672,6 @@ export class TelegramAlertBot {
       }
     });
 
-    // /funnel command - REMOVED (mature-token scanner deleted)
-    this.bot.onText(/\/funnel/, async (msg) => {
-      await this.bot!.sendMessage(msg.chat.id, 'Funnel command removed. Mature token scanner was deleted (micro-cap focus only).', { parse_mode: 'Markdown' });
-    });
-
-    // /funnel_debug command - REMOVED (mature-token scanner deleted)
-    this.bot.onText(/\/funnel_debug/, async (msg) => {
-      await this.bot!.sendMessage(msg.chat.id, 'Funnel debug removed. Mature token scanner was deleted.', { parse_mode: 'Markdown' });
-    });
 
     // /set_threshold command - Set individual threshold values
     this.bot.onText(/\/set_threshold\s+(\S+)\s+(\S+)/, async (msg, match) => {
@@ -861,11 +849,6 @@ export class TelegramAlertBot {
       }
     });
 
-    // /sources command - REMOVED (mature-token scanner deleted)
-    this.bot.onText(/\/sources/, async (msg) => {
-      await this.bot!.sendMessage(msg.chat.id, 'Sources command removed. Discovery now uses DexScreener + Jupiter + KOL tracker in signal-generator.', { parse_mode: 'Markdown' });
-
-    });
 
     // /tiers command - Show tier configuration
     this.bot.onText(/\/tiers/, async (msg) => {
@@ -1191,10 +1174,6 @@ export class TelegramAlertBot {
       }
     });
 
-    // /report command - REMOVED (AI query interface deleted)
-    this.bot.onText(/\/report(?:\s+(\d+))?/, async (msg) => {
-      await this.bot!.sendMessage(msg.chat.id, 'AI report command removed. Use /daily for performance summary.', { parse_mode: 'Markdown' });
-    });
 
     // /recent command - Show recent signals with current performance
     this.bot.onText(/\/recent(?:\s+(\d+))?/, async (msg, match) => {
@@ -1294,15 +1273,6 @@ export class TelegramAlertBot {
       }
     });
 
-    // /microcap command - REMOVED (mature-token scanner deleted, bot is now micro-cap focused by default)
-    this.bot.onText(/\/microcap/, async (msg) => {
-      await this.bot!.sendMessage(msg.chat.id, 'Micro-cap analysis removed. Bot is now micro-cap focused by default ($30K-$225K primary range).', { parse_mode: 'Markdown' });
-    });
-
-    // /volumespikes command - REMOVED (volume anomaly scanner deleted)
-    this.bot.onText(/\/volumespikes/, async (msg) => {
-      await this.bot!.sendMessage(msg.chat.id, 'Volume spikes command removed. Volume anomaly scanner was deleted.', { parse_mode: 'Markdown' });
-    });
 
     // /stats command - Historical performance dashboard
     this.bot.onText(/\/stats/, async (msg) => {
@@ -1368,15 +1338,6 @@ export class TelegramAlertBot {
       }
     });
 
-    // /tweaks command - REMOVED (AI query interface deleted)
-    this.bot.onText(/\/tweaks/, async (msg) => {
-      await this.bot!.sendMessage(msg.chat.id, 'AI tweaks command removed. Use /optimize for threshold optimization.', { parse_mode: 'Markdown' });
-    });
-
-    // /ask command - REMOVED (AI query interface deleted)
-    this.bot.onText(/\/ask\s+(.+)/, async (msg) => {
-      await this.bot!.sendMessage(msg.chat.id, 'AI ask command removed. Use /stats or /daily for performance data.', { parse_mode: 'Markdown' });
-    });
 
     // /optimize command - Run threshold optimization
     this.bot.onText(/\/optimize/, async (msg) => {

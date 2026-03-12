@@ -30,6 +30,7 @@ import { bondingCurveMonitor } from './pumpfun/bonding-monitor.js';
 import { momentumAnalyzer } from './momentum-analyzer.js';
 import { bundleDetector, BundleAnalysisResult } from './bundle-detector.js';
 import { onChainScoringEngine, OnChainScore } from './onchain-scoring.js';
+import { candlestickAnalyzer } from './candlestick-analyzer.js';
 
 // Performance tracking
 import { signalPerformanceTracker, thresholdOptimizer, performanceLogger } from './performance/index.js';
@@ -1104,7 +1105,36 @@ export class SignalGenerator {
       // Surge detection is best-effort — don't block evaluation
     }
 
-    const adjustedTotal = Math.min(100, onChainScore.total + socialBonus + surgeBonus);
+    // Candlestick structure analysis — reads price patterns to improve entry timing
+    // Score range: -50 (bearish) to +50 (bullish), applied as bonus/penalty (capped at ±10)
+    let candlestickBonus = 0;
+    let candlestickInfo = '';
+    try {
+      const candleAnalysis = await candlestickAnalyzer.analyze(tokenAddress, '5m');
+      if (candleAnalysis) {
+        // Scale the -50..+50 score to a -10..+10 bonus for the adjusted total
+        candlestickBonus = Math.max(-10, Math.min(10, Math.round(candleAnalysis.score / 5)));
+        const patternNames = candleAnalysis.patterns.map(p => p.name);
+        candlestickInfo = `${candleAnalysis.dominantSignal} (${candleAnalysis.trendDirection}, patterns: ${patternNames.join(',') || 'none'})`;
+
+        if (candlestickBonus !== 0) {
+          logger.info({
+            tokenAddress: shortAddr,
+            ticker: metrics.ticker,
+            candleScore: candleAnalysis.score,
+            candlestickBonus,
+            patterns: patternNames,
+            trend: candleAnalysis.trendDirection,
+            trendStrength: candleAnalysis.trendStrength,
+            dominantSignal: candleAnalysis.dominantSignal,
+          }, 'CANDLESTICK analysis applied to score');
+        }
+      }
+    } catch {
+      // Candlestick analysis is best-effort — don't block evaluation
+    }
+
+    const adjustedTotal = Math.min(100, Math.max(0, onChainScore.total + socialBonus + surgeBonus + candlestickBonus));
 
     logger.debug({
       tokenAddress: shortAddr,
@@ -1112,13 +1142,15 @@ export class SignalGenerator {
       onChainTotal: onChainScore.total,
       socialBonus,
       surgeBonus,
+      candlestickBonus,
       adjustedTotal,
+      candlestickInfo: candlestickInfo || 'N/A',
       recommendation: onChainScore.recommendation,
       riskLevel: onChainScore.riskLevel,
       momentum: onChainScore.components.momentum,
       safety: onChainScore.components.safety,
       socialBreakdown: socialScore.breakdown.length > 0 ? socialScore.breakdown.join(', ') : 'None',
-    }, 'EVAL: On-chain + social scoring complete');
+    }, 'EVAL: On-chain + social + candlestick scoring complete');
 
     // Step 2: Check if bundle/safety risk is too high
     // CRITICAL risk is ALWAYS blocked (non-negotiable)
@@ -1304,14 +1336,26 @@ export class SignalGenerator {
     // - This caused ALL tokens with scores 30-39 to be blocked despite passing numerical check
     // (isLearningMode already defined above in momentum check)
 
-    // Block both AVOID and STRONG_AVOID in all modes
-    // The numerical score threshold (40 in learning, 50 in production) provides enough relaxation
-    const shouldBlockByRecommendation =
-      onChainScore.recommendation === 'STRONG_AVOID' || onChainScore.recommendation === 'AVOID';
+    // THRESHOLD RECALIBRATION (March 2026):
+    // After scoring audit demoted momentum to 5% and removed double-penalization,
+    // the remaining weights (safety 30%, bundle 25%, market 35%, timing 5%) produce
+    // lower raw scores. With the old thresholds (40 learning, 50 production), ZERO
+    // signals were being generated because:
+    //   - Most early memecoins score 30-45 on safety (authorities often enabled)
+    //   - Bundle safety averages 50-70 (some bundling is normal)
+    //   - Market structure needs time to build holders
+    //   - Total weighted scores cluster around 35-55
+    //
+    // Fix: Only block STRONG_AVOID (which requires score < 20 or CRITICAL risk).
+    // AVOID tokens (score 20-30) can still pass if the numerical threshold is met,
+    // since the numerical check is the primary quality gate.
+    const shouldBlockByRecommendation = onChainScore.recommendation === 'STRONG_AVOID';
 
-    // In learning mode, lower the on-chain score threshold to collect diverse data
-    // Floor of 40 balances data collection vs signal noise (original 50 blocked everything, 35 flooded)
-    const effectiveMinScore = isLearningMode ? Math.max(40, MIN_ONCHAIN_SCORE - 10) : MIN_ONCHAIN_SCORE;
+    // Lowered effective minimums:
+    // - Learning mode: 35 (from 40) — let borderline tokens through for ML training
+    // - Production mode: 40 (from MIN_ONCHAIN_SCORE which was 40-50)
+    // The social bonus (+0-25) and surge bonus (+0-15) can push tokens over the line
+    const effectiveMinScore = isLearningMode ? 35 : Math.min(40, MIN_ONCHAIN_SCORE);
 
     // Use adjustedTotal (which includes social verification bonus) for threshold comparison
     // This rewards tokens with verified social presence (Twitter, Telegram, etc.)
@@ -1387,7 +1431,10 @@ export class SignalGenerator {
       // to collect more diverse training data for the ML model.
 
       // 1. Safety score required — relaxed in learning mode for data collection
-      const EARLY_QUALITY_MIN_SAFETY = isLearningMode ? 40 : 55;
+      // RECALIBRATED: 40 was still too high — most new memecoins score 25-45 on safety
+      // because mint/freeze authorities are often still enabled in the first hour.
+      // RugCheck hard gate + compound rug detection already catch actual rugs.
+      const EARLY_QUALITY_MIN_SAFETY = isLearningMode ? 30 : 45;
       if (safetyResult.safetyScore < EARLY_QUALITY_MIN_SAFETY) {
         logger.debug({
           tokenAddress: shortAddr,

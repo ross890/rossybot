@@ -18,9 +18,10 @@ interface DynamicThresholds {
 }
 
 // Default thresholds if optimizer not available
+// RECALIBRATED: Aligned with threshold-optimizer defaults
 const DEFAULT_DYNAMIC_THRESHOLDS: DynamicThresholds = {
-  minSafetyScore: 20,
-  maxBundleRiskScore: 80,
+  minSafetyScore: 15,         // Lowered from 20 — RugCheck hard gate handles real dangers
+  maxBundleRiskScore: 85,     // Raised from 80 — more permissive for micro-cap bundling
 };
 
 // ============ TYPES ============
@@ -654,8 +655,11 @@ export class OnChainScoringEngine {
     const minSafety = Math.max(25, this.dynamicThresholds.minSafetyScore - 15); // Floor at 25
     const minBundleSafety = 100 - this.dynamicThresholds.maxBundleRiskScore; // Convert risk to safety
 
+    // RECALIBRATED: Base threshold lowered from 35 to 30.
+    // After demoting momentum to 5% weight, total scores shifted down ~5-10 points.
+    // Safety and bundle gates still provide risk control.
     return (
-      score.total >= 35 &&                          // Base threshold
+      score.total >= 30 &&                          // Base threshold (was 35)
       score.recommendation !== 'STRONG_AVOID' &&    // Only block STRONG_AVOID
       score.riskLevel !== 'CRITICAL' &&
       score.components.safety >= minSafety &&       // Dynamic from optimizer

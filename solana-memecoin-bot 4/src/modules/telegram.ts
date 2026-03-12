@@ -256,6 +256,19 @@ export class TelegramAlertBot {
       logger.error({ error }, 'Failed to initialize alpha wallet manager');
     }
 
+    // Wire up smart money scanner notifications to Telegram
+    try {
+      const { discoveryEngine } = await import('./discovery/index.js');
+      discoveryEngine.setSmartMoneyNotifyCallback(async (message: string) => {
+        if (this.bot && this.chatId) {
+          await this.bot.sendMessage(this.chatId, message, { parse_mode: 'Markdown' });
+        }
+      });
+      logger.info('Smart money scanner notifications wired to Telegram');
+    } catch (error) {
+      logger.warn({ error }, 'Failed to wire smart money notifications');
+    }
+
     logger.info({ mode: this.isWebhookMode ? 'webhook' : 'polling' }, 'Telegram bot (rossybot) initialized');
   }
 

@@ -1715,6 +1715,11 @@ export async function analyzeBundles(address: string): Promise<BundleAnalysis> {
 }
 
 export async function analyzeDevWallet(address: string): Promise<DevWalletBehaviour | null> {
+  // Skip when Helius is disabled - return null (no dev wallet data)
+  if (appConfig.heliusDisabled) {
+    return null;
+  }
+
   try {
     // Use Helius to get the earliest transaction signer as the deployer
     const creationSig = await heliusClient.getTokenCreationSignature(address);

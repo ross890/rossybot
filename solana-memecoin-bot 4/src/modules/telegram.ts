@@ -499,6 +499,7 @@ export class TelegramAlertBot {
       { command: 'adddev', description: 'Track dev: /adddev <wallet> [alias]' },
       { command: 'removedev', description: 'Remove tracked dev' },
       { command: 'devstats', description: 'Dev stats: /devstats <wallet>' },
+      { command: 'trending', description: 'Trending ticker scan' },
       { command: 'help', description: 'Show all commands' },
     ];
 

@@ -762,12 +762,12 @@ export class TelegramAlertBot {
               ELSE '<30'
             END as bracket,
             COUNT(*) as total,
-            COUNT(*) FILTER (WHERE final_outcome = 'WIN') as wins,
+            COUNT(*) FILTER (WHERE final_outcome IN ('WIN', 'EXPIRED_PROFIT')) as wins,
             COUNT(*) FILTER (WHERE final_outcome = 'LOSS') as losses,
-            ROUND(AVG(CASE WHEN final_outcome = 'WIN' THEN peak_return_pct ELSE NULL END)::numeric, 1) as avg_win_return,
+            ROUND(AVG(CASE WHEN final_outcome IN ('WIN', 'EXPIRED_PROFIT') THEN peak_return_pct ELSE NULL END)::numeric, 1) as avg_win_return,
             ROUND(AVG(CASE WHEN final_outcome = 'LOSS' THEN peak_return_pct ELSE NULL END)::numeric, 1) as avg_loss_return
           FROM signal_performance
-          WHERE final_outcome IN ('WIN', 'LOSS')
+          WHERE final_outcome IN ('WIN', 'LOSS', 'EXPIRED_PROFIT')
           GROUP BY bracket
           ORDER BY bracket DESC
         `);
@@ -2489,7 +2489,7 @@ export class TelegramAlertBot {
       });
 
       const completed = inBand.filter(s => s.final_outcome !== 'PENDING');
-      const wins = completed.filter(s => s.final_outcome === 'WIN');
+      const wins = completed.filter(s => s.final_outcome === 'WIN' || s.final_outcome === 'EXPIRED_PROFIT');
       const losses = completed.filter(s => s.final_outcome === 'LOSS');
       const returns = completed.map(s => parseFloat(s.final_return || 0));
 
@@ -2515,7 +2515,7 @@ export class TelegramAlertBot {
     lossesViaSL: number;
     lossesViaTimeout: number;
   } {
-    const wins = rawData.filter(s => s.final_outcome === 'WIN');
+    const wins = rawData.filter(s => s.final_outcome === 'WIN' || s.final_outcome === 'EXPIRED_PROFIT');
     const losses = rawData.filter(s => s.final_outcome === 'LOSS');
 
     // Calculate average time to outcome (approximated from last_update - signal_time)

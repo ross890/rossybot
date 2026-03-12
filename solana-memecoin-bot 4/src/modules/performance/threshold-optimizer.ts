@@ -216,11 +216,13 @@ export class ThresholdOptimizer {
     try {
       const result = await pool.query(`
         SELECT * FROM signal_performance
-        WHERE final_outcome IN ('WIN', 'LOSS')
+        WHERE final_outcome IN ('WIN', 'LOSS', 'EXPIRED_PROFIT')
         AND signal_time > NOW() - INTERVAL '14 days'
       `);
 
-      const wins = result.rows.filter((s: any) => s.final_outcome === 'WIN');
+      const wins = result.rows.filter((s: any) =>
+        s.final_outcome === 'WIN' || s.final_outcome === 'EXPIRED_PROFIT'
+      );
       const losses = result.rows.filter((s: any) => s.final_outcome === 'LOSS');
 
       if (wins.length === 0 || losses.length === 0) {

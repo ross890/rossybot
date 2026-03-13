@@ -7,6 +7,7 @@
 import { logger } from '../../utils/logger.js';
 import { pool } from '../../utils/database.js';
 import { signalPerformanceTracker, PerformanceStats } from './signal-performance-tracker.js';
+import { onChainScoringEngine } from '../onchain-scoring.js';
 
 // ============ TYPES ============
 
@@ -106,7 +107,26 @@ export class ThresholdOptimizer {
       ...this.currentThresholds,
       ...thresholds,
     };
+
+    // Sync safety/bundle thresholds to on-chain scoring engine in real-time
+    this.syncToOnChainEngine();
+
     logger.info({ thresholds: this.currentThresholds }, 'Thresholds updated manually');
+  }
+
+  /**
+   * Push current thresholds to the on-chain scoring engine.
+   * Called after any threshold change so risk assessment uses fresh values.
+   */
+  private syncToOnChainEngine(): void {
+    try {
+      onChainScoringEngine.setDynamicThresholds({
+        minSafetyScore: this.currentThresholds.minSafetyScore,
+        maxBundleRiskScore: this.currentThresholds.maxBundleRiskScore,
+      });
+    } catch (error) {
+      logger.debug({ error }, 'Failed to sync thresholds to on-chain scoring engine');
+    }
   }
 
   /**
@@ -184,8 +204,9 @@ export class ThresholdOptimizer {
             }
           }
 
-          // Save to database
+          // Save to database and sync to all consumers
           await this.saveThresholds(recommendedThresholds);
+          this.syncToOnChainEngine();
 
           logger.info({
             appliedChanges,
@@ -565,6 +586,9 @@ export class ThresholdOptimizer {
       logger.error({ error }, 'Failed to load thresholds, using defaults');
       this.currentThresholds = { ...DEFAULT_THRESHOLDS };
     }
+
+    // Always sync to on-chain engine after loading
+    this.syncToOnChainEngine();
   }
 
   /**

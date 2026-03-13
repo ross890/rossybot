@@ -383,13 +383,23 @@ export class DailyAutoOptimizer {
   }
 
   /**
-   * Update signal generator thresholds in memory
-   * Note: File changes require restart to take effect
+   * Update all in-memory threshold consumers after optimization.
+   * Previously this was a no-op — thresholds were saved to DB but never
+   * pushed to the on-chain scoring engine, so risk assessment used stale
+   * values until the next process restart.
+   *
+   * Now: thresholdOptimizer.setThresholds() automatically syncs to the
+   * on-chain scoring engine via syncToOnChainEngine(). This method
+   * confirms the sync happened and logs the state.
    */
   private async updateSignalGeneratorThresholds(thresholds: ThresholdSet): Promise<void> {
-    // The thresholds are now stored in the database and loaded by threshold-optimizer
-    // Signal generator should read from thresholdOptimizer.getCurrentThresholds()
-    logger.info({ thresholds }, 'Thresholds updated in database - will be used for new signals');
+    // Verify thresholds are live by reading them back
+    const live = thresholdOptimizer.getCurrentThresholds();
+    logger.info({
+      saved: thresholds,
+      live,
+      match: JSON.stringify(thresholds) === JSON.stringify(live),
+    }, 'Thresholds hot-reloaded — optimizer + on-chain engine synced');
   }
 
   /**

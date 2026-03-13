@@ -120,7 +120,7 @@ const THRESHOLDS = {
   MIN_LIQUIDITY_USD: 5000,          // $5K minimum — avoid illiquid death traps
   IDEAL_TOP10_CONCENTRATION: 45,   // 45% max
   MAX_TOP10_CONCENTRATION: 80,     // 80% reject threshold
-  MIN_HOLDER_COUNT: 15,             // 15 min holders — need some distribution
+  MIN_HOLDER_COUNT: 50,             // EMERGENCY FIX 6: Raised from 15→50 — holder count strongest predictor (+0.37)
   IDEAL_HOLDER_COUNT: 100,          // 100 ideal
 
   // Timing ideals

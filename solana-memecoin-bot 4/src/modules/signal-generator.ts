@@ -1345,7 +1345,13 @@ export class SignalGenerator {
       enrichmentBonus += enrichment.liquidity.bonusPoints;
     }
 
-    const adjustedTotal = Math.min(100, Math.max(0, onChainScore.total + socialBonus + surgeBonus + candlestickBonus + enrichmentBonus));
+    // EMERGENCY FIX 4: Cap total bonus contribution at 15 points
+    // Data: 88% of signals score 70+ — bonuses stacking makes score non-differentiating
+    // A token with mediocre 45 fundamentals + social(+15) + surge(+10) + candle(+5) = 75
+    // Bonuses should be tiebreakers, not score-makers
+    const totalBonus = socialBonus + surgeBonus + candlestickBonus + enrichmentBonus;
+    const cappedBonus = Math.min(totalBonus, 15); // Hard cap: bonuses add max 15 points
+    const adjustedTotal = Math.min(100, Math.max(0, onChainScore.total + cappedBonus));
 
     logger.debug({
       tokenAddress: shortAddr,
@@ -1421,8 +1427,12 @@ export class SignalGenerator {
     //   - SKIP these tokens
     //
     const isLearningMode = appConfig.trading.learningMode;
+    // EMERGENCY FIX 2: Expand EARLY_QUALITY window from 45→60 min
+    // Data: EARLY_QUALITY 33% win rate vs PROVEN_RUNNER 20% win rate
+    // 97% of signals go through losing track — shift flow to winning track
     const PROVEN_RUNNER_MIN_AGE = 90;  // 1.5 hours
-    const EARLY_QUALITY_MAX_AGE = 45;  // 45 minutes
+    const EARLY_QUALITY_MAX_AGE = 60;  // Expanded from 45 to 60 minutes
+    const TRANSITION_ZONE_MIN_AGE = 60; // New: transition zone 60-90 min
 
     let signalTrack: SignalTrack | null = null;
     let kolReputationTier: KolReputationTier | undefined;
@@ -1448,7 +1458,7 @@ export class SignalGenerator {
       return SignalGenerator.EVAL_RESULTS.TOO_EARLY;
 
     } else if (metrics.tokenAge < EARLY_QUALITY_MAX_AGE) {
-      // TRACK 2: EARLY QUALITY (2-45 min)
+      // TRACK 2: EARLY QUALITY (2-60 min) — expanded from 45 min (EMERGENCY FIX 2)
       // Route to EARLY_QUALITY track without requiring KOL validation.
       // KOL activity adds bonus points but is not a gate.
       signalTrack = SignalTrack.EARLY_QUALITY;
@@ -1498,17 +1508,16 @@ export class SignalGenerator {
       }
 
     } else {
-      // PREVIOUSLY DEAD ZONE: 45-90 min
-      // IMPROVEMENT: Instead of skipping, route to PROVEN_RUNNER with moderate requirements
-      // These tokens have shown some survival but haven't hit the 90-min mark yet
-      // They can still generate signals if they have strong metrics
-      signalTrack = SignalTrack.PROVEN_RUNNER;
+      // EMERGENCY FIX 2: TRANSITION ZONE (60-90 min)
+      // Creates a gradient: EARLY(2-60) → TRANSITION(60-90) → PROVEN(90+)
+      // Transition zone gets its own intermediate requirements
+      signalTrack = SignalTrack.PROVEN_RUNNER; // Still tracked as PROVEN_RUNNER
       logger.debug({
         tokenAddress: shortAddr,
         ticker: metrics.ticker,
         tokenAgeMinutes: metrics.tokenAge,
         track: 'PROVEN_RUNNER',
-        note: 'Transition zone (45-90 min) - applying standard proven runner requirements',
+        note: 'Transition zone (60-90 min) - intermediate requirements (score≥60, holders≥100, growth≥0.03)',
       }, 'EVAL: Routing transition zone token to PROVEN RUNNER track');
     }
 
@@ -1568,11 +1577,12 @@ export class SignalGenerator {
     // since the numerical check is the primary quality gate.
     const shouldBlockByRecommendation = onChainScore.recommendation === 'STRONG_AVOID';
 
-    // Lowered effective minimums:
-    // - Learning mode: 35 (from 40) — let borderline tokens through for ML training
-    // - Production mode: 40 (from MIN_ONCHAIN_SCORE which was 40-50)
-    // The social bonus (-7 to +15) and surge bonus (+0-15) can push tokens over the line
-    const effectiveMinScore = isLearningMode ? 35 : Math.min(40, MIN_ONCHAIN_SCORE);
+    // EMERGENCY FIX 4: Raise minimum scores, differentiate by track
+    // Fewer signals, but higher quality. PROVEN_RUNNER needs higher bar (60)
+    // EARLY_QUALITY gets more lenient (55) since early entry is the edge
+    const effectiveMinScore = signalTrack === SignalTrack.EARLY_QUALITY
+      ? (isLearningMode ? 40 : 55)   // EARLY_QUALITY: 55 production, 40 learning
+      : (isLearningMode ? 45 : 60);  // PROVEN_RUNNER: 60 production, 45 learning
 
     // Use adjustedTotal (which includes social verification bonus) for threshold comparison
     // This rewards tokens with verified social presence (Twitter, Telegram, etc.)
@@ -1658,11 +1668,15 @@ export class SignalGenerator {
     const holderGrowthRate = momentumData?.holderGrowthRate || 0;
 
     if (signalTrack === SignalTrack.PROVEN_RUNNER) {
-      // PROVEN RUNNER: Prefer some holder growth — dead tokens don't pump
-      // But don't hard-block when holder data is unavailable (Helius/Solscan down)
-      const MIN_HOLDER_GROWTH_RATE = 0.01;
+      // EMERGENCY FIX 2: Tighten PROVEN_RUNNER requirements
+      // Data: 407 signals, 20% win rate, -22.0% avg return
+      // If a token is 90+ min old, it needs to be EXCEPTIONAL to be worth entering
+      const MIN_HOLDER_GROWTH_RATE = 0.05; // 5x stricter (was 0.01)
+      const MIN_PROVEN_SCORE = 70;         // Only high-conviction proven runners
+      const MIN_PROVEN_HOLDERS = metrics.tokenAge >= PROVEN_RUNNER_MIN_AGE ? 200 : 100; // 200 for 90+, 100 for transition zone
       const holderDataAvailable = momentumData?.holderCount != null && momentumData.holderCount > 0;
 
+      // Holder growth gate (tightened from 0.01 to 0.05)
       if (holderDataAvailable && holderGrowthRate < MIN_HOLDER_GROWTH_RATE) {
         logger.debug({
           tokenAddress: shortAddr,
@@ -1670,7 +1684,31 @@ export class SignalGenerator {
           holderGrowthRate,
           minRequired: MIN_HOLDER_GROWTH_RATE,
           track: 'PROVEN_RUNNER',
-        }, 'EVAL: BLOCKED - Holder growth too low');
+        }, 'EVAL: BLOCKED - Holder growth too low for proven runner');
+        return SignalGenerator.EVAL_RESULTS.DISCOVERY_FAILED;
+      }
+
+      // Score gate for proven runners — must be high conviction
+      if (onChainScore.total < MIN_PROVEN_SCORE) {
+        logger.debug({
+          tokenAddress: shortAddr,
+          ticker: metrics.ticker,
+          score: onChainScore.total,
+          minRequired: MIN_PROVEN_SCORE,
+          track: 'PROVEN_RUNNER',
+        }, 'EVAL: BLOCKED - Score too low for proven runner');
+        return SignalGenerator.EVAL_RESULTS.DISCOVERY_FAILED;
+      }
+
+      // Holder count gate — must have substantial holder base
+      if (metrics.holderCount < MIN_PROVEN_HOLDERS) {
+        logger.debug({
+          tokenAddress: shortAddr,
+          ticker: metrics.ticker,
+          holders: metrics.holderCount,
+          minRequired: MIN_PROVEN_HOLDERS,
+          track: 'PROVEN_RUNNER',
+        }, 'EVAL: BLOCKED - Not enough holders for proven runner');
         return SignalGenerator.EVAL_RESULTS.DISCOVERY_FAILED;
       }
 
@@ -1694,11 +1732,10 @@ export class SignalGenerator {
       // LEARNING MODE FIX: Relax these requirements significantly in learning mode
       // to collect more diverse training data for the ML model.
 
-      // 1. Safety score required — relaxed in learning mode for data collection
-      // RECALIBRATED: 40 was still too high — most new memecoins score 25-45 on safety
-      // because mint/freeze authorities are often still enabled in the first hour.
-      // RugCheck hard gate + compound rug detection already catch actual rugs.
-      const EARLY_QUALITY_MIN_SAFETY = isLearningMode ? 30 : 45;
+      // EMERGENCY FIX 2: Loosened EARLY_QUALITY requirements to increase flow
+      // Data: 12 signals, 33% win rate, +2.0% avg return — this is the winning track
+      // 1. Safety score — slightly more permissive (25 learning / 40 production)
+      const EARLY_QUALITY_MIN_SAFETY = isLearningMode ? 25 : 40;
       if (safetyResult.safetyScore < EARLY_QUALITY_MIN_SAFETY) {
         logger.debug({
           tokenAddress: shortAddr,
@@ -1711,8 +1748,8 @@ export class SignalGenerator {
         return SignalGenerator.EVAL_RESULTS.DISCOVERY_FAILED;
       }
 
-      // 2. Bundle risk required — no learning mode discount
-      const EARLY_QUALITY_MAX_BUNDLE_RISK = 45;
+      // 2. Bundle risk — aligned with overall system threshold (50, was 45)
+      const EARLY_QUALITY_MAX_BUNDLE_RISK = 50;
       if (bundleAnalysis.riskScore > EARLY_QUALITY_MAX_BUNDLE_RISK) {
         logger.debug({
           tokenAddress: shortAddr,
@@ -1759,9 +1796,39 @@ export class SignalGenerator {
       confidence: onChainScore.confidence,
     };
 
-    // Inline signal quality classification (replaced smallCapitalManager)
-    const signalStrength = onChainScore.total >= 75 ? 'STRONG' as const :
-                           onChainScore.total >= 55 ? 'MODERATE' as const : 'WEAK' as const;
+    // EMERGENCY FIX 3: Reworked signal strength — penalize surge, reward holder quality
+    // Data: STRONG 20% win rate, MODERATE 24% win rate — system was most confident on worst signals
+    // Surge at entry is ANTI-PREDICTIVE: system was labeling "buying the top" as highest conviction
+    const coreScore = onChainScore.components.safety * 0.33
+                    + onChainScore.components.bundleSafety * 0.28
+                    + onChainScore.components.marketStructure * 0.39;
+
+    let strengthScore = coreScore;
+
+    // Penalize surge-driven scores — surge at entry is anti-predictive
+    if (surgeBonus >= 15) {
+      strengthScore -= 10; // High surge = likely buying the top
+    } else if (surgeBonus >= 10) {
+      strengthScore -= 5;
+    }
+
+    // Reward holder quality over momentum
+    if (metrics.holderCount >= 150 && metrics.top10Concentration <= 50) {
+      strengthScore += 5; // Distributed holder base = organic
+    }
+
+    // Reward early entry
+    if (metrics.tokenAge <= 30) {
+      strengthScore += 5; // Early entry historically better
+    }
+
+    // EARLY_QUALITY track gets a structural boost
+    if (signalTrack === SignalTrack.EARLY_QUALITY) {
+      strengthScore += 5;
+    }
+
+    const signalStrength = strengthScore >= 75 ? 'STRONG' as const :
+                           strengthScore >= 55 ? 'MODERATE' as const : 'WEAK' as const;
     const signalQuality = {
       signalStrength,
       kolValidated: false,

@@ -261,12 +261,18 @@ function isExcludedToken(
 
 // ============ SIGNAL GENERATOR CLASS ============
 
+// PIPELINE FIX: Raised from 3 to 5 per cycle.
+// At 20s cycles, old cap of 3 = max 9/min. With relaxed thresholds,
+// more tokens will pass scoring. 5 per cycle = max 15/min, still well
+// within the 30/hour rate limit.
 // Maximum on-chain signals per scan cycle to prevent flooding
-// With 20s scan interval, 3 per cycle = max 9/min theoretical, but rate limits cap at 15/hr
-const MAX_ONCHAIN_SIGNALS_PER_CYCLE = 3;
+// With 20s scan interval, 5 per cycle allows more throughput while rate limits still cap output
+const MAX_ONCHAIN_SIGNALS_PER_CYCLE = 5;
 
-// Cooldown for recently-signaled tokens (skip re-evaluation for 30 min)
-const SIGNAL_COOLDOWN_MS = 30 * 60 * 1000;
+// PIPELINE FIX: Reduced cooldown from 30 min to 15 min.
+// 30 min was too long — tokens can change dramatically in that window.
+// 15 min prevents spam while allowing re-evaluation of evolving tokens.
+const SIGNAL_COOLDOWN_MS = 15 * 60 * 1000; // Reduced from 30 min to 15 min
 
 // Diagnostic snapshot from last scan cycle
 export interface ScanDiagnostics {
@@ -1404,12 +1410,13 @@ export class SignalGenerator {
       enrichmentBonus += enrichment.liquidity.bonusPoints;
     }
 
-    // EMERGENCY FIX 4: Cap total bonus contribution at 15 points
-    // Data: 88% of signals score 70+ — bonuses stacking makes score non-differentiating
-    // A token with mediocre 45 fundamentals + social(+15) + surge(+10) + candle(+5) = 75
-    // Bonuses should be tiebreakers, not score-makers
+    // PIPELINE FIX: Raised bonus cap from 15 to 20 points.
+    // With rebalanced weights, base scores cluster 30-50 instead of 50-70.
+    // A 15-point cap was too restrictive — legitimate early tokens with strong
+    // social presence + surge couldn't clear the threshold.
+    // 20 points allows social/surge to be meaningful without dominating.
     const totalBonus = socialBonus + surgeBonus + candlestickBonus + enrichmentBonus;
-    const cappedBonus = Math.min(totalBonus, 15); // Hard cap: bonuses add max 15 points
+    const cappedBonus = Math.min(totalBonus, 20); // Raised from 15 to 20
     const adjustedTotal = Math.min(100, Math.max(0, onChainScore.total + cappedBonus));
 
     logger.debug({
@@ -1486,12 +1493,14 @@ export class SignalGenerator {
     //   - SKIP these tokens
     //
     const isLearningMode = appConfig.trading.learningMode;
-    // EMERGENCY FIX 2: Expand EARLY_QUALITY window from 45→60 min
-    // Data: EARLY_QUALITY 33% win rate vs PROVEN_RUNNER 20% win rate
-    // 97% of signals go through losing track — shift flow to winning track
-    const PROVEN_RUNNER_MIN_AGE = 90;  // 1.5 hours
-    const EARLY_QUALITY_MAX_AGE = 60;  // Expanded from 45 to 60 minutes
-    const TRANSITION_ZONE_MIN_AGE = 60; // New: transition zone 60-90 min
+    // PIPELINE FIX: Expand EARLY_QUALITY window further to capture more winners.
+    // Data: EARLY_QUALITY 33% WR vs PROVEN_RUNNER 20% WR.
+    // 97% of signals were going through the losing track.
+    // Expand early window to 90 min, push proven runner to 120 min,
+    // so most "trending" tokens hit the better-performing track.
+    const PROVEN_RUNNER_MIN_AGE = 120;  // 2 hours (was 90 min)
+    const EARLY_QUALITY_MAX_AGE = 90;   // Expanded from 60 to 90 minutes
+    const TRANSITION_ZONE_MIN_AGE = 90; // Transition zone 90-120 min
 
     let signalTrack: SignalTrack | null = null;
     let kolReputationTier: KolReputationTier | undefined;
@@ -1636,12 +1645,13 @@ export class SignalGenerator {
     // since the numerical check is the primary quality gate.
     const shouldBlockByRecommendation = onChainScore.recommendation === 'STRONG_AVOID';
 
-    // EMERGENCY FIX 4: Raise minimum scores, differentiate by track
-    // Fewer signals, but higher quality. PROVEN_RUNNER needs higher bar (60)
-    // EARLY_QUALITY gets more lenient (55) since early entry is the edge
+    // PIPELINE FIX: Lower thresholds to increase signal flow.
+    // Data shows EARLY_QUALITY (33% WR) is the winning track but gets only 3% of signals.
+    // The safety gates (RugCheck, compound rug, scam filter) already block actual rugs.
+    // Score thresholds should filter quality, not duplicate safety filtering.
     const effectiveMinScore = signalTrack === SignalTrack.EARLY_QUALITY
-      ? (isLearningMode ? 40 : 55)   // EARLY_QUALITY: 55 production, 40 learning
-      : (isLearningMode ? 45 : 60);  // PROVEN_RUNNER: 60 production, 45 learning
+      ? (isLearningMode ? 30 : 45)   // EARLY_QUALITY: relaxed — early entry IS the edge
+      : (isLearningMode ? 35 : 50);  // PROVEN_RUNNER: relaxed from 60/45
 
     // Use adjustedTotal (which includes social verification bonus) for threshold comparison
     // This rewards tokens with verified social presence (Twitter, Telegram, etc.)
@@ -1726,15 +1736,20 @@ export class SignalGenerator {
     const holderGrowthRate = momentumData?.holderGrowthRate || 0;
 
     if (signalTrack === SignalTrack.PROVEN_RUNNER) {
-      // EMERGENCY FIX 2: Tighten PROVEN_RUNNER requirements
-      // Data: 407 signals, 20% win rate, -22.0% avg return
-      // If a token is 90+ min old, it needs to be EXCEPTIONAL to be worth entering
-      const MIN_HOLDER_GROWTH_RATE = 0.05; // 5x stricter (was 0.01)
-      const MIN_PROVEN_SCORE = 70;         // Only high-conviction proven runners
-      const MIN_PROVEN_HOLDERS = metrics.tokenAge >= PROVEN_RUNNER_MIN_AGE ? 200 : 100; // 200 for 90+, 100 for transition zone
+      // PIPELINE FIX: Relaxed PROVEN_RUNNER requirements
+      // Previous: score >= 70, holders >= 200, growth >= 0.05
+      // Problem: These requirements only let through tokens that already pumped,
+      // resulting in "buying the top" — 20% WR, -22% avg return on 97% of signals.
+      //
+      // New approach: Use the same quality thresholds as the overall score check
+      // but require positive holder growth (sign of life, not a specific rate).
+      // The on-chain score + safety gates already filter quality.
+      const MIN_HOLDER_GROWTH_RATE = 0.01; // Positive growth = still alive
+      const MIN_PROVEN_SCORE = isLearningMode ? 50 : 60; // Relaxed from 70
+      const MIN_PROVEN_HOLDERS = metrics.tokenAge >= PROVEN_RUNNER_MIN_AGE ? 100 : 75; // Relaxed from 200/100
       const holderDataAvailable = momentumData?.holderCount != null && momentumData.holderCount > 0;
 
-      // Holder growth gate (tightened from 0.01 to 0.05)
+      // Holder growth gate — just needs positive momentum
       if (holderDataAvailable && holderGrowthRate < MIN_HOLDER_GROWTH_RATE) {
         logger.debug({
           tokenAddress: shortAddr,
@@ -1746,7 +1761,7 @@ export class SignalGenerator {
         return SignalGenerator.EVAL_RESULTS.DISCOVERY_FAILED;
       }
 
-      // Score gate for proven runners — must be high conviction
+      // Score gate — relaxed to let more through; safety gates handle risk
       if (onChainScore.total < MIN_PROVEN_SCORE) {
         logger.debug({
           tokenAddress: shortAddr,
@@ -1758,7 +1773,7 @@ export class SignalGenerator {
         return SignalGenerator.EVAL_RESULTS.DISCOVERY_FAILED;
       }
 
-      // Holder count gate — must have substantial holder base
+      // Holder count gate — relaxed
       if (metrics.holderCount < MIN_PROVEN_HOLDERS) {
         logger.debug({
           tokenAddress: shortAddr,
@@ -1790,10 +1805,11 @@ export class SignalGenerator {
       // LEARNING MODE FIX: Relax these requirements significantly in learning mode
       // to collect more diverse training data for the ML model.
 
-      // EMERGENCY FIX 2: Loosened EARLY_QUALITY requirements to increase flow
+      // PIPELINE FIX: Further loosened EARLY_QUALITY requirements
       // Data: 12 signals, 33% win rate, +2.0% avg return — this is the winning track
-      // 1. Safety score — slightly more permissive (25 learning / 40 production)
-      const EARLY_QUALITY_MIN_SAFETY = isLearningMode ? 25 : 40;
+      // RugCheck hard gate + compound rug detection handle actual safety concerns.
+      // This threshold is just a quality floor, not a safety gate.
+      const EARLY_QUALITY_MIN_SAFETY = isLearningMode ? 15 : 30;
       if (safetyResult.safetyScore < EARLY_QUALITY_MIN_SAFETY) {
         logger.debug({
           tokenAddress: shortAddr,
@@ -1854,39 +1870,58 @@ export class SignalGenerator {
       confidence: onChainScore.confidence,
     };
 
-    // EMERGENCY FIX 3: Reworked signal strength — penalize surge, reward holder quality
-    // Data: STRONG 20% win rate, MODERATE 24% win rate — system was most confident on worst signals
-    // Surge at entry is ANTI-PREDICTIVE: system was labeling "buying the top" as highest conviction
-    const coreScore = onChainScore.components.safety * 0.33
-                    + onChainScore.components.bundleSafety * 0.28
-                    + onChainScore.components.marketStructure * 0.39;
+    // PIPELINE FIX: Complete rework of signal strength determination.
+    // Problem: Previous formula's "STRONG" signals had 20% WR vs "MODERATE" 24% WR.
+    // The strength label was anti-predictive because it rewarded safety/establishment
+    // characteristics that correlate with "already pumped" tokens.
+    //
+    // New approach: Strength is primarily based on bundle safety (rug prevention)
+    // and early entry timing. Low bundle risk + early = high conviction.
+    // Safety score is a baseline, not a strength differentiator.
+    let strengthScore = 0;
 
-    let strengthScore = coreScore;
+    // Bundle safety is the strongest actual predictor of not getting rugged
+    strengthScore += onChainScore.components.bundleSafety * 0.40;
 
-    // Penalize surge-driven scores — surge at entry is anti-predictive
+    // Safety baseline — prevents catastrophic losses
+    strengthScore += onChainScore.components.safety * 0.25;
+
+    // Market structure — some weight, but reduced from previous
+    strengthScore += onChainScore.components.marketStructure * 0.20;
+
+    // On-chain score total — overall quality
+    strengthScore += onChainScore.total * 0.15;
+
+    // PENALIZE surge-driven entries harder — buying the top is the #1 loss cause
     if (surgeBonus >= 15) {
-      strengthScore -= 10; // High surge = likely buying the top
+      strengthScore -= 15; // High surge = very likely buying the top
     } else if (surgeBonus >= 10) {
-      strengthScore -= 5;
+      strengthScore -= 8;
+    } else if (surgeBonus >= 5) {
+      strengthScore -= 3;
     }
 
-    // Reward holder quality over momentum
-    if (metrics.holderCount >= 150 && metrics.top10Concentration <= 50) {
-      strengthScore += 5; // Distributed holder base = organic
+    // REWARD early entry — data shows early = better
+    if (metrics.tokenAge <= 15) {
+      strengthScore += 10; // Very early entry
+    } else if (metrics.tokenAge <= 45) {
+      strengthScore += 7;  // Early entry
+    } else if (metrics.tokenAge <= 90) {
+      strengthScore += 3;  // Moderate timing
     }
 
-    // Reward early entry
-    if (metrics.tokenAge <= 30) {
-      strengthScore += 5; // Early entry historically better
-    }
-
-    // EARLY_QUALITY track gets a structural boost
+    // EARLY_QUALITY track boost
     if (signalTrack === SignalTrack.EARLY_QUALITY) {
       strengthScore += 5;
     }
 
-    const signalStrength = strengthScore >= 75 ? 'STRONG' as const :
-                           strengthScore >= 55 ? 'MODERATE' as const : 'WEAK' as const;
+    // Holder distribution quality (organic growth indicator)
+    if (metrics.holderCount >= 100 && metrics.top10Concentration <= 50) {
+      strengthScore += 5;
+    }
+
+    const signalStrength = strengthScore >= 70 ? 'STRONG' as const :
+                           strengthScore >= 50 ? 'MODERATE' as const : 'WEAK' as const;
     const signalQuality = {
       signalStrength,
       kolValidated: false,

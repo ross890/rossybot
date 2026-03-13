@@ -4019,6 +4019,34 @@ export class TelegramAlertBot {
       msg += `📈 *Momentum:* ${buySellRatio.toFixed(1)}x buy/sell · ${uniqueBuyers} buyers (5m)\n\n`;
     }
 
+    // Candlestick analysis section
+    const candlestick = signal.candlestickAnalysis;
+    if (candlestick) {
+      const csScore = candlestick.score || 0;
+      const csEmoji = csScore >= 10 ? '🟢' : csScore >= 0 ? '🟡' : csScore >= -15 ? '🟠' : '🔴';
+      const trendEmoji = candlestick.trendDirection === 'UP' ? '📈' :
+                         candlestick.trendDirection === 'DOWN' ? '📉' : '➡️';
+      const signalLabel = candlestick.dominantSignal === 'BULLISH' ? 'Bullish' :
+                          candlestick.dominantSignal === 'BEARISH' ? 'Bearish' : 'Neutral';
+
+      msg += `🕯️ *Chart:* ${csEmoji} ${signalLabel} · ${trendEmoji} ${candlestick.trendDirection}`;
+      if (candlestick.trendStrength > 0) {
+        msg += ` (${candlestick.trendStrength}%)`;
+      }
+      msg += `\n`;
+
+      // Show detected patterns if any
+      const patternNames = (candlestick.patterns || []).map((p: any) => {
+        const icon = p.type === 'BULLISH' ? '✅' : p.type === 'BEARISH' ? '❌' : '➖';
+        return `${icon} ${p.name.replace(/_/g, ' ')}`;
+      });
+      if (patternNames.length > 0) {
+        msg += `├─ ${patternNames.slice(0, 3).join(' · ')}\n`;
+      }
+
+      msg += `\n`;
+    }
+
     // Predictive enrichment section (only shows sections with data)
     msg += this.formatEnrichment(signal.enrichment);
 

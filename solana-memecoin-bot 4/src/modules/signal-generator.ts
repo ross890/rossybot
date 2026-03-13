@@ -1345,7 +1345,7 @@ export class SignalGenerator {
       enrichmentBonus += enrichment.liquidity.bonusPoints;
     }
 
-    const adjustedTotal = Math.min(100, Math.max(0, onChainScore.total + socialBonus + surgeBonus + candlestickBonus + enrichmentBonus));
+    let adjustedTotal = Math.min(100, Math.max(0, onChainScore.total + socialBonus + surgeBonus + candlestickBonus + enrichmentBonus));
 
     logger.debug({
       tokenAddress: shortAddr,
@@ -1619,10 +1619,12 @@ export class SignalGenerator {
       return SignalGenerator.EVAL_RESULTS.DISCOVERY_FAILED;
     }
 
-    // v3 HARD GATE: ATH entry for mature tokens
-    // Buying a mature memecoin at ATH is reliably the worst entry.
-    // Token age > 30 min + price within 10% of ATH → BLOCK
-    // Token age ≤ 30 min + near ATH → -10 score penalty (initial price discovery)
+    // ATH entry penalty for mature tokens.
+    // Buying a mature memecoin at ATH is historically a weak entry point.
+    // Rather than hard-blocking (which silently kills strong signals like score 74+),
+    // apply a score penalty and let the score threshold decide.
+    // Token age > 30 min + near ATH → -15 score penalty
+    // Token age ≤ 30 min → no penalty (initial price discovery)
     if (metrics.tokenAge > 30) {
       try {
         const athPairs = await dexScreenerClient.getTokenPairs(tokenAddress);
@@ -1637,6 +1639,10 @@ export class SignalGenerator {
                             (h6Change > 50);
 
           if (isNearATH) {
+            const ATH_PENALTY = 15;
+            const scoreBefore = onChainScore.total;
+            onChainScore.total = Math.max(0, onChainScore.total - ATH_PENALTY);
+            adjustedTotal = Math.max(0, adjustedTotal - ATH_PENALTY);
             logger.info({
               tokenAddress: shortAddr,
               ticker: metrics.ticker,
@@ -1644,8 +1650,9 @@ export class SignalGenerator {
               h1Change,
               h6Change,
               h24Change,
-            }, 'EVAL: BLOCKED — mature token at ATH (hard gate)');
-            return SignalGenerator.EVAL_RESULTS.DISCOVERY_FAILED;
+              scoreBefore,
+              scoreAfter: onChainScore.total,
+            }, 'EVAL: ATH penalty applied (-15 points)');
           }
         }
       } catch {

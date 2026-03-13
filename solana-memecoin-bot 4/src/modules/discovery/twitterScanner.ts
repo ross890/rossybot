@@ -82,6 +82,10 @@ export class TwitterScanner {
   // Track KOL handles for immediate evaluation
   private trackedKolHandles: Set<string> = new Set();
 
+  // Track consecutive API failures to auto-disable noisy polling
+  private consecutiveApiFailures = 0;
+  private readonly MAX_API_FAILURES = 5;
+
   // Callback for when a social discovery signal is detected
   private onSocialDiscovery?: (tokenAddress: string, velocity: SocialVelocity) => Promise<void>;
 
@@ -295,6 +299,12 @@ export class TwitterScanner {
   private async scanTwitter(): Promise<void> {
     if (!this.config.twitterEnabled || !this.config.twitterBearerToken) return;
 
+    // Auto-disable after repeated failures to stop polluting logs
+    if (this.consecutiveApiFailures >= this.MAX_API_FAILURES) {
+      // Already logged the disable message — silently skip
+      return;
+    }
+
     try {
       // Twitter API v2 recent search
       // Search for Solana contract addresses in tweets
@@ -313,9 +323,25 @@ export class TwitterScanner {
           logger.debug('Twitter API rate limited, will retry next cycle');
           return;
         }
-        logger.warn({ status: response.status }, 'Twitter API error');
+        this.consecutiveApiFailures++;
+        if (this.consecutiveApiFailures >= this.MAX_API_FAILURES) {
+          logger.warn(
+            { status: response.status, failures: this.consecutiveApiFailures },
+            'Twitter API failing repeatedly — disabling periodic scan. Social data will use DexScreener/GMGN only. Check TWITTER_BEARER_TOKEN.'
+          );
+          // Stop the periodic scan interval
+          if (this.scanInterval) {
+            clearInterval(this.scanInterval);
+            this.scanInterval = null;
+          }
+        } else {
+          logger.debug({ status: response.status, failures: this.consecutiveApiFailures }, 'Twitter API error');
+        }
         return;
       }
+
+      // Success — reset failure counter
+      this.consecutiveApiFailures = 0;
 
       const data = await response.json() as any;
       const tweets = data.data || [];
@@ -343,7 +369,19 @@ export class TwitterScanner {
 
       logger.debug({ tweetCount: tweets.length }, 'Twitter scan complete');
     } catch (error) {
-      logger.error({ error }, 'Twitter scan failed');
+      this.consecutiveApiFailures++;
+      if (this.consecutiveApiFailures >= this.MAX_API_FAILURES) {
+        logger.warn(
+          { error, failures: this.consecutiveApiFailures },
+          'Twitter scan failing repeatedly — disabling. Social data will use DexScreener/GMGN only.'
+        );
+        if (this.scanInterval) {
+          clearInterval(this.scanInterval);
+          this.scanInterval = null;
+        }
+      } else {
+        logger.debug({ error, failures: this.consecutiveApiFailures }, 'Twitter scan failed');
+      }
     }
   }
 

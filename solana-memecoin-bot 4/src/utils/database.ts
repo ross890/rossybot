@@ -1317,9 +1317,14 @@ export class Database {
   }
   
   static async getRecentSignalCount(hours: number): Promise<number> {
+    // Only count signals with score < 70 (MODERATE and below).
+    // STRONG signals (score >= 70) bypass the rate limit check in telegram.ts,
+    // but were previously still counted here — inflating the daily count and
+    // blocking MODERATE signals prematurely.
     const result = await pool.query(
       `SELECT COUNT(*) as count FROM signal_log
-       WHERE sent_at > NOW() - INTERVAL '${hours} hours'`
+       WHERE sent_at > NOW() - INTERVAL '${hours} hours'
+       AND (score IS NULL OR score < 70)`
     );
     return parseInt(result.rows[0].count);
   }

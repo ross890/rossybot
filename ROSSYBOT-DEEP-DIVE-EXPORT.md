@@ -526,21 +526,92 @@ capped at 1.5%
 
 # 12. ENTRY & EXIT STRATEGY
 
-## Entry
+## 12.1 Entry
 - **Entry Zone:** Current price ±5%
 - **ATH Detection:** Warns if near ATH, suggests pullback entry (10-20%)
+- **Slippage:** 10% default (1000 bps) for memecoins via Jupiter
+- **Execution:** Jupiter primary, Raydium fallback
 
-## Exit
+## 12.2 Position Manager Exit System (7-Tier Priority)
+
+The position manager runs every **15 seconds** and checks exits in this priority order:
+
+### EXIT 1: MCAP Multiple Exit (Overextension Protection)
+```
+IF current_mcap >= entry_mcap × 4x → FULL EXIT
+Rationale: Meme coins at 4x entry MCAP = overextended, dump risk high
+```
+
+### EXIT 2: Stop Loss (by Signal Category)
+| Category | Stop Loss | Action |
+|----------|-----------|--------|
+| ULTRA_CONVICTION (3+ KOLs) | -65% | Full exit |
+| HIGH_CONVICTION (2 KOLs) | -55% | Full exit |
+| SCORE_90_PLUS | -45% | Full exit |
+| KOL_VALIDATION | -40% | Full exit |
+| MANUAL_CONFIRM | -35% | Full exit |
+
+### EXIT 3: Time Decay Stop (Aging Losers)
+```
+After N hours without profit, tighten stop loss:
+  ULTRA:  6h + still down >-40% → tighten to -50%
+  HIGH:   4h + still down >-35% → tighten to -45%
+  SCORE:  3h + still down >-30% → tighten to -35%
+  KOL:    2h + still down >-25% → tighten to -30%
+  MANUAL: 1h + still down >-20% → tighten to -25%
+```
+
+### EXIT 4: Trailing Stop (Protect Winners)
+```
+IF peak_pnl >= +40% AND retrace >= 25% of peak → FULL EXIT
+Example: Peak +50%, now at +35% = 30% retrace → trigger
+```
+
+### EXIT 5: Momentum Fade (Early Exit on Fading Signal)
+```
+IF pnl >= +15% AND NOT already_took_tp1 AND:
+  - sell/buy ratio > 1.5x (more sells than buys)
+  OR
+  - volume acceleration < -0.3 (declining interest)
+→ PARTIAL EXIT (50%)
+```
+
+### EXIT 6: Take Profit 1 (First Target — Partial)
+| Category | TP1 Target | Sell % |
+|----------|------------|--------|
+| ULTRA_CONVICTION | +400% | 30% |
+| HIGH_CONVICTION | +300% | 35% |
+| SCORE_90_PLUS | +200% | 40% |
+| KOL_VALIDATION | +150% | 45% |
+| MANUAL_CONFIRM | +100% | 50% |
+
+### EXIT 7: Take Profit 2 (Final Exit — Only After TP1 Hit)
+| Category | TP2 Target | Sell % |
+|----------|------------|--------|
+| ULTRA_CONVICTION | +1500% | Remaining 70% |
+| HIGH_CONVICTION | +800% | Remaining 65% |
+| SCORE_90_PLUS | +500% | Remaining 60% |
+| KOL_VALIDATION | +350% | Remaining 55% |
+| MANUAL_CONFIRM | +250% | Remaining 50% |
+
+## 12.3 Signal-Level Targets (Displayed in Telegram)
+
+These are the targets shown on signals (simpler than position manager):
 - **Take Profit 1:** +50% (price × 1.5)
 - **Take Profit 2:** +150% (price × 2.5)
 - **Stop Loss:** -30% (price × 0.7)
 - **Time Limit:** 72 hours
 
-## Performance Tracking Targets (Different from Signal Targets)
+## 12.4 Performance Tracking Targets (Learning System — Different Again)
 - **WIN condition:** Max return hits +100% (2x) at any point during 48h tracking
 - **LOSS condition:** Price hits -40% stop OR ends below entry after 48h
 - **EXPIRED_PROFIT:** Timed out at 48h but final_return > 0% (profitable but didn't 2x)
 - **Tracking interval:** Every 15 minutes for 48 hours
+
+**NOTE: There are 3 different exit/target systems operating simultaneously:**
+1. Position manager (real trades, 7-tier, 15s monitoring)
+2. Signal targets (Telegram display, simpler)
+3. Performance tracker (learning system, 48h window, binary WIN/LOSS/EXPIRED_PROFIT)
 
 ---
 
@@ -761,6 +832,44 @@ Helius RPC:   5 req/sec (conservative)
 - Micro-cap focus ($30K-$225K) avoids institutional competition
 - Self-learning optimizer adapts thresholds from real data
 - Hot-reload ensures optimizer changes take effect immediately
+
+## Auto-Trader Signal Categories & Confirmation Windows
+
+| Category | Trigger | Confirmation | Auto-Buy? |
+|----------|---------|-------------|-----------|
+| ULTRA_CONVICTION | 3+ KOLs buying | 0 seconds | YES |
+| HIGH_CONVICTION | 2 KOLs buying | 0 seconds | YES |
+| SCORE_90_PLUS | 1 KOL + score ≥90 | 0 seconds | YES |
+| KOL_VALIDATION | 1 KOL | 120 seconds | Wait for manual |
+| MANUAL_CONFIRM | Discovery/other | 300 seconds | Wait for manual |
+
+**Win rate gate:** 50% win rate required for auto-buy to be enabled.
+
+## Smart Money Auto-Discovery Flywheel
+
+The bot auto-discovers profitable traders from on-chain data:
+
+```
+Sources:
+├── Early buyers (from winning token transactions)
+├── High-volume traders (≥10 SOL per trade)
+├── Raydium traders (high ROI over time)
+└── Whale tracker (>10 SOL movers)
+
+Promotion Criteria:
+  Win rate ≥ 35% (great for memecoins)
+  Min profit: 1+ SOL
+  Min trades: 3
+  Min unique tokens: 2
+
+Rejection Criteria:
+  Win rate < 15%
+  Total loss > -25 SOL
+
+Win Definition: 100% ROI (2x)
+Evaluation Cycle: Every 30 minutes
+Trade Scan Cycle: Every 5 minutes
+```
 
 ## What's Questionable / Potential Improvements
 

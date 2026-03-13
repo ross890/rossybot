@@ -7,6 +7,18 @@
 import { logger } from '../../utils/logger.js';
 import { Database, pool } from '../../utils/database.js';
 import { dexScreenerClient } from '../onchain.js';
+import {
+  calculateExitAction,
+  applyExitDecision,
+  calculateRealizedReturn,
+  classifyOutcome,
+  scoreToGrade,
+  createInitialExitState,
+  CANONICAL_EXIT_PARAMS,
+  type PartialExitState,
+  type ScoreGrade,
+  type ExitDecision,
+} from '../trading/exitStrategy.js';
 
 // ============ TYPES ============
 
@@ -142,11 +154,14 @@ export interface PerformanceStats {
 }
 
 // ============ CONSTANTS ============
+// All exit levels now come from the canonical exit strategy module.
+// These legacy constants are kept ONLY for backward-compatible outcome classification
+// of pre-alignment signals. New tracking uses calculateExitAction().
 
 const TRACKING_INTERVALS_HOURS = [1, 4, 24];
-const STOP_LOSS_PERCENT = -40;
-const TAKE_PROFIT_PERCENT = 100;
-const MAX_TRACKING_HOURS = 48;  // Stop tracking after 48 hours
+const LEGACY_STOP_LOSS_PERCENT = -40;     // Pre-alignment: -40%
+const LEGACY_TAKE_PROFIT_PERCENT = 100;   // Pre-alignment: +100%
+const MAX_TRACKING_HOURS = CANONICAL_EXIT_PARAMS.MAX_HOLD_HOURS; // 48 hours (aligned)
 
 // Milestone thresholds for notifications
 const MILESTONE_THRESHOLDS = [
@@ -202,7 +217,7 @@ export class SignalPerformanceTracker {
         WHERE final_outcome = 'LOSS'
           AND max_return >= $1
           AND tracked = false
-      `, [TAKE_PROFIT_PERCENT]);
+      `, [LEGACY_TAKE_PROFIT_PERCENT]);
 
       // Reclassify signals that expired profitable but never hit TP
       const epResult = await pool.query(`
@@ -212,7 +227,7 @@ export class SignalPerformanceTracker {
           AND final_return > 0
           AND (max_return IS NULL OR max_return < $1)
           AND tracked = false
-      `, [TAKE_PROFIT_PERCENT]);
+      `, [LEGACY_TAKE_PROFIT_PERCENT]);
 
       const reclassifiedWins = tpResult.rowCount || 0;
       const reclassifiedExpired = epResult.rowCount || 0;
@@ -343,6 +358,10 @@ export class SignalPerformanceTracker {
     try {
       const metrics = additionalMetrics || {};
 
+      // Create canonical exit state for new signals
+      const grade = scoreToGrade(onChainScore);
+      const initialExitState = createInitialExitState(entryPrice, grade);
+
       await pool.query(`
         INSERT INTO signal_performance (
           signal_id, token_address, token_ticker, signal_type,
@@ -351,8 +370,9 @@ export class SignalPerformanceTracker {
           entry_liquidity, entry_token_age, entry_holder_count,
           entry_top10_concentration, entry_buy_sell_ratio, entry_unique_buyers,
           signal_track, kol_reputation,
+          exit_state_json, data_quality,
           signal_time, tracked, final_outcome
-        ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, NOW(), true, 'PENDING')
+        ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, NOW(), true, 'PENDING')
         ON CONFLICT (signal_id) DO NOTHING
       `, [
         signalId, tokenAddress, tokenTicker, signalType,
@@ -364,8 +384,10 @@ export class SignalPerformanceTracker {
         metrics.top10Concentration || 0,
         metrics.buySellRatio || 0,
         metrics.uniqueBuyers || 0,
-        metrics.signalTrack || 'PROVEN_RUNNER',  // Default to PROVEN_RUNNER for backwards compat
-        metrics.kolReputation || null
+        metrics.signalTrack || 'PROVEN_RUNNER',
+        metrics.kolReputation || null,
+        JSON.stringify(initialExitState),
+        'canonical',  // Mark as post-alignment
       ]);
 
       logger.info({
@@ -436,7 +458,8 @@ export class SignalPerformanceTracker {
   }
 
   /**
-   * Track a single signal's performance
+   * Track a single signal's performance using the CANONICAL exit strategy.
+   * Simulates exactly what the auto-trader would execute.
    */
   private async trackSignal(signal: any): Promise<void> {
     try {
@@ -477,46 +500,15 @@ export class SignalPerformanceTracker {
         hoursElapsed
       );
 
-      // Check if outcome is determined
-      const hitStopLoss = priceChange <= STOP_LOSS_PERCENT;
-      const hitTakeProfit = priceChange >= TAKE_PROFIT_PERCENT;
-      const timeExpired = hoursElapsed >= MAX_TRACKING_HOURS;
+      // --- CANONICAL EXIT STRATEGY SIMULATION ---
+      // Determine if this is a post-alignment signal (has canonical tracking data)
+      const isPostAlignment = signal.data_quality === 'canonical' || signal.exit_state_json;
 
-      if (hitStopLoss || hitTakeProfit || timeExpired) {
-        // Determine outcome correctly:
-        // - If price ever hit take profit (check max_return from DB) → WIN
-        // - If current price hit take profit → WIN
-        // - If hit stop loss → LOSS
-        // - If timed out but was profitable (never hit TP) → EXPIRED_PROFIT
-        // - If timed out at a loss → LOSS
-        let outcome: 'WIN' | 'LOSS' | 'EXPIRED_PROFIT';
-
-        if (hitTakeProfit) {
-          outcome = 'WIN';
-        } else if (hitStopLoss) {
-          outcome = 'LOSS';
-        } else {
-          // Time expired — check if the token ever hit TP during tracking
-          const maxReturnResult = await pool.query(
-            'SELECT max_return FROM signal_performance WHERE signal_id = $1',
-            [signal.signal_id]
-          );
-          const maxReturn = parseFloat(maxReturnResult.rows[0]?.max_return) || 0;
-
-          if (maxReturn >= TAKE_PROFIT_PERCENT) {
-            // Token DID hit TP during its life but we're only now finalizing
-            outcome = 'WIN';
-          } else if (priceChange > 0) {
-            // Never hit TP but is still profitable at expiry
-            outcome = 'EXPIRED_PROFIT';
-          } else {
-            outcome = 'LOSS';
-          }
-        }
-
-        await this.finalizeSignal(signal.signal_id, outcome, priceChange);
-        // Clean up milestone tracking for finalized signal
-        this.cleanupMilestoneTracking(signal.signal_id);
+      if (isPostAlignment) {
+        await this.trackSignalCanonical(signal, currentPrice, currentMcap, hoursElapsed, priceChange);
+      } else {
+        // Legacy tracking for pre-alignment signals
+        await this.trackSignalLegacy(signal, currentPrice, priceChange, hoursElapsed);
       }
 
       // Update interval returns
@@ -524,6 +516,227 @@ export class SignalPerformanceTracker {
 
     } catch (error) {
       logger.error({ error, signalId: signal.signal_id }, 'Failed to track signal');
+    }
+  }
+
+  /**
+   * CANONICAL tracking: Uses the unified exit strategy to simulate partial exits.
+   */
+  private async trackSignalCanonical(
+    signal: any,
+    currentPrice: number,
+    currentMcap: number,
+    hoursElapsed: number,
+    priceChange: number
+  ): Promise<void> {
+    const entryPrice = parseFloat(signal.entry_price);
+    const onchainScore = parseFloat(signal.onchain_score) || 50;
+    const grade = scoreToGrade(onchainScore);
+
+    // Reconstruct exit state from DB
+    let exitState: PartialExitState;
+    try {
+      exitState = signal.exit_state_json
+        ? JSON.parse(signal.exit_state_json)
+        : createInitialExitState(entryPrice, grade);
+    } catch {
+      exitState = createInitialExitState(entryPrice, grade);
+    }
+
+    // Update peak price
+    exitState.peakPriceSinceEntry = Math.max(exitState.peakPriceSinceEntry, currentPrice);
+
+    // Ask the canonical exit strategy what to do
+    const decision = calculateExitAction(
+      entryPrice,
+      currentPrice,
+      exitState.peakPriceSinceEntry,
+      hoursElapsed,
+      grade,
+      exitState
+    );
+
+    if (decision.action !== 'NONE') {
+      // Record partial exit
+      const partialExits = signal.partial_exits_json
+        ? JSON.parse(signal.partial_exits_json)
+        : [];
+
+      partialExits.push({
+        price: currentPrice,
+        percentOfOriginal: decision.sellPercent,
+        timestamp: new Date().toISOString(),
+        reason: decision.action,
+      });
+
+      // Apply decision to state
+      const newState = applyExitDecision(exitState, decision, currentPrice);
+
+      // Check if position is fully closed
+      if (newState.currentPositionPercent <= 0) {
+        // Calculate realized return from all partial exits
+        const realizedReturn = calculateRealizedReturn(
+          entryPrice,
+          partialExits.map((e: any) => ({
+            exitPrice: e.price,
+            percentOfOriginal: e.percentOfOriginal,
+          }))
+        );
+
+        const outcomeCategory = classifyOutcome(realizedReturn);
+        const outcome = realizedReturn > 0 ? 'WIN' : 'LOSS';
+
+        await this.finalizeSignalCanonical(
+          signal.signal_id,
+          outcome,
+          realizedReturn * 100, // Convert to percentage
+          partialExits,
+          exitState.peakPriceSinceEntry,
+          decision.action,
+          outcomeCategory
+        );
+        this.cleanupMilestoneTracking(signal.signal_id);
+      } else {
+        // Position still open — save updated state
+        await this.updateExitState(
+          signal.signal_id,
+          newState,
+          partialExits,
+          exitState.peakPriceSinceEntry
+        );
+      }
+    } else {
+      // No action — just update peak price and trailing stop
+      await this.updateExitState(
+        signal.signal_id,
+        exitState,
+        signal.partial_exits_json ? JSON.parse(signal.partial_exits_json) : [],
+        exitState.peakPriceSinceEntry
+      );
+    }
+  }
+
+  /**
+   * LEGACY tracking for pre-alignment signals (unchanged behavior).
+   */
+  private async trackSignalLegacy(
+    signal: any,
+    currentPrice: number,
+    priceChange: number,
+    hoursElapsed: number
+  ): Promise<void> {
+    const hitStopLoss = priceChange <= LEGACY_STOP_LOSS_PERCENT;
+    const hitTakeProfit = priceChange >= LEGACY_TAKE_PROFIT_PERCENT;
+    const timeExpired = hoursElapsed >= MAX_TRACKING_HOURS;
+
+    if (hitStopLoss || hitTakeProfit || timeExpired) {
+      let outcome: 'WIN' | 'LOSS' | 'EXPIRED_PROFIT';
+
+      if (hitTakeProfit) {
+        outcome = 'WIN';
+      } else if (hitStopLoss) {
+        outcome = 'LOSS';
+      } else {
+        const maxReturnResult = await pool.query(
+          'SELECT max_return FROM signal_performance WHERE signal_id = $1',
+          [signal.signal_id]
+        );
+        const maxReturn = parseFloat(maxReturnResult.rows[0]?.max_return) || 0;
+
+        if (maxReturn >= LEGACY_TAKE_PROFIT_PERCENT) {
+          outcome = 'WIN';
+        } else if (priceChange > 0) {
+          outcome = 'EXPIRED_PROFIT';
+        } else {
+          outcome = 'LOSS';
+        }
+      }
+
+      await this.finalizeSignal(signal.signal_id, outcome, priceChange);
+      this.cleanupMilestoneTracking(signal.signal_id);
+    }
+  }
+
+  /**
+   * Finalize a signal using canonical exit strategy data.
+   */
+  private async finalizeSignalCanonical(
+    signalId: string,
+    outcome: 'WIN' | 'LOSS',
+    realizedReturnPercent: number,
+    partialExits: any[],
+    peakPrice: number,
+    exitReason: string,
+    outcomeCategory: string
+  ): Promise<void> {
+    try {
+      await pool.query(`
+        UPDATE signal_performance
+        SET
+          final_outcome = $1,
+          final_return = $2,
+          realized_return = $2,
+          partial_exits_json = $3,
+          peak_price = $4,
+          exit_reason = $5,
+          outcome_category = $6,
+          hit_stop_loss = $7,
+          hit_take_profit = $8,
+          tracked = false,
+          data_quality = 'canonical',
+          last_update = NOW()
+        WHERE signal_id = $9
+      `, [
+        outcome,
+        realizedReturnPercent,
+        JSON.stringify(partialExits),
+        peakPrice,
+        exitReason,
+        outcomeCategory,
+        exitReason === 'STOP_LOSS' || exitReason === 'BREAKEVEN_STOP',
+        exitReason === 'TAKE_PROFIT_1' || exitReason === 'TAKE_PROFIT_2' || exitReason === 'TRAILING_STOP',
+        signalId,
+      ]);
+
+      logger.info({
+        signalId,
+        outcome,
+        outcomeCategory,
+        realizedReturn: `${realizedReturnPercent.toFixed(1)}%`,
+        exitReason,
+        partialExitCount: partialExits.length,
+      }, 'Signal outcome finalized (canonical)');
+    } catch (error) {
+      logger.error({ error, signalId }, 'Failed to finalize signal (canonical)');
+    }
+  }
+
+  /**
+   * Update the exit state for an in-progress canonical signal.
+   */
+  private async updateExitState(
+    signalId: string,
+    state: PartialExitState,
+    partialExits: any[],
+    peakPrice: number
+  ): Promise<void> {
+    try {
+      await pool.query(`
+        UPDATE signal_performance
+        SET
+          exit_state_json = $1,
+          partial_exits_json = $2,
+          peak_price = $3,
+          last_update = NOW()
+        WHERE signal_id = $4
+      `, [
+        JSON.stringify(state),
+        JSON.stringify(partialExits),
+        peakPrice,
+        signalId,
+      ]);
+    } catch (error) {
+      logger.error({ error, signalId }, 'Failed to update exit state');
     }
   }
 
@@ -548,8 +761,8 @@ export class SignalPerformanceTracker {
       `, [
         signalId, tokenAddress, price, priceChange, mcap,
         hoursAfterSignal,
-        priceChange <= STOP_LOSS_PERCENT,
-        priceChange >= TAKE_PROFIT_PERCENT
+        priceChange <= LEGACY_STOP_LOSS_PERCENT,
+        priceChange >= LEGACY_TAKE_PROFIT_PERCENT
       ]);
     } catch (error) {
       // Ignore duplicate snapshot errors
@@ -629,8 +842,8 @@ export class SignalPerformanceTracker {
       `, [
         outcome,
         finalReturn,
-        finalReturn <= STOP_LOSS_PERCENT,
-        finalReturn >= TAKE_PROFIT_PERCENT,
+        finalReturn <= LEGACY_STOP_LOSS_PERCENT,
+        finalReturn >= LEGACY_TAKE_PROFIT_PERCENT,
         signalId
       ]);
 
@@ -1073,6 +1286,28 @@ export class SignalPerformanceTracker {
           END IF;
           IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name = 'signal_performance' AND column_name = 'kol_reputation') THEN
             ALTER TABLE signal_performance ADD COLUMN kol_reputation VARCHAR(50);
+          END IF;
+          -- CANONICAL EXIT ALIGNMENT: New columns for v3 exit tracking
+          IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name = 'signal_performance' AND column_name = 'realized_return') THEN
+            ALTER TABLE signal_performance ADD COLUMN realized_return DECIMAL(10, 2);
+          END IF;
+          IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name = 'signal_performance' AND column_name = 'partial_exits_json') THEN
+            ALTER TABLE signal_performance ADD COLUMN partial_exits_json TEXT;
+          END IF;
+          IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name = 'signal_performance' AND column_name = 'exit_state_json') THEN
+            ALTER TABLE signal_performance ADD COLUMN exit_state_json TEXT;
+          END IF;
+          IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name = 'signal_performance' AND column_name = 'peak_price') THEN
+            ALTER TABLE signal_performance ADD COLUMN peak_price DECIMAL(30, 18);
+          END IF;
+          IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name = 'signal_performance' AND column_name = 'exit_reason') THEN
+            ALTER TABLE signal_performance ADD COLUMN exit_reason VARCHAR(50);
+          END IF;
+          IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name = 'signal_performance' AND column_name = 'outcome_category') THEN
+            ALTER TABLE signal_performance ADD COLUMN outcome_category VARCHAR(50);
+          END IF;
+          IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name = 'signal_performance' AND column_name = 'data_quality') THEN
+            ALTER TABLE signal_performance ADD COLUMN data_quality VARCHAR(20) DEFAULT 'legacy';
           END IF;
         END $$;
       `);

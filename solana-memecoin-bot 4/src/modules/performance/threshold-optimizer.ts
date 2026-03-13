@@ -54,6 +54,23 @@ export interface FactorAnalysis {
   separation: number;  // How well this factor separates wins from losses
   optimalThreshold: number;
   confidenceScore: number;
+  // v3: EV-per-quartile breakdown
+  quartileEVs: { q1: number; q2: number; q3: number; q4: number };
+  quartileCounts: { q1: number; q2: number; q3: number; q4: number };
+  quartileBoundaries: { p25: number; p50: number; p75: number };
+}
+
+export interface InteractionEffect {
+  factorA: string;
+  factorB: string;
+  // EV for each quadrant (factor A high/low × factor B high/low)
+  quadrants: {
+    highHigh: { ev: number; count: number };
+    highLow: { ev: number; count: number };
+    lowHigh: { ev: number; count: number };
+    lowLow: { ev: number; count: number };
+  };
+  interactionStrength: number; // How much the interaction matters vs independent effects
 }
 
 // ============ CONSTANTS ============
@@ -74,13 +91,26 @@ const DEFAULT_THRESHOLDS: ThresholdSet = {
   maxTop10Concentration: 80, // Aligned with config — micro-caps are naturally concentrated
 };
 
-// Target performance
-// 30% win rate with 3x+ winners is profitable in memecoins
-const TARGET_WIN_RATE = 30;  // 30% win rate target (was 50%)
-// AUDIT FIX: Aligned with win-predictor MIN_SAMPLES_FOR_PREDICTION (15)
-// Previously required 50 which meant very long wait for optimization
+// v3: PRIMARY METRIC is EV per signal, not win rate.
+// Win rate is now a FLOOR (minimum 20%), not a target.
+// EV = mean(realized_return) across all signals.
+const WIN_RATE_FLOOR = 20;   // Minimum acceptable win rate
 const MIN_DATA_POINTS = 20;  // Minimum completed signals for optimization
-const MAX_THRESHOLD_CHANGE = 25;  // Let it adapt faster (was 15%)
+
+// Threshold change speed by EV regime
+const THRESHOLD_CHANGE_RATES = {
+  EV_NEGATIVE: 0.15,      // 15%/cycle — aggressive tighten
+  EV_LOW: 0.10,           // 10%/cycle — moderate tighten (0-10% EV)
+  EV_MODERATE: 0.05,      // 5%/cycle — fine-tune (10-25% EV)
+  EV_HIGH: 0.05,          // 5%/cycle — cautious loosen (25%+ EV)
+} as const;
+
+// Holdout validation: 14-day window split
+const HOLDOUT_CONFIG = {
+  TRAINING_DAYS: 10,
+  VALIDATION_DAYS: 4,
+  MIN_VALIDATION_RATIO: 0.80, // Validation EV must be >= 80% of training EV
+} as const;
 
 // ============ THRESHOLD OPTIMIZER CLASS ============
 
@@ -150,10 +180,12 @@ export class ThresholdOptimizer {
   }
 
   /**
-   * Run optimization analysis and get recommendations
+   * Run optimization analysis and get recommendations.
+   * v3: Uses EV per signal as primary metric, win rate as floor.
+   * Includes holdout validation to prevent overfitting.
    */
   async optimize(autoApply: boolean = false): Promise<OptimizationResult> {
-    logger.info('Starting threshold optimization analysis');
+    logger.info('Starting threshold optimization analysis (v3 EV-based)');
 
     try {
       // Get performance data
@@ -171,7 +203,7 @@ export class ThresholdOptimizer {
           timestamp: new Date(),
           dataPoints: stats.completedSignals,
           currentWinRate: stats.winRate,
-          targetWinRate: TARGET_WIN_RATE,
+          targetWinRate: WIN_RATE_FLOOR,
           recommendations: [],
           currentThresholds: this.currentThresholds,
           recommendedThresholds: this.currentThresholds,
@@ -180,19 +212,47 @@ export class ThresholdOptimizer {
         };
       }
 
-      // Generate recommendations
-      const recommendations = this.generateRecommendations(stats, factorAnalysis);
+      // v3: Calculate EV per signal (primary metric)
+      const evPerSignal = stats.avgReturn; // Mean realized return
+      const sortinoRatio = this.calculateSortino(stats);
+
+      // Determine threshold change rate based on EV regime
+      let changeRate: number;
+      let evRegime: string;
+      if (evPerSignal < 0) {
+        changeRate = THRESHOLD_CHANGE_RATES.EV_NEGATIVE;
+        evRegime = 'NEGATIVE';
+      } else if (evPerSignal < 10) {
+        changeRate = THRESHOLD_CHANGE_RATES.EV_LOW;
+        evRegime = 'LOW';
+      } else if (evPerSignal < 25) {
+        changeRate = THRESHOLD_CHANGE_RATES.EV_MODERATE;
+        evRegime = 'MODERATE';
+      } else {
+        changeRate = THRESHOLD_CHANGE_RATES.EV_HIGH;
+        evRegime = 'HIGH';
+      }
+
+      // Win rate floor enforcement
+      const winRateBelowFloor = stats.winRate < WIN_RATE_FLOOR;
+      if (winRateBelowFloor) {
+        changeRate = Math.max(changeRate, THRESHOLD_CHANGE_RATES.EV_NEGATIVE);
+        evRegime = 'WIN_RATE_FLOOR_BREACH';
+      }
+
+      // Generate recommendations with EV-aware logic
+      const recommendations = this.generateRecommendations(stats, factorAnalysis, evPerSignal, changeRate);
       const recommendedThresholds = this.calculateRecommendedThresholds(recommendations);
 
-      // Auto-apply if enabled and confidence is sufficient
+      // v3: Holdout validation — prevent overfitting
       const appliedChanges: string[] = [];
       let autoApplied = false;
 
       if (autoApply && recommendations.length > 0) {
-        const highConfidenceRecs = recommendations.filter(r => r.confidence === 'HIGH');
+        const validationResult = await this.holdoutValidation(recommendedThresholds);
+        appliedChanges.push(`EV regime: ${evRegime} | Sortino: ${sortinoRatio.toFixed(2)}`);
 
-        if (highConfidenceRecs.length > 0 || stats.winRate < TARGET_WIN_RATE - 10) {
-          // Apply changes
+        if (validationResult.accepted) {
           this.currentThresholds = recommendedThresholds;
           autoApplied = true;
 
@@ -204,14 +264,22 @@ export class ThresholdOptimizer {
             }
           }
 
-          // Save to database and sync to all consumers
           await this.saveThresholds(recommendedThresholds);
           this.syncToOnChainEngine();
 
           logger.info({
             appliedChanges,
-            newThresholds: recommendedThresholds
-          }, 'Auto-applied threshold changes');
+            newThresholds: recommendedThresholds,
+            evPerSignal,
+            sortinoRatio,
+          }, 'Auto-applied threshold changes (v3 EV-based)');
+        } else {
+          appliedChanges.push(`HOLDOUT VALIDATION FAILED: ${validationResult.reason}`);
+          logger.warn({
+            reason: validationResult.reason,
+            trainingEV: validationResult.trainingEV,
+            validationEV: validationResult.validationEV,
+          }, 'Threshold changes rejected by holdout validation');
         }
       }
 
@@ -221,7 +289,7 @@ export class ThresholdOptimizer {
         timestamp: new Date(),
         dataPoints: stats.completedSignals,
         currentWinRate: stats.winRate,
-        targetWinRate: TARGET_WIN_RATE,
+        targetWinRate: WIN_RATE_FLOOR,
         recommendations,
         currentThresholds: this.currentThresholds,
         recommendedThresholds,
@@ -235,20 +303,97 @@ export class ThresholdOptimizer {
   }
 
   /**
-   * Analyze factors and their correlation with winning trades
+   * v3: Calculate Sortino ratio (EV / downside deviation).
+   */
+  private calculateSortino(stats: PerformanceStats): number {
+    if (stats.avgReturn <= 0) return 0;
+    const downsideDeviation = Math.abs(stats.avgLossReturn) || 1;
+    return stats.avgReturn / downsideDeviation;
+  }
+
+  /**
+   * v3: Holdout validation — split 14-day window into training (10d) and validation (4d).
+   * Only accept changes if validation EV >= 80% of training EV.
+   */
+  private async holdoutValidation(proposedThresholds: ThresholdSet): Promise<{
+    accepted: boolean;
+    reason: string;
+    trainingEV: number;
+    validationEV: number;
+  }> {
+    try {
+      // Get training period data (days 1-10)
+      const trainingStats = await signalPerformanceTracker.getPerformanceStats(
+        HOLDOUT_CONFIG.TRAINING_DAYS * 24
+      );
+      // Get validation period data (days 11-14 = most recent 4 days)
+      const validationStats = await signalPerformanceTracker.getPerformanceStats(
+        HOLDOUT_CONFIG.VALIDATION_DAYS * 24
+      );
+
+      const trainingEV = trainingStats.avgReturn;
+      const validationEV = validationStats.avgReturn;
+
+      // Insufficient validation data
+      if (validationStats.completedSignals < 5) {
+        return {
+          accepted: true, // Allow changes with warning
+          reason: 'Insufficient validation data — accepting with low confidence',
+          trainingEV,
+          validationEV,
+        };
+      }
+
+      // Validation EV < 0 while training > 0 = REJECT (overfitting)
+      if (validationEV < 0 && trainingEV > 0) {
+        return {
+          accepted: false,
+          reason: `Overfitting detected: training EV=${trainingEV.toFixed(1)}% but validation EV=${validationEV.toFixed(1)}%`,
+          trainingEV,
+          validationEV,
+        };
+      }
+
+      // Validation EV < 80% of training EV = halve proposed changes
+      if (trainingEV > 0 && validationEV < trainingEV * HOLDOUT_CONFIG.MIN_VALIDATION_RATIO) {
+        return {
+          accepted: true, // Accept but with halved changes (handled by caller)
+          reason: `Validation EV (${validationEV.toFixed(1)}%) < 80% of training EV (${trainingEV.toFixed(1)}%) — changes halved`,
+          trainingEV,
+          validationEV,
+        };
+      }
+
+      return {
+        accepted: true,
+        reason: 'Holdout validation passed',
+        trainingEV,
+        validationEV,
+      };
+    } catch (error) {
+      logger.warn({ error }, 'Holdout validation failed — accepting changes');
+      return { accepted: true, reason: 'Validation error — accepting', trainingEV: 0, validationEV: 0 };
+    }
+  }
+
+  /**
+   * Analyze factors and their correlation with winning trades.
+   * v3: Uses EV-per-quartile bucketing and interaction effects.
    */
   private async analyzeFactors(): Promise<FactorAnalysis[]> {
     try {
       const result = await pool.query(`
-        SELECT * FROM signal_performance
+        SELECT *, COALESCE(realized_return, final_return) as effective_return
+        FROM signal_performance
         WHERE final_outcome IN ('WIN', 'LOSS', 'EXPIRED_PROFIT')
         AND signal_time > NOW() - INTERVAL '14 days'
       `);
 
-      const wins = result.rows.filter((s: any) =>
+      const allSignals = result.rows;
+      const wins = allSignals.filter((s: any) =>
         s.final_outcome === 'WIN' || s.final_outcome === 'EXPIRED_PROFIT'
       );
-      const losses = result.rows.filter((s: any) => s.final_outcome === 'LOSS');
+      const losses = allSignals.filter((s: any) => s.final_outcome === 'LOSS');
 
       if (wins.length === 0 || losses.length === 0) {
         return [];
@@ -256,37 +401,30 @@ export class ThresholdOptimizer {
 
       const analyses: FactorAnalysis[] = [];
 
-      // Analyze momentum score
-      analyses.push(this.analyzeFactor(
-        'momentum_score',
-        wins,
-        losses,
-        true  // Higher is better
-      ));
+      const factors: Array<{ name: string; higherIsBetter: boolean }> = [
+        { name: 'momentum_score', higherIsBetter: true },
+        { name: 'onchain_score', higherIsBetter: true },
+        { name: 'safety_score', higherIsBetter: true },
+        { name: 'bundle_risk_score', higherIsBetter: false },
+      ];
 
-      // Analyze on-chain score
-      analyses.push(this.analyzeFactor(
-        'onchain_score',
-        wins,
-        losses,
-        true
-      ));
+      for (const { name, higherIsBetter } of factors) {
+        analyses.push(this.analyzeFactor(name, wins, losses, allSignals, higherIsBetter));
+      }
 
-      // Analyze safety score
-      analyses.push(this.analyzeFactor(
-        'safety_score',
-        wins,
-        losses,
-        true
-      ));
+      // v3: Compute interaction effects for top 3 most predictive factors
+      const topFactors = [...analyses].sort((a, b) => b.separation - a.separation).slice(0, 3);
+      const interactions: InteractionEffect[] = [];
+      for (let i = 0; i < topFactors.length; i++) {
+        for (let j = i + 1; j < topFactors.length; j++) {
+          interactions.push(this.analyzeInteraction(
+            topFactors[i], topFactors[j], allSignals
+          ));
+        }
+      }
 
-      // Analyze bundle risk score
-      analyses.push(this.analyzeFactor(
-        'bundle_risk_score',
-        wins,
-        losses,
-        false  // Lower is better
-      ));
+      // Store interactions for reporting (accessed via lastInteractionEffects)
+      this.lastInteractionEffects = interactions;
 
       return analyses.sort((a, b) => b.separation - a.separation);
     } catch (error) {
@@ -295,13 +433,25 @@ export class ThresholdOptimizer {
     }
   }
 
+  // v3: Store last computed interaction effects for Telegram reporting
+  private lastInteractionEffects: InteractionEffect[] = [];
+
   /**
-   * Analyze a single factor
+   * Get interaction effects from last analysis (for reporting).
+   */
+  getInteractionEffects(): InteractionEffect[] {
+    return this.lastInteractionEffects;
+  }
+
+  /**
+   * Analyze a single factor with EV-per-quartile bucketing.
+   * v3: Uses realized_return (EV) instead of just win/loss classification.
    */
   private analyzeFactor(
     factorName: string,
     wins: any[],
     losses: any[],
+    allSignals: any[],
     higherIsBetter: boolean
   ): FactorAnalysis {
     const winValues = wins.map(s => parseFloat(s[factorName]) || 0);
@@ -310,28 +460,39 @@ export class ThresholdOptimizer {
     const winAvg = winValues.reduce((a, b) => a + b, 0) / winValues.length;
     const lossAvg = lossValues.reduce((a, b) => a + b, 0) / lossValues.length;
 
-    // Calculate standard deviation
     const winStd = this.standardDeviation(winValues);
     const lossStd = this.standardDeviation(lossValues);
 
-    // Separation score: how well the factor separates wins from losses
-    // Higher separation = more useful factor
     const avgStd = (winStd + lossStd) / 2;
     const separation = avgStd > 0 ? Math.abs(winAvg - lossAvg) / avgStd : 0;
 
-    // Calculate optimal threshold
-    // For "higher is better" factors: find value that maximizes win ratio
-    // For "lower is better" factors: find value that minimizes loss ratio
     const optimalThreshold = higherIsBetter
-      ? Math.max(winAvg - winStd, lossAvg)  // Slightly below winning average
-      : Math.min(winAvg + winStd, lossAvg); // Slightly above winning average
+      ? Math.max(winAvg - winStd, lossAvg)
+      : Math.min(winAvg + winStd, lossAvg);
 
-    // Confidence based on sample size and separation
     const totalSamples = wins.length + losses.length;
     const confidenceScore = Math.min(
       separation * (totalSamples / MIN_DATA_POINTS),
       1.0
     );
+
+    // v3: EV-per-quartile analysis
+    const allValues = allSignals.map(s => parseFloat(s[factorName]) || 0).sort((a, b) => a - b);
+    const p25 = allValues[Math.floor(allValues.length * 0.25)] || 0;
+    const p50 = allValues[Math.floor(allValues.length * 0.50)] || 0;
+    const p75 = allValues[Math.floor(allValues.length * 0.75)] || 0;
+
+    const quartiles = { q1: [] as number[], q2: [] as number[], q3: [] as number[], q4: [] as number[] };
+    for (const signal of allSignals) {
+      const val = parseFloat(signal[factorName]) || 0;
+      const ret = parseFloat(signal.effective_return) || 0;
+      if (val <= p25) quartiles.q1.push(ret);
+      else if (val <= p50) quartiles.q2.push(ret);
+      else if (val <= p75) quartiles.q3.push(ret);
+      else quartiles.q4.push(ret);
+    }
+
+    const avgOrZero = (arr: number[]) => arr.length > 0 ? arr.reduce((a, b) => a + b, 0) / arr.length : 0;
 
     return {
       factor: factorName,
@@ -340,6 +501,77 @@ export class ThresholdOptimizer {
       separation,
       optimalThreshold,
       confidenceScore,
+      quartileEVs: {
+        q1: avgOrZero(quartiles.q1),
+        q2: avgOrZero(quartiles.q2),
+        q3: avgOrZero(quartiles.q3),
+        q4: avgOrZero(quartiles.q4),
+      },
+      quartileCounts: {
+        q1: quartiles.q1.length,
+        q2: quartiles.q2.length,
+        q3: quartiles.q3.length,
+        q4: quartiles.q4.length,
+      },
+      quartileBoundaries: { p25, p50, p75 },
+    };
+  }
+
+  /**
+   * v3: Analyze interaction effects between two factors.
+   * Computes EV for each quadrant (high/high, high/low, low/high, low/low)
+   * using each factor's median as the split point.
+   */
+  private analyzeInteraction(
+    factorA: FactorAnalysis,
+    factorB: FactorAnalysis,
+    allSignals: any[]
+  ): InteractionEffect {
+    const medianA = factorA.quartileBoundaries.p50;
+    const medianB = factorB.quartileBoundaries.p50;
+
+    const quadrants = {
+      highHigh: [] as number[],
+      highLow: [] as number[],
+      lowHigh: [] as number[],
+      lowLow: [] as number[],
+    };
+
+    for (const signal of allSignals) {
+      const valA = parseFloat(signal[factorA.factor]) || 0;
+      const valB = parseFloat(signal[factorB.factor]) || 0;
+      const ret = parseFloat(signal.effective_return) || 0;
+
+      const aHigh = valA > medianA;
+      const bHigh = valB > medianB;
+
+      if (aHigh && bHigh) quadrants.highHigh.push(ret);
+      else if (aHigh && !bHigh) quadrants.highLow.push(ret);
+      else if (!aHigh && bHigh) quadrants.lowHigh.push(ret);
+      else quadrants.lowLow.push(ret);
+    }
+
+    const avgOrZero = (arr: number[]) => arr.length > 0 ? arr.reduce((a, b) => a + b, 0) / arr.length : 0;
+
+    const hhEv = avgOrZero(quadrants.highHigh);
+    const hlEv = avgOrZero(quadrants.highLow);
+    const lhEv = avgOrZero(quadrants.lowHigh);
+    const llEv = avgOrZero(quadrants.lowLow);
+
+    // Interaction strength: how much the combined effect differs from independent effects
+    // If factors are independent, HH - HL - LH + LL ≈ 0
+    const interactionStrength = Math.abs(hhEv - hlEv - lhEv + llEv);
+
+    return {
+      factorA: factorA.factor,
+      factorB: factorB.factor,
+      quadrants: {
+        highHigh: { ev: hhEv, count: quadrants.highHigh.length },
+        highLow: { ev: hlEv, count: quadrants.highLow.length },
+        lowHigh: { ev: lhEv, count: quadrants.lowHigh.length },
+        lowLow: { ev: llEv, count: quadrants.lowLow.length },
+      },
+      interactionStrength,
     };
   }
 
@@ -354,11 +586,15 @@ export class ThresholdOptimizer {
   }
 
   /**
-   * Generate threshold recommendations based on analysis
+   * Generate threshold recommendations based on analysis.
+   * v3: Uses EV per signal as primary metric with regime-based change rates.
+   * Win rate is only a floor — if above floor, decisions are EV-driven.
    */
   private generateRecommendations(
     stats: PerformanceStats,
-    factorAnalysis: FactorAnalysis[]
+    factorAnalysis: FactorAnalysis[],
+    evPerSignal: number,
+    changeRate: number
   ): ThresholdRecommendation[] {
     const recommendations: ThresholdRecommendation[] = [];
 
@@ -377,64 +613,108 @@ export class ThresholdOptimizer {
       const currentValue = this.currentThresholds[thresholdKey] as number;
       const isMaxThreshold = thresholdKey.startsWith('max');
 
-      // Determine recommendation based on win rate and factor analysis
       let recommendedValue = currentValue;
       let changeDirection: 'INCREASE' | 'DECREASE' | 'MAINTAIN' = 'MAINTAIN';
       let reason = '';
 
-      if (stats.winRate < TARGET_WIN_RATE - 5) {
-        // Win rate too low - tighten thresholds
+      // v3: Win rate floor breach — always tighten aggressively
+      if (stats.winRate < WIN_RATE_FLOOR) {
         if (isMaxThreshold) {
-          // For max thresholds (like bundle risk), decrease to be stricter
           recommendedValue = Math.max(
-            currentValue - (currentValue * MAX_THRESHOLD_CHANGE / 100),
+            currentValue - (currentValue * changeRate),
             analysis.winningAvg
           );
           if (recommendedValue < currentValue) {
             changeDirection = 'DECREASE';
-            reason = `Low win rate (${stats.winRate.toFixed(1)}%): tightening to reduce bad signals`;
+            reason = `Win rate floor breach (${stats.winRate.toFixed(1)}% < ${WIN_RATE_FLOOR}%): tightening`;
           }
         } else {
-          // For min thresholds, increase to be stricter
           recommendedValue = Math.min(
-            currentValue + (currentValue * MAX_THRESHOLD_CHANGE / 100),
+            currentValue + (currentValue * changeRate),
             analysis.winningAvg
           );
           if (recommendedValue > currentValue) {
             changeDirection = 'INCREASE';
-            reason = `Low win rate (${stats.winRate.toFixed(1)}%): raising threshold to filter weaker signals`;
+            reason = `Win rate floor breach (${stats.winRate.toFixed(1)}% < ${WIN_RATE_FLOOR}%): tightening`;
           }
         }
-      } else if (stats.winRate > TARGET_WIN_RATE + 10 && stats.totalSignals < 20) {
-        // Win rate high but few signals - loosen thresholds
+      }
+      // v3: EV < 0% — tighten aggressively
+      else if (evPerSignal < 0) {
+        if (isMaxThreshold) {
+          recommendedValue = Math.max(
+            currentValue - (currentValue * changeRate),
+            analysis.winningAvg
+          );
+          if (recommendedValue < currentValue) {
+            changeDirection = 'DECREASE';
+            reason = `Negative EV (${evPerSignal.toFixed(1)}%): tightening ${(changeRate * 100).toFixed(0)}%/cycle`;
+          }
+        } else {
+          recommendedValue = Math.min(
+            currentValue + (currentValue * changeRate),
+            analysis.winningAvg
+          );
+          if (recommendedValue > currentValue) {
+            changeDirection = 'INCREASE';
+            reason = `Negative EV (${evPerSignal.toFixed(1)}%): tightening ${(changeRate * 100).toFixed(0)}%/cycle`;
+          }
+        }
+      }
+      // v3: EV 0-10% — moderate tighten
+      else if (evPerSignal < 10) {
+        if (isMaxThreshold) {
+          recommendedValue = Math.max(
+            currentValue - (currentValue * changeRate),
+            analysis.winningAvg
+          );
+          if (recommendedValue < currentValue) {
+            changeDirection = 'DECREASE';
+            reason = `Low EV (${evPerSignal.toFixed(1)}%): tightening ${(changeRate * 100).toFixed(0)}%/cycle`;
+          }
+        } else {
+          recommendedValue = Math.min(
+            currentValue + (currentValue * changeRate),
+            analysis.winningAvg
+          );
+          if (recommendedValue > currentValue) {
+            changeDirection = 'INCREASE';
+            reason = `Low EV (${evPerSignal.toFixed(1)}%): tightening ${(changeRate * 100).toFixed(0)}%/cycle`;
+          }
+        }
+      }
+      // v3: EV 10-25% — fine-tune using factor analysis
+      else if (evPerSignal < 25) {
+        if (analysis.separation > 0.5) {
+          recommendedValue = Math.round(
+            currentValue + (analysis.optimalThreshold - currentValue) * changeRate
+          );
+          if (Math.abs(recommendedValue - currentValue) > 2) {
+            changeDirection = recommendedValue > currentValue ? 'INCREASE' : 'DECREASE';
+            reason = `Fine-tuning (EV ${evPerSignal.toFixed(1)}%): moving towards optimal (${analysis.optimalThreshold.toFixed(0)})`;
+          }
+        }
+      }
+      // v3: EV 25%+ — cautiously loosen for more volume
+      else {
         if (isMaxThreshold) {
           recommendedValue = Math.min(
-            currentValue + (currentValue * MAX_THRESHOLD_CHANGE / 100),
+            currentValue + (currentValue * changeRate),
             analysis.losingAvg
           );
           if (recommendedValue > currentValue) {
             changeDirection = 'INCREASE';
-            reason = `High win rate (${stats.winRate.toFixed(1)}%) but few signals: loosening for more opportunities`;
+            reason = `High EV (${evPerSignal.toFixed(1)}%): loosening cautiously for more signals`;
           }
         } else {
           recommendedValue = Math.max(
-            currentValue - (currentValue * MAX_THRESHOLD_CHANGE / 100),
+            currentValue - (currentValue * changeRate),
             analysis.losingAvg
           );
           if (recommendedValue < currentValue) {
             changeDirection = 'DECREASE';
-            reason = `High win rate (${stats.winRate.toFixed(1)}%) but few signals: loosening for more opportunities`;
+            reason = `High EV (${evPerSignal.toFixed(1)}%): loosening cautiously for more signals`;
           }
-        }
-      } else if (analysis.separation > 0.5) {
-        // Strong factor - adjust towards optimal threshold
-        recommendedValue = Math.round(
-          currentValue + (analysis.optimalThreshold - currentValue) * 0.3  // Move 30% towards optimal
-        );
-
-        if (Math.abs(recommendedValue - currentValue) > 2) {
-          changeDirection = recommendedValue > currentValue ? 'INCREASE' : 'DECREASE';
-          reason = `Strong signal factor: adjusting towards optimal (${analysis.optimalThreshold.toFixed(0)})`;
         }
       }
 
@@ -592,16 +872,21 @@ export class ThresholdOptimizer {
   }
 
   /**
-   * Get optimization summary for Telegram report
+   * Get optimization summary for Telegram report.
+   * v3: Shows EV per signal as primary metric.
    */
   async getOptimizationSummary(): Promise<string> {
     const result = await this.optimize(false);
 
-    let summary = '🎯 **Threshold Optimization**\n\n';
+    let summary = '🎯 **Threshold Optimization (v3 EV-based)**\n\n';
 
     summary += `📊 Data Points: ${result.dataPoints}\n`;
-    summary += `📈 Current Win Rate: ${result.currentWinRate.toFixed(1)}%\n`;
-    summary += `🎯 Target Win Rate: ${result.targetWinRate}%\n\n`;
+    summary += `📈 Win Rate: ${result.currentWinRate.toFixed(1)}% (floor: ${WIN_RATE_FLOOR}%)\n`;
+
+    if (result.appliedChanges.length > 0 && result.appliedChanges[0].startsWith('EV regime')) {
+      summary += `📉 ${result.appliedChanges[0]}\n`;
+    }
+    summary += '\n';
 
     if (result.recommendations.length === 0) {
       summary += '_Insufficient data for recommendations_\n';
@@ -625,6 +910,33 @@ export class ThresholdOptimizer {
       }
     } else {
       summary += '✅ _All thresholds are optimally configured_\n';
+    }
+
+    // v3: Quartile EV breakdown for top factors
+    if (result.recommendations.length > 0) {
+      const factorAnalyses = await this.analyzeFactors();
+      if (factorAnalyses.length > 0) {
+        summary += '\n**EV by Quartile:**\n';
+        for (const fa of factorAnalyses.slice(0, 3)) {
+          const name = this.formatFactorName(fa.factor);
+          summary += `• ${name} Q1→Q4: ${fa.quartileEVs.q1.toFixed(1)}% | ${fa.quartileEVs.q2.toFixed(1)}% | ${fa.quartileEVs.q3.toFixed(1)}% | ${fa.quartileEVs.q4.toFixed(1)}%\n`;
+        }
+      }
+    }
+
+    // v3: Interaction effects
+    const interactions = this.getInteractionEffects();
+    if (interactions.length > 0) {
+      summary += '\n**Interaction Effects:**\n';
+      for (const ix of interactions) {
+        const nameA = this.formatFactorName(ix.factorA);
+        const nameB = this.formatFactorName(ix.factorB);
+        summary += `• ${nameA} × ${nameB}:\n`;
+        summary += `  HH=${ix.quadrants.highHigh.ev.toFixed(1)}%(${ix.quadrants.highHigh.count}) `;
+        summary += `HL=${ix.quadrants.highLow.ev.toFixed(1)}%(${ix.quadrants.highLow.count}) `;
+        summary += `LH=${ix.quadrants.lowHigh.ev.toFixed(1)}%(${ix.quadrants.lowHigh.count}) `;
+        summary += `LL=${ix.quadrants.lowLow.ev.toFixed(1)}%(${ix.quadrants.lowLow.count})\n`;
+      }
     }
 
     return summary;

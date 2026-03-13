@@ -101,8 +101,10 @@ export class PullbackDetector {
       return 'IMMEDIATE';
     }
 
-    // Token age < 10 min: initial price discovery, pullback may not come
-    if (tokenAge < 10) {
+    // Token age < 30 min: still in early price discovery, pullback may not come.
+    // Previously 10 min — but micro-caps under 30 min are still establishing price
+    // and the pullback watchlist was silently expiring most signals without sending them.
+    if (tokenAge < 30) {
       return 'IMMEDIATE';
     }
 

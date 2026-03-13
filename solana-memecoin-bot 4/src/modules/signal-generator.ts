@@ -2856,6 +2856,13 @@ export class SignalGenerator {
     const isPreBond = metrics.marketCap > 0 && metrics.marketCap < 69_000
       && metrics.volume24h === 0 && metrics.volumeMarketCapRatio === 0;
 
+    // Early tokens (< 30 min) haven't had time to accumulate holders/volume.
+    // Use relaxed thresholds so they aren't killed before they can prove themselves.
+    const isEarly = metrics.tokenAge < 30;
+    const earlyHolderMin = 15;       // Early tokens: 15 holders (vs 50 default)
+    const earlyVolumeMin = 500;      // Early tokens: $500 volume (vs $2K default)
+    const earlyVolRatioMin = 0.005;  // Early tokens: 0.5% vol/mcap (vs 1% default)
+
     if (metrics.marketCap < cfg.minMarketCap) {
       failedCriteria.push(`marketCap (${metrics.marketCap}) < min (${cfg.minMarketCap})`);
     }
@@ -2865,17 +2872,20 @@ export class SignalGenerator {
 
     // Skip volume checks for pre-bond tokens — pump.fun API doesn't provide volume
     if (!isPreBond) {
-      if (metrics.volume24h < cfg.min24hVolume) {
-        failedCriteria.push(`volume24h (${metrics.volume24h}) < min (${cfg.min24hVolume})`);
+      const volMin = isEarly ? earlyVolumeMin : cfg.min24hVolume;
+      if (metrics.volume24h < volMin) {
+        failedCriteria.push(`volume24h (${metrics.volume24h}) < min (${volMin})${isEarly ? ' [early]' : ''}`);
       }
 
-      if (metrics.volumeMarketCapRatio < cfg.minVolumeMarketCapRatio) {
-        failedCriteria.push(`volumeRatio (${metrics.volumeMarketCapRatio.toFixed(3)}) < min (${cfg.minVolumeMarketCapRatio})`);
+      const volRatioMin = isEarly ? earlyVolRatioMin : cfg.minVolumeMarketCapRatio;
+      if (metrics.volumeMarketCapRatio < volRatioMin) {
+        failedCriteria.push(`volumeRatio (${metrics.volumeMarketCapRatio.toFixed(3)}) < min (${volRatioMin})${isEarly ? ' [early]' : ''}`);
       }
     }
 
-    if (metrics.holderCount < cfg.minHolderCount) {
-      failedCriteria.push(`holders (${metrics.holderCount}) < min (${cfg.minHolderCount})`);
+    const holderMin = isEarly ? earlyHolderMin : cfg.minHolderCount;
+    if (metrics.holderCount < holderMin) {
+      failedCriteria.push(`holders (${metrics.holderCount}) < min (${holderMin})${isEarly ? ' [early]' : ''}`);
     }
 
     if (metrics.top10Concentration > cfg.maxTop10Concentration) {
@@ -2896,6 +2906,7 @@ export class SignalGenerator {
         address: metrics.address?.slice(0, 8),
         failedCriteria,
         isPreBond,
+        isEarly,
       }, 'EVAL: Screening failed');
       return false;
     }

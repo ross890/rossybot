@@ -171,6 +171,9 @@ async function main(): Promise<void> {
     nextRun: dailyAutoOptimizer.getNextRunTime()?.toISOString(),
   }, 'Daily auto optimizer scheduled');
 
+  // Wire diagnostics getter so /diagnostics command can access signal generator state
+  telegramBot.setDiagnosticsGetter(() => signalGenerator.getDiagnostics());
+
   // V3 Checklist Automation — milestone tracking every 6 hours
   try {
     v3ChecklistAutomation.initialize(async (message) => {

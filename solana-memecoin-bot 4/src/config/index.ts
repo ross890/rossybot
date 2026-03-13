@@ -37,7 +37,7 @@ const envSchema = z.object({
   DEFAULT_POSITION_SIZE_PERCENT: z.coerce.number().default(2),
   MAX_SIGNALS_PER_HOUR: z.coerce.number().default(30),   // For MODERATE signals only; STRONG bypass limits
   MAX_SIGNALS_PER_DAY: z.coerce.number().default(150),   // For MODERATE signals only; STRONG bypass limits
-  MIN_SCORE_BUY_SIGNAL: z.coerce.number().default(55),   // Raised from 45 for higher quality signals
+  MIN_SCORE_BUY_SIGNAL: z.coerce.number().default(60),   // EMERGENCY FIX 4: Raised from 55→60 for better differentiation
   MIN_SCORE_WATCH_SIGNAL: z.coerce.number().default(30),
 
   // Learning mode (default: true - allows more signals for ML training)
@@ -66,7 +66,7 @@ const envSchema = z.object({
   MAX_MARKET_CAP: z.coerce.number().default(1000000),    // Hard cap $1M - no large caps, no edge above this
   MIN_24H_VOLUME: z.coerce.number().default(2000),        // Lowered from 3K - micro-caps have less volume
   MIN_VOLUME_MCAP_RATIO: z.coerce.number().default(0.01), // Lowered from 3% — new micro-caps have thin volume in first hour
-  MIN_HOLDER_COUNT: z.coerce.number().default(10),        // Lowered from 15 — micro-caps start smaller
+  MIN_HOLDER_COUNT: z.coerce.number().default(50),        // EMERGENCY FIX 6: Raised from 10→50 — holder count has +0.37 correlation with wins
   MAX_TOP10_CONCENTRATION: z.coerce.number().default(80), // Micro-caps always have concentrated holders early — 50% was filtering 80%+ of viable tokens
   MIN_LIQUIDITY_POOL: z.coerce.number().default(500),     // Lowered from 5K — micro-caps have smaller pools
   MIN_TOKEN_AGE_MINUTES: z.coerce.number().default(1),   // Only reject truly instant tokens

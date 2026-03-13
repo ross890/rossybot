@@ -176,13 +176,45 @@ const MILESTONE_THRESHOLDS = [
 
 export class SignalPerformanceTracker {
   private trackingTimer: NodeJS.Timeout | null = null;
-  private readonly TRACKING_INTERVAL_MS = 15 * 60 * 1000; // Check every 15 minutes
+  // Base interval — the fast loop checks all positions, but each position
+  // is only actually updated when its individual check interval has elapsed.
+  private readonly BASE_LOOP_INTERVAL_MS = 60 * 1000; // Loop every 60 seconds
+  // Track last check time per signal to implement per-position intervals
+  private lastCheckTime: Map<string, number> = new Map();
 
   // Milestone notification callback
   private notifyCallback: ((message: string) => Promise<void>) | null = null;
 
   // Track which milestones have been notified per signal to avoid duplicates
   private notifiedMilestones: Map<string, Set<number>> = new Map();
+
+  /**
+   * EMERGENCY FIX 1: Tiered check frequency based on position state.
+   * First 2 hours or in danger zone: every 60s
+   * After TP1 hit (trailing stop): every 2 minutes
+   * Default: every 5 minutes (down from 15)
+   */
+  private getCheckIntervalMs(signal: any, currentReturn: number): number {
+    const holdTimeMs = Date.now() - new Date(signal.signal_time).getTime();
+
+    // First 2 hours: check every 60 seconds — most micro-cap rugs happen here
+    if (holdTimeMs < 2 * 60 * 60 * 1000) return 60 * 1000;
+
+    // Position in danger zone (within 60% of stop price level): check every 60 seconds
+    // e.g., if stop is -25% and we're at -15%, we're close — poll fast
+    const exitState = signal.exit_state_json ? JSON.parse(signal.exit_state_json) : null;
+    if (exitState) {
+      const entryPrice = parseFloat(signal.entry_price);
+      const stopReturn = (exitState.stopPrice - entryPrice) / entryPrice;
+      if (currentReturn < stopReturn * 0.6) return 60 * 1000;
+
+      // Position past TP1 (trailing stop active): check every 2 minutes
+      if (exitState.tp1Hit) return 2 * 60 * 1000;
+    }
+
+    // Default: every 5 minutes (not 15 — 5 is max safe interval for micro-caps)
+    return 5 * 60 * 1000;
+  }
 
   /**
    * Initialize the tracker and start background tracking
@@ -370,9 +402,9 @@ export class SignalPerformanceTracker {
           entry_liquidity, entry_token_age, entry_holder_count,
           entry_top10_concentration, entry_buy_sell_ratio, entry_unique_buyers,
           signal_track, kol_reputation,
-          exit_state_json, data_quality,
+          exit_state_json, data_quality, data_epoch,
           signal_time, tracked, final_outcome
-        ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, NOW(), true, 'PENDING')
+        ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, NOW(), true, 'PENDING')
         ON CONFLICT (signal_id) DO NOTHING
       `, [
         signalId, tokenAddress, tokenTicker, signalType,
@@ -388,6 +420,7 @@ export class SignalPerformanceTracker {
         metrics.kolReputation || null,
         JSON.stringify(initialExitState),
         'canonical',  // Mark as post-alignment
+        'post_emergency_fix',  // EMERGENCY FIX: Data epoch for fresh performance tracking
       ]);
 
       logger.info({
@@ -414,13 +447,14 @@ export class SignalPerformanceTracker {
     // Run immediately
     this.trackAllPendingSignals();
 
-    // Then run on interval
+    // Then run on fast base loop (60s) — individual signals are checked
+    // at their own tiered intervals via getCheckIntervalMs()
     this.trackingTimer = setInterval(
       () => this.trackAllPendingSignals(),
-      this.TRACKING_INTERVAL_MS
+      this.BASE_LOOP_INTERVAL_MS
     );
 
-    logger.info('Signal performance tracking started');
+    logger.info('Signal performance tracking started (tiered intervals: 60s/2m/5m)');
   }
 
   /**
@@ -447,11 +481,38 @@ export class SignalPerformanceTracker {
         AND signal_time > NOW() - INTERVAL '48 hours'
       `);
 
+      const now = Date.now();
+      let checkedCount = 0;
+
       for (const signal of result.rows) {
+        const signalId = signal.signal_id;
+        const lastCheck = this.lastCheckTime.get(signalId) || 0;
+
+        // Calculate what the current return might be (approximate from last data)
+        const entryPrice = parseFloat(signal.entry_price);
+        const lastPrice = signal.peak_price ? parseFloat(signal.peak_price) : entryPrice;
+        const approxReturn = (lastPrice - entryPrice) / entryPrice;
+
+        // Determine check interval for this specific position
+        const checkInterval = this.getCheckIntervalMs(signal, approxReturn);
+
+        // Skip if not enough time has passed since last check
+        if (now - lastCheck < checkInterval) continue;
+
         await this.trackSignal(signal);
+        this.lastCheckTime.set(signalId, now);
+        checkedCount++;
       }
 
-      logger.debug({ count: result.rows.length }, 'Tracked pending signals');
+      // Clean up lastCheckTime for signals no longer tracked
+      const activeSignalIds = new Set(result.rows.map((s: any) => s.signal_id));
+      for (const [id] of this.lastCheckTime) {
+        if (!activeSignalIds.has(id)) this.lastCheckTime.delete(id);
+      }
+
+      if (checkedCount > 0) {
+        logger.debug({ checked: checkedCount, total: result.rows.length }, 'Tracked pending signals (tiered)');
+      }
     } catch (error) {
       logger.error({ error }, 'Failed to track pending signals');
     }
@@ -499,6 +560,128 @@ export class SignalPerformanceTracker {
         currentPrice,
         hoursElapsed
       );
+
+      // --- EMERGENCY FIX 1: STALENESS KILL SWITCH ---
+      // If a token drops more than 40% from entry at ANY check, force-close immediately.
+      // This catches gap-through scenarios where stop was -25% but token is already
+      // at -60% when we check. Don't let a -40% loss become a -99% loss.
+      const currentReturn = priceChange / 100; // Convert percentage to decimal
+      if (currentReturn <= -0.40) {
+        const isPostAlignment = signal.data_quality === 'canonical' || signal.exit_state_json;
+        if (isPostAlignment) {
+          // Calculate stop slippage for tracking
+          const exitState = signal.exit_state_json ? JSON.parse(signal.exit_state_json) : null;
+          const stopTargetPrice = exitState?.stopPrice || (entryPrice * 0.75);
+          const stopSlippagePct = ((stopTargetPrice - currentPrice) / entryPrice) * 100;
+          const checkIntervalAtExit = this.getCheckIntervalMs(signal, currentReturn);
+
+          const partialExits = [{
+            price: currentPrice,
+            percentOfOriginal: 100, // Force close 100% of position
+            timestamp: new Date().toISOString(),
+            reason: 'EMERGENCY_STOP_GAP',
+            stopTargetPrice,
+            actualExitPrice: currentPrice,
+            stopSlippagePct: stopSlippagePct.toFixed(2),
+            checkIntervalAtExitMs: checkIntervalAtExit,
+          }];
+
+          await this.finalizeSignalCanonical(
+            signal.signal_id,
+            'LOSS',
+            priceChange,
+            partialExits,
+            Math.max(exitState?.peakPriceSinceEntry || currentPrice, currentPrice),
+            'EMERGENCY_STOP_GAP',
+            'EMERGENCY_STOP'
+          );
+          this.cleanupMilestoneTracking(signal.signal_id);
+
+          logger.warn({
+            signalId: signal.signal_id,
+            ticker: signal.token_ticker,
+            currentReturn: `${priceChange.toFixed(1)}%`,
+            stopSlippage: `${stopSlippagePct.toFixed(1)}%`,
+          }, 'EMERGENCY STOP GAP: Token gapped through stop — force closed at actual price');
+          return;
+        }
+      }
+
+      // --- EMERGENCY FIX 5: LIQUIDITY COLLAPSE DETECTION ---
+      // Monitor liquidity alongside price. If LP gets pulled or massive sells drain
+      // the pool, force-close even if price looks OK — you can't exit at zero liquidity.
+      const currentLiquidity = pairs[0].liquidity?.usd || 0;
+      const entryLiquidity = parseFloat(signal.entry_liquidity) || 0;
+
+      if (entryLiquidity > 0 && currentLiquidity < entryLiquidity * 0.3) {
+        // Liquidity has dropped 70%+ since entry — LP pulled or massive draining
+        const isPostAlignmentLiq = signal.data_quality === 'canonical' || signal.exit_state_json;
+        if (isPostAlignmentLiq) {
+          const exitState = signal.exit_state_json ? JSON.parse(signal.exit_state_json) : null;
+          const partialExits = [{
+            price: currentPrice,
+            percentOfOriginal: 100,
+            timestamp: new Date().toISOString(),
+            reason: 'LIQUIDITY_COLLAPSE',
+            entryLiquidity,
+            exitLiquidity: currentLiquidity,
+            liquidityDropPct: (((entryLiquidity - currentLiquidity) / entryLiquidity) * 100).toFixed(1),
+          }];
+
+          await this.finalizeSignalCanonical(
+            signal.signal_id,
+            'LOSS',
+            priceChange,
+            partialExits,
+            Math.max(exitState?.peakPriceSinceEntry || currentPrice, currentPrice),
+            'LIQUIDITY_COLLAPSE',
+            'LIQUIDITY_COLLAPSE'
+          );
+          this.cleanupMilestoneTracking(signal.signal_id);
+
+          logger.warn({
+            signalId: signal.signal_id,
+            ticker: signal.token_ticker,
+            entryLiquidity: `$${entryLiquidity.toFixed(0)}`,
+            currentLiquidity: `$${currentLiquidity.toFixed(0)}`,
+            dropPct: `${(((entryLiquidity - currentLiquidity) / entryLiquidity) * 100).toFixed(1)}%`,
+          }, 'LIQUIDITY COLLAPSE: LP drained 70%+ — force closed');
+          return;
+        }
+      }
+
+      if (currentLiquidity > 0 && currentLiquidity < 500) {
+        // Liquidity below minimum tradeable threshold — untradeable
+        const isPostAlignmentLiq = signal.data_quality === 'canonical' || signal.exit_state_json;
+        if (isPostAlignmentLiq) {
+          const exitState = signal.exit_state_json ? JSON.parse(signal.exit_state_json) : null;
+          const partialExits = [{
+            price: currentPrice,
+            percentOfOriginal: 100,
+            timestamp: new Date().toISOString(),
+            reason: 'LIQUIDITY_UNTRADEABLE',
+            currentLiquidity,
+          }];
+
+          await this.finalizeSignalCanonical(
+            signal.signal_id,
+            'LOSS',
+            priceChange,
+            partialExits,
+            Math.max(exitState?.peakPriceSinceEntry || currentPrice, currentPrice),
+            'LIQUIDITY_UNTRADEABLE',
+            'LIQUIDITY_UNTRADEABLE'
+          );
+          this.cleanupMilestoneTracking(signal.signal_id);
+
+          logger.warn({
+            signalId: signal.signal_id,
+            ticker: signal.token_ticker,
+            currentLiquidity: `$${currentLiquidity.toFixed(0)}`,
+          }, 'LIQUIDITY UNTRADEABLE: Below $500 — force closed');
+          return;
+        }
+      }
 
       // --- CANONICAL EXIT STRATEGY SIMULATION ---
       // Determine if this is a post-alignment signal (has canonical tracking data)
@@ -562,12 +745,34 @@ export class SignalPerformanceTracker {
         ? JSON.parse(signal.partial_exits_json)
         : [];
 
-      partialExits.push({
+      const exitRecord: any = {
         price: currentPrice,
         percentOfOriginal: decision.sellPercent,
         timestamp: new Date().toISOString(),
         reason: decision.action,
-      });
+      };
+
+      // EMERGENCY FIX 1 CHANGE 3: Track stop execution quality
+      if (decision.action === 'STOP_LOSS' || decision.action === 'TRAILING_STOP' || decision.action === 'BREAKEVEN_STOP') {
+        const stopTargetPrice = exitState.stopPrice;
+        const stopSlippagePct = ((stopTargetPrice - currentPrice) / entryPrice) * 100;
+        const checkIntervalAtExit = this.getCheckIntervalMs(signal, priceChange / 100);
+        exitRecord.stopTargetPrice = stopTargetPrice;
+        exitRecord.actualExitPrice = currentPrice;
+        exitRecord.stopSlippagePct = stopSlippagePct.toFixed(2);
+        exitRecord.checkIntervalAtExitMs = checkIntervalAtExit;
+
+        logger.info({
+          signalId: signal.signal_id,
+          ticker: signal.token_ticker,
+          stopTarget: `$${stopTargetPrice.toFixed(8)}`,
+          actualExit: `$${currentPrice.toFixed(8)}`,
+          slippage: `${stopSlippagePct.toFixed(1)}%`,
+          checkIntervalMs: checkIntervalAtExit,
+        }, 'Stop execution quality recorded');
+      }
+
+      partialExits.push(exitRecord);
 
       // Apply decision to state
       const newState = applyExitDecision(exitState, decision, currentPrice);
@@ -670,6 +875,11 @@ export class SignalPerformanceTracker {
     outcomeCategory: string
   ): Promise<void> {
     try {
+      // Extract stop slippage data from the exit record that triggered finalization
+      const triggerExit = partialExits[partialExits.length - 1];
+      const stopSlippage = triggerExit?.stopSlippagePct ? parseFloat(triggerExit.stopSlippagePct) : null;
+      const checkIntervalAtExit = triggerExit?.checkIntervalAtExitMs || null;
+
       await pool.query(`
         UPDATE signal_performance
         SET
@@ -682,10 +892,12 @@ export class SignalPerformanceTracker {
           outcome_category = $6,
           hit_stop_loss = $7,
           hit_take_profit = $8,
+          stop_slippage_pct = $9,
+          check_interval_at_exit_ms = $10,
           tracked = false,
           data_quality = 'canonical',
           last_update = NOW()
-        WHERE signal_id = $9
+        WHERE signal_id = $11
       `, [
         outcome,
         realizedReturnPercent,
@@ -693,8 +905,10 @@ export class SignalPerformanceTracker {
         peakPrice,
         exitReason,
         outcomeCategory,
-        exitReason === 'STOP_LOSS' || exitReason === 'BREAKEVEN_STOP',
+        exitReason === 'STOP_LOSS' || exitReason === 'BREAKEVEN_STOP' || exitReason === 'EMERGENCY_STOP_GAP',
         exitReason === 'TAKE_PROFIT_1' || exitReason === 'TAKE_PROFIT_2' || exitReason === 'TRAILING_STOP',
+        stopSlippage,
+        checkIntervalAtExit,
         signalId,
       ]);
 
@@ -1308,6 +1522,21 @@ export class SignalPerformanceTracker {
           END IF;
           IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name = 'signal_performance' AND column_name = 'data_quality') THEN
             ALTER TABLE signal_performance ADD COLUMN data_quality VARCHAR(20) DEFAULT 'legacy';
+          END IF;
+          -- EMERGENCY FIX 1: Stop execution quality tracking
+          IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name = 'signal_performance' AND column_name = 'stop_slippage_pct') THEN
+            ALTER TABLE signal_performance ADD COLUMN stop_slippage_pct DECIMAL(10, 2);
+          END IF;
+          IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name = 'signal_performance' AND column_name = 'check_interval_at_exit_ms') THEN
+            ALTER TABLE signal_performance ADD COLUMN check_interval_at_exit_ms INTEGER;
+          END IF;
+          -- EMERGENCY FIX 1: Data epoch for post-fix tracking
+          IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name = 'signal_performance' AND column_name = 'data_epoch') THEN
+            ALTER TABLE signal_performance ADD COLUMN data_epoch VARCHAR(50) DEFAULT 'pre_emergency_fix';
+          END IF;
+          -- EMERGENCY FIX 5: Liquidity at entry for collapse detection
+          IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name = 'signal_performance' AND column_name = 'exit_liquidity') THEN
+            ALTER TABLE signal_performance ADD COLUMN exit_liquidity DECIMAL(30, 2);
           END IF;
         END $$;
       `);

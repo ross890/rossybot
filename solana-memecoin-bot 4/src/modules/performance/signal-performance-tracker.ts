@@ -439,7 +439,7 @@ export class SignalPerformanceTracker {
    */
   private async trackAllPendingSignals(): Promise<void> {
     try {
-      // Get all signals that are still being tracked
+      // Get all signals that are still being tracked (within tracking window)
       const result = await pool.query(`
         SELECT * FROM signal_performance
         WHERE tracked = true
@@ -452,6 +452,22 @@ export class SignalPerformanceTracker {
       }
 
       logger.debug({ count: result.rows.length }, 'Tracked pending signals');
+
+      // Expire stale signals older than MAX_TRACKING_HOURS that were never resolved.
+      // Without this cleanup, PENDING entries accumulate forever since the query above
+      // only processes signals within the 48-hour window.
+      const expireResult = await pool.query(`
+        UPDATE signal_performance
+        SET final_outcome = 'EXPIRED_UNRESOLVED',
+            tracked = false,
+            updated_at = NOW()
+        WHERE final_outcome = 'PENDING'
+        AND signal_time <= NOW() - INTERVAL '${MAX_TRACKING_HOURS} hours'
+      `);
+
+      if (expireResult.rowCount && expireResult.rowCount > 0) {
+        logger.info({ expired: expireResult.rowCount }, 'Expired stale PENDING signals beyond tracking window');
+      }
     } catch (error) {
       logger.error({ error }, 'Failed to track pending signals');
     }

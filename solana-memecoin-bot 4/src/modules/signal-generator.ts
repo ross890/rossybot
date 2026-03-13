@@ -1109,8 +1109,9 @@ export class SignalGenerator {
     // Score range: -50 (bearish) to +50 (bullish), applied as bonus/penalty (capped at ±10)
     let candlestickBonus = 0;
     let candlestickInfo = '';
+    let candleAnalysis: import('./candlestick-analyzer.js').CandlestickAnalysis | null = null;
     try {
-      const candleAnalysis = await candlestickAnalyzer.analyze(tokenAddress, '5m');
+      candleAnalysis = await candlestickAnalyzer.analyze(tokenAddress, '5m');
       if (candleAnalysis) {
         // Scale the -50..+50 score to a -10..+10 bonus for the adjusted total
         candlestickBonus = Math.max(-10, Math.min(10, Math.round(candleAnalysis.score / 5)));
@@ -1524,6 +1525,39 @@ export class SignalGenerator {
       kolReputationTier, // KOL tier (for EARLY_QUALITY track)
       enrichment,        // Predictive enrichment data
     );
+
+    // Attach candlestick analysis to signal for Telegram display
+    if (candleAnalysis) {
+      (onChainSignal as any).candlestickAnalysis = candleAnalysis;
+    }
+
+    // Step 7.5: Candlestick structure gate
+    // Block signals with strongly bearish chart structure — these are likely
+    // dumping or distributing and would be bad entries even with good on-chain metrics.
+    // Only blocks in production mode; learning mode logs but allows through.
+    if (candleAnalysis && candleAnalysis.score <= -20) {
+      if (!isLearningMode) {
+        logger.info({
+          tokenAddress: shortAddr,
+          ticker: metrics.ticker,
+          candleScore: candleAnalysis.score,
+          patterns: candleAnalysis.patterns.map(p => p.name),
+          trend: candleAnalysis.trendDirection,
+          trendStrength: candleAnalysis.trendStrength,
+        }, 'EVAL: BLOCKED - Strongly bearish candlestick structure');
+        return SignalGenerator.EVAL_RESULTS.DISCOVERY_FAILED;
+      } else {
+        logger.info({
+          tokenAddress: shortAddr,
+          ticker: metrics.ticker,
+          candleScore: candleAnalysis.score,
+          patterns: candleAnalysis.patterns.map(p => p.name),
+          note: 'Learning mode — bearish candle gate bypassed for data collection',
+        }, 'EVAL: Bearish candle structure (allowed in learning mode)');
+        // Add warning so it shows in the Telegram message
+        onChainSignal.riskWarnings.push(`BEARISH_CHART: Candle score ${candleAnalysis.score}`);
+      }
+    }
 
     // Track for KOL follow-up (optional validation)
     this.discoverySignals.set(tokenAddress, onChainSignal);

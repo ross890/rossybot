@@ -60,6 +60,19 @@ const TARGET_WIN_RATE = 30;
 const ADJUSTMENT_FACTOR = 0.1; // Apply 10% of factor diff (was 0.3)
 const LIQUIDITY_ADJUSTMENT_FACTOR = 0.15; // NEW: More aggressive for liquidity
 
+// Phase 4.2: Tiered adaptation speed
+// Normal: 5%/cycle, EV declining 2+ days: 10%/cycle,
+// EV negative: 15%/cycle + alert, Crisis: 25%/cycle + emergency tighten
+type AdaptationSpeed = 'NORMAL' | 'ACCELERATED' | 'URGENT' | 'CRISIS';
+
+interface AdaptationState {
+  speed: AdaptationSpeed;
+  consecutiveNegativeDays: number;
+  consecutiveLosses: number;
+  lastDayEV: number | null;
+  evDecliningDays: number;
+}
+
 // ============ DAILY AUTO OPTIMIZER CLASS ============
 
 export class DailyAutoOptimizer {
@@ -67,6 +80,15 @@ export class DailyAutoOptimizer {
   private bot: TelegramBot | null = null;
   private chatId: string;
   private lastWinRate: number | null = null;
+
+  // Phase 4.2: Adaptation speed tracking
+  private adaptationState: AdaptationState = {
+    speed: 'NORMAL',
+    consecutiveNegativeDays: 0,
+    consecutiveLosses: 0,
+    lastDayEV: null,
+    evDecliningDays: 0,
+  };
 
   constructor() {
     this.chatId = appConfig.telegramChatId;
@@ -155,6 +177,26 @@ export class DailyAutoOptimizer {
         winRate: data.winRate,
         avgReturn: data.avgReturn,
       })).filter(t => t.count > 0); // Only include tiers with data
+
+      // Step 2.6: Phase 4.2 — Update adaptation speed based on EV trend
+      const avgReturn = stats.avgReturn || 0;
+      this.updateAdaptationSpeed(avgReturn, stats.winRate);
+
+      // Crisis mode: send alert
+      if (this.adaptationState.speed === 'CRISIS') {
+        await this.sendTelegramMessage(
+          `🚨 *CRISIS MODE ACTIVATED*\n\n` +
+          `${this.adaptationState.consecutiveLosses}+ consecutive losses detected.\n` +
+          `Adaptation speed: 25%/cycle + emergency tighten.\n` +
+          `Manual resume required via /resume\\_trading.`
+        );
+      } else if (this.adaptationState.speed === 'URGENT') {
+        await this.sendTelegramMessage(
+          `⚠️ *URGENT: EV is NEGATIVE*\n\n` +
+          `Current EV: ${avgReturn.toFixed(1)}%\n` +
+          `Adaptation speed increased to 15%/cycle.`
+        );
+      }
 
       // Step 3: Get current thresholds
       const previousThresholds = thresholdOptimizer.getCurrentThresholds();
@@ -265,6 +307,83 @@ export class DailyAutoOptimizer {
   }
 
   /**
+   * Phase 4.2: Determine adaptation speed based on recent performance.
+   * Normal: 5%/cycle
+   * EV declining 2+ days: 10%/cycle
+   * EV negative: 15%/cycle + alert
+   * Crisis (5+ consecutive losses): 25%/cycle + emergency tighten + manual resume
+   */
+  private updateAdaptationSpeed(currentEV: number, winRate: number): void {
+    const prev = this.adaptationState;
+
+    // Track EV trend
+    if (prev.lastDayEV !== null) {
+      if (currentEV < prev.lastDayEV) {
+        prev.evDecliningDays++;
+      } else {
+        prev.evDecliningDays = 0;
+      }
+    }
+    prev.lastDayEV = currentEV;
+
+    // Track consecutive negative days
+    if (currentEV < 0) {
+      prev.consecutiveNegativeDays++;
+    } else {
+      prev.consecutiveNegativeDays = 0;
+    }
+
+    // Determine speed
+    if (prev.consecutiveLosses >= 5) {
+      prev.speed = 'CRISIS';
+    } else if (currentEV < 0) {
+      prev.speed = 'URGENT';
+    } else if (prev.evDecliningDays >= 2) {
+      prev.speed = 'ACCELERATED';
+    } else {
+      prev.speed = 'NORMAL';
+    }
+
+    logger.info({
+      speed: prev.speed,
+      ev: currentEV,
+      evDecliningDays: prev.evDecliningDays,
+      consecutiveNegativeDays: prev.consecutiveNegativeDays,
+      consecutiveLosses: prev.consecutiveLosses,
+    }, 'Adaptation speed updated');
+  }
+
+  /**
+   * Get the max change percent based on adaptation speed.
+   */
+  private getAdaptiveMaxChange(): number {
+    switch (this.adaptationState.speed) {
+      case 'CRISIS': return 25;
+      case 'URGENT': return 15;
+      case 'ACCELERATED': return 10;
+      case 'NORMAL': default: return MAX_CHANGE_PERCENT;
+    }
+  }
+
+  /**
+   * Record consecutive losses for crisis detection.
+   */
+  recordLoss(): void {
+    this.adaptationState.consecutiveLosses++;
+  }
+
+  recordWin(): void {
+    this.adaptationState.consecutiveLosses = 0;
+  }
+
+  /**
+   * Get current adaptation state.
+   */
+  getAdaptationState(): AdaptationState {
+    return { ...this.adaptationState };
+  }
+
+  /**
    * Calculate new thresholds based on analysis
    */
   private calculateNewThresholds(
@@ -285,6 +404,12 @@ export class DailyAutoOptimizer {
       'Liquidity': 'minLiquidity',
       'Top10 Concentration': 'maxTop10Concentration',
     };
+
+    // Phase 4.2: Use adaptive max change based on performance trend
+    const adaptiveMaxChange = this.getAdaptiveMaxChange();
+    if (this.adaptationState.speed !== 'NORMAL') {
+      reasoning.push(`Adaptation speed: ${this.adaptationState.speed} (${adaptiveMaxChange}%/cycle)`);
+    }
 
     // Determine if we should tighten or loosen based on win rate
     // More conservative: only adjust when clearly outside target range
@@ -308,9 +433,15 @@ export class DailyAutoOptimizer {
 
       // Calculate adjustment based on win/loss difference
       // Use more aggressive adjustment for liquidity (strongest differentiator)
+      // Phase 4.2: Use adaptive max change based on performance trend
       const isLiquidityFactor = factor.name === 'Liquidity';
-      const maxChangePercent = isLiquidityFactor ? MAX_LIQUIDITY_CHANGE_PERCENT : MAX_CHANGE_PERCENT;
-      const adjustmentFactor = isLiquidityFactor ? LIQUIDITY_ADJUSTMENT_FACTOR : ADJUSTMENT_FACTOR;
+      const baseMaxChange = isLiquidityFactor ? MAX_LIQUIDITY_CHANGE_PERCENT : MAX_CHANGE_PERCENT;
+      const maxChangePercent = Math.max(baseMaxChange, adaptiveMaxChange);
+      const baseAdjustmentFactor = isLiquidityFactor ? LIQUIDITY_ADJUSTMENT_FACTOR : ADJUSTMENT_FACTOR;
+      const adjustmentFactor = this.adaptationState.speed === 'CRISIS' ? baseAdjustmentFactor * 2.5 :
+                               this.adaptationState.speed === 'URGENT' ? baseAdjustmentFactor * 1.5 :
+                               this.adaptationState.speed === 'ACCELERATED' ? baseAdjustmentFactor * 1.2 :
+                               baseAdjustmentFactor;
 
       let adjustment = 0;
       let reason = '';

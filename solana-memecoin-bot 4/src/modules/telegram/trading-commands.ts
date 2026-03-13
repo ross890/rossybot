@@ -11,6 +11,7 @@ import { tradeExecutor, SignalCategory } from '../trading/trade-executor.js';
 import { positionManager } from '../trading/position-manager.js';
 import { createTelegramInlineKeyboard } from '../../utils/trade-links.js';
 import { thresholdOptimizer } from '../performance/threshold-optimizer.js';
+import { portfolioManager } from '../../risk/portfolioManager.js';
 
 // ============ TYPES ============
 
@@ -56,6 +57,8 @@ export const BOT_COMMANDS: TelegramBot.BotCommand[] = [
   // System
   { command: 'pause', description: 'Pause signal scanning' },
   { command: 'resume', description: 'Resume signal scanning' },
+  { command: 'resume_trading', description: 'Override circuit breaker halt' },
+  { command: 'portfolio', description: 'Portfolio risk status' },
   { command: 'help', description: 'Show all commands' },
 ];
 
@@ -214,8 +217,45 @@ export class TradingCommands {
     });
 
     // /resume
-    this.bot.onText(/\/resume/, async (msg) => {
+    this.bot.onText(/\/resume$/, async (msg) => {
       await this.handleResume(msg.chat.id);
+    });
+
+    // /resume_trading — override circuit breaker halt (Phase 3.1)
+    this.bot.onText(/\/resume_trading/, async (msg) => {
+      portfolioManager.resumeTrading();
+      const status = portfolioManager.getCircuitBreakerStatus();
+      await this.bot.sendMessage(msg.chat.id,
+        `✅ *CIRCUIT BREAKER OVERRIDE*\n\nTrading manually resumed.\nState: ${status.state}\n24h drawdown: ${status.drawdown24h.toFixed(1)}%\n3d drawdown: ${status.drawdown3d.toFixed(1)}%`,
+        { parse_mode: 'Markdown' }
+      );
+    });
+
+    // /portfolio — portfolio risk status (Phase 3.1)
+    this.bot.onText(/\/portfolio/, async (msg) => {
+      const status = portfolioManager.getStatus();
+      const cb = status.circuitBreaker;
+      const lines = [
+        '📊 *PORTFOLIO RISK STATUS*',
+        '',
+        `Positions: ${status.openPositions}/${status.maxPositions}`,
+        `Allocated: ${status.totalAllocated.toFixed(1)}%`,
+        `Queued signals: ${status.queue.size}`,
+        '',
+        `*Circuit Breaker:* ${cb.state}`,
+        `24h drawdown: ${cb.drawdown24h.toFixed(1)}%`,
+        `3d drawdown: ${cb.drawdown3d.toFixed(1)}%`,
+      ];
+      if (cb.haltedAt) {
+        lines.push(`Halted at: ${cb.haltedAt.toISOString()}`);
+      }
+      if (cb.resumeAt) {
+        lines.push(`Auto-resumes: ${cb.resumeAt.toISOString()}`);
+      }
+      if (cb.reason) {
+        lines.push(`Reason: ${cb.reason}`);
+      }
+      await this.bot.sendMessage(msg.chat.id, lines.join('\n'), { parse_mode: 'Markdown' });
     });
   }
 

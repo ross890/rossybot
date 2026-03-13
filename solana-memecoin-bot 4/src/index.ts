@@ -14,6 +14,13 @@ import { dailyAutoOptimizer, thresholdOptimizer } from './modules/performance/in
 import { pumpfunDevMonitor } from './modules/pumpfun/dev-monitor.js';
 import { devStatsUpdater } from './modules/pumpfun/dev-stats-updater.js';
 
+// Phase 3+4: New modules
+import { portfolioManager } from './risk/portfolioManager.js';
+import { regimeDetector } from './analysis/regimeDetector.js';
+import { crossTokenRotationDetector } from './analysis/crossTokenRotationDetector.js';
+import { timeOptimizer } from './analysis/timeOptimizer.js';
+import { narrativeDetector } from './analysis/narrativeDetector.js';
+
 // ============ STARTUP ============
 
 async function initializeDatabase(): Promise<void> {
@@ -72,6 +79,21 @@ function printStartupDiagnostics(): void {
   logger.info('STRATEGIES');
   logger.info(`   Early Token (micro-cap focus): ${appConfig.trading.enableEarlyStrategy ? 'ENABLED - 20s scan cycle' : 'DISABLED'}`);
   logger.info(`   Pump.fun Dev Tracker: ${appConfig.devTracker.enabled ? 'ENABLED - 15s poll cycle' : 'DISABLED'}`);
+
+  // Phase 3+4 modules
+  logger.info('');
+  logger.info('RISK MANAGEMENT (Phase 3)');
+  logger.info('   Portfolio Manager: ENABLED (8 max positions, 4/hour, circuit breakers)');
+  logger.info('   Correlation Tracker: ENABLED (narrative clustering)');
+  logger.info('   Cross-Token Rotation: ENABLED (5-min DexScreener poll)');
+  logger.info('   Time-of-Day Optimizer: ENABLED (AEDT windows)');
+  logger.info('');
+  logger.info('MARKET INTELLIGENCE (Phase 4)');
+  logger.info(`   Regime Detector: ENABLED (${regimeDetector.getRegimeLabel()})`);
+  logger.info('   Narrative Detector: ENABLED (7-day rolling)');
+  logger.info('   Fresh Wallet Analyzer: ENABLED (passive)');
+  logger.info('   Price Oracle: ENABLED (DexScreener + Jupiter)');
+  logger.info('   Adaptive Holder Cache: ENABLED (15s/30s/60s TTL)');
 
   // Signal Limits
   logger.info('');
@@ -147,6 +169,52 @@ async function main(): Promise<void> {
     nextRun: dailyAutoOptimizer.getNextRunTime()?.toISOString(),
   }, 'Daily auto optimizer scheduled');
 
+  // Phase 3: Portfolio risk management
+  try {
+    await portfolioManager.initialize();
+    portfolioManager.onNotify(async (message) => {
+      await telegramBot.sendRawMessage(message);
+    });
+    logger.info('Portfolio manager initialized');
+  } catch (error) {
+    logger.warn({ error }, 'Failed to initialize portfolio manager');
+  }
+
+  // Phase 3.3: Cross-token rotation detector
+  try {
+    crossTokenRotationDetector.onNotify(async (message) => {
+      await telegramBot.sendRawMessage(message);
+    });
+    crossTokenRotationDetector.start();
+    logger.info('Cross-token rotation detector started');
+  } catch (error) {
+    logger.warn({ error }, 'Failed to start rotation detector');
+  }
+
+  // Phase 3.5: Time-of-day optimizer
+  try {
+    await timeOptimizer.initialize();
+    logger.info('Time-of-day optimizer initialized');
+  } catch (error) {
+    logger.warn({ error }, 'Failed to initialize time optimizer');
+  }
+
+  // Phase 4.1: Market regime detector
+  try {
+    regimeDetector.start();
+    logger.info('Market regime detector started');
+  } catch (error) {
+    logger.warn({ error }, 'Failed to start regime detector');
+  }
+
+  // Phase 4.4: Narrative meta-detection
+  try {
+    await narrativeDetector.initialize();
+    logger.info('Narrative detector initialized');
+  } catch (error) {
+    logger.warn({ error }, 'Failed to initialize narrative detector');
+  }
+
   // Print comprehensive startup diagnostics
   printStartupDiagnostics();
 
@@ -184,6 +252,8 @@ async function main(): Promise<void> {
     dailyAutoOptimizer.stop();
     pumpfunDevMonitor.stop();
     devStatsUpdater.stop();
+    crossTokenRotationDetector.stop();
+    regimeDetector.stop();
     await telegramBot.stop();
     await pool.end();
 

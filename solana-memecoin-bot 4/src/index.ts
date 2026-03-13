@@ -9,7 +9,7 @@ import { signalGenerator } from './modules/signal-generator.js';
 import { telegramBot } from './modules/telegram.js';
 // REMOVED: Mature token strategy disabled - contradicts micro-cap focus
 // import { matureTokenScanner, matureTokenTelegram } from './modules/mature-token/index.js';
-import { dailyAutoOptimizer, thresholdOptimizer } from './modules/performance/index.js';
+import { dailyAutoOptimizer, thresholdOptimizer, v3ChecklistAutomation } from './modules/performance/index.js';
 // probability-signal module REMOVED (over-engineered, decoupled from pipeline)
 import { pumpfunDevMonitor } from './modules/pumpfun/dev-monitor.js';
 import { devStatsUpdater } from './modules/pumpfun/dev-stats-updater.js';
@@ -87,6 +87,8 @@ function printStartupDiagnostics(): void {
   logger.info('   Correlation Tracker: ENABLED (narrative clustering)');
   logger.info('   Cross-Token Rotation: ENABLED (5-min DexScreener poll)');
   logger.info('   Time-of-Day Optimizer: ENABLED (AEDT windows)');
+  logger.info('');
+  logger.info('   V3 Checklist: ENABLED (6-hour Telegram reports)');
   logger.info('');
   logger.info('MARKET INTELLIGENCE (Phase 4)');
   logger.info(`   Regime Detector: ENABLED (${regimeDetector.getRegimeLabel()})`);
@@ -169,6 +171,17 @@ async function main(): Promise<void> {
     nextRun: dailyAutoOptimizer.getNextRunTime()?.toISOString(),
   }, 'Daily auto optimizer scheduled');
 
+  // V3 Checklist Automation — milestone tracking every 6 hours
+  try {
+    v3ChecklistAutomation.initialize(async (message) => {
+      await telegramBot.sendRawMessage(message);
+    });
+    v3ChecklistAutomation.start();
+    logger.info('V3 Checklist Automation started (6-hour cycle)');
+  } catch (error) {
+    logger.warn({ error }, 'Failed to start V3 Checklist Automation');
+  }
+
   // Phase 3: Portfolio risk management
   try {
     await portfolioManager.initialize();
@@ -250,6 +263,7 @@ async function main(): Promise<void> {
     }
     // probabilitySignalModule removed
     dailyAutoOptimizer.stop();
+    v3ChecklistAutomation.stop();
     pumpfunDevMonitor.stop();
     devStatsUpdater.stop();
     crossTokenRotationDetector.stop();

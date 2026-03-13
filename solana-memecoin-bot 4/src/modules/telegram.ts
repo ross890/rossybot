@@ -15,7 +15,7 @@ import { convictionTracker } from './signals/conviction-tracker.js';
 import { kolAnalytics } from './kol/kol-analytics.js';
 import { alphaWalletManager } from './alpha/index.js';
 import { bondingCurveMonitor } from './pumpfun/bonding-monitor.js';
-import { dailyReportGenerator, signalPerformanceTracker, thresholdOptimizer } from './performance/index.js';
+import { dailyReportGenerator, signalPerformanceTracker, thresholdOptimizer, v3ChecklistAutomation } from './performance/index.js';
 import { trendingScanner } from './discovery/index.js';
 import {
   BuySignal,
@@ -500,6 +500,7 @@ export class TelegramAlertBot {
       { command: 'removedev', description: 'Remove tracked dev' },
       { command: 'devstats', description: 'Dev stats: /devstats <wallet>' },
       { command: 'trending', description: 'Trending ticker scan' },
+      { command: 'v3checklist', description: 'V3 go-live milestone status' },
       { command: 'help', description: 'Show all commands' },
     ];
 
@@ -935,6 +936,27 @@ export class TelegramAlertBot {
         const errorMessage = error instanceof Error ? error.message : 'Unknown error';
         logger.error({ error, chatId }, 'Failed to send test signal');
         await this.bot!.sendMessage(chatId, `Failed to send test signal: ${errorMessage}`);
+      }
+    });
+
+    // /v3checklist command - V3 go-live milestone status
+    this.bot.onText(/\/v3checklist/, async (msg) => {
+      const chatId = msg.chat.id;
+      try {
+        await this.bot!.sendMessage(chatId, '_Running V3 checklist evaluation..._', { parse_mode: 'Markdown' });
+        const report = await v3ChecklistAutomation.forceReport();
+        // forceReport already sends via the registered callback,
+        // but also send directly to the requesting chat if different
+        if (chatId.toString() !== appConfig.telegramChatId) {
+          await this.bot!.sendMessage(chatId, report, {
+            parse_mode: 'Markdown',
+            disable_web_page_preview: true,
+          });
+        }
+      } catch (error) {
+        const errorMessage = error instanceof Error ? error.message : 'Unknown error';
+        logger.error({ error, chatId }, 'Failed to run V3 checklist');
+        await this.bot!.sendMessage(chatId, `V3 checklist failed: ${errorMessage}`);
       }
     });
 

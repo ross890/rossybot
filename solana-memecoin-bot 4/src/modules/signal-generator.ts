@@ -1688,11 +1688,11 @@ export class SignalGenerator {
       return SignalGenerator.EVAL_RESULTS.DISCOVERY_FAILED;
     }
 
-    // v3 HARD GATE: ATH entry for mature tokens
-    // Buying a mature memecoin at ATH is reliably the worst entry.
-    // Token age > 30 min + price within 10% of ATH → BLOCK
-    // Token age ≤ 30 min + near ATH → -10 score penalty (initial price discovery)
-    if (metrics.tokenAge > 30) {
+    // v3 ATH CHECK: Penalize but don't hard-block near-ATH entries.
+    // The previous hard gate was too aggressive — h6Change > 50% catches every
+    // successful memecoin. Changed to score penalty instead of hard block.
+    // Alpha wallet tokens skip this entirely — smart money buying at ATH IS the signal.
+    if (metrics.tokenAge > 60 && !isAlphaSource) {
       try {
         const athPairs = await dexScreenerClient.getTokenPairs(tokenAddress);
         if (athPairs && athPairs.length > 0) {
@@ -1700,12 +1700,11 @@ export class SignalGenerator {
           const h1Change = pair.priceChange?.h1 || 0;
           const h6Change = pair.priceChange?.h6 || 0;
           const h24Change = pair.priceChange?.h24 || 0;
-          // Heuristic: if all timeframes are strongly positive, price is near ATH
-          const isNearATH = (h1Change > 20 && h6Change > 30) ||
-                            (h24Change > 50 && h1Change > 10) ||
-                            (h6Change > 50);
+          // Only block extreme ATH entries: ALL timeframes strongly positive
+          // (was blocking on any single strong timeframe which is too aggressive)
+          const isExtremeATH = h1Change > 40 && h6Change > 80 && h24Change > 100;
 
-          if (isNearATH) {
+          if (isExtremeATH) {
             logger.info({
               tokenAddress: shortAddr,
               ticker: metrics.ticker,
@@ -1713,7 +1712,7 @@ export class SignalGenerator {
               h1Change,
               h6Change,
               h24Change,
-            }, 'EVAL: BLOCKED — mature token at ATH (hard gate)');
+            }, 'EVAL: BLOCKED — mature token at extreme ATH (hard gate)');
             return SignalGenerator.EVAL_RESULTS.DISCOVERY_FAILED;
           }
         }

@@ -268,6 +268,38 @@ const MAX_ONCHAIN_SIGNALS_PER_CYCLE = 3;
 // Cooldown for recently-signaled tokens (skip re-evaluation for 30 min)
 const SIGNAL_COOLDOWN_MS = 30 * 60 * 1000;
 
+// Diagnostic snapshot from last scan cycle
+export interface ScanDiagnostics {
+  timestamp: Date;
+  isRunning: boolean;
+  cycleTimeMs: number;
+  candidates: number;
+  preFilterPassed: number;
+  quickFilterFails: number;
+  surging: number;
+  // Per-filter breakdown
+  safetyBlocked: number;
+  noMetrics: number;
+  screeningFailed: number;
+  scamRejected: number;
+  rugcheckBlocked: number;
+  compoundRugBlocked: number;
+  scoringFailed: number;
+  momentumFailed: number;
+  bundleBlocked: number;
+  tierBlocked: number;
+  discoveryFailed: number;
+  // Outputs
+  signalsGenerated: number;
+  onchainSignals: number;
+  discoverySignals: number;
+  kolValidationSignals: number;
+  // Error tracking
+  lastError: string | null;
+  lastErrorTime: Date | null;
+  consecutiveEmptyCycles: number;
+}
+
 export class SignalGenerator {
   private isRunning = false;
   // Track recently-signaled tokens to skip re-evaluation
@@ -279,6 +311,39 @@ export class SignalGenerator {
 
   // v3: Track source of each candidate for pullback routing & source EV tracking
   private candidateSources: Map<string, string> = new Map();
+
+  // Diagnostics: last cycle state for /diagnostics command
+  private _diagnostics: ScanDiagnostics = {
+    timestamp: new Date(0),
+    isRunning: false,
+    cycleTimeMs: 0,
+    candidates: 0,
+    preFilterPassed: 0,
+    quickFilterFails: 0,
+    surging: 0,
+    safetyBlocked: 0,
+    noMetrics: 0,
+    screeningFailed: 0,
+    scamRejected: 0,
+    rugcheckBlocked: 0,
+    compoundRugBlocked: 0,
+    scoringFailed: 0,
+    momentumFailed: 0,
+    bundleBlocked: 0,
+    tierBlocked: 0,
+    discoveryFailed: 0,
+    signalsGenerated: 0,
+    onchainSignals: 0,
+    discoverySignals: 0,
+    kolValidationSignals: 0,
+    lastError: null,
+    lastErrorTime: null,
+    consecutiveEmptyCycles: 0,
+  };
+
+  getDiagnostics(): ScanDiagnostics {
+    return { ...this._diagnostics, isRunning: this.isRunning };
+  }
   
   /**
    * Initialize the signal generator
@@ -618,6 +683,39 @@ export class SignalGenerator {
 
       // Log scan cycle metrics for performance tracking
       const cycleTimeMs = Date.now() - cycleStartTime;
+      const totalSignalsSent = signalsGenerated + onchainSignals + discoverySignals + kolValidationSignals;
+
+      // Update diagnostics snapshot
+      this._diagnostics = {
+        timestamp: new Date(),
+        isRunning: this.isRunning,
+        cycleTimeMs,
+        candidates: candidates.length,
+        preFilterPassed: preFiltered.length,
+        quickFilterFails,
+        surging: surgeTokens.length,
+        safetyBlocked,
+        noMetrics,
+        screeningFailed,
+        scamRejected,
+        rugcheckBlocked,
+        compoundRugBlocked,
+        scoringFailed,
+        momentumFailed,
+        bundleBlocked,
+        tierBlocked,
+        discoveryFailed,
+        signalsGenerated,
+        onchainSignals,
+        discoverySignals,
+        kolValidationSignals,
+        lastError: this._diagnostics.lastError,
+        lastErrorTime: this._diagnostics.lastErrorTime,
+        consecutiveEmptyCycles: totalSignalsSent === 0
+          ? this._diagnostics.consecutiveEmptyCycles + 1
+          : 0,
+      };
+
       await performanceLogger.logScanCycle({
         totalCandidates: candidates.length,
         preFilterPassed: preFiltered.length,
@@ -633,6 +731,9 @@ export class SignalGenerator {
         cycleTimeMs,
       }).catch(err => logger.debug({ err }, 'Failed to log scan cycle metrics'));
     } catch (error) {
+      // Capture error in diagnostics
+      this._diagnostics.lastError = error instanceof Error ? error.message : String(error);
+      this._diagnostics.lastErrorTime = new Date();
       logger.error({ error }, 'Error in scan cycle');
       await performanceLogger.logError('SYSTEM', 'Scan cycle error', error).catch(() => {});
     }

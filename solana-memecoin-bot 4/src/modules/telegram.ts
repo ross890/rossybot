@@ -150,6 +150,13 @@ export class TelegramAlertBot {
   // State tracking for conversational threshold adjustment
   private thresholdAdjustmentState: Map<number, ThresholdAdjustmentState> = new Map();
 
+  // Diagnostics callback — set from index.ts to avoid circular deps
+  private diagnosticsGetter: (() => any) | null = null;
+
+  setDiagnosticsGetter(getter: () => any): void {
+    this.diagnosticsGetter = getter;
+  }
+
   constructor() {
     this.chatId = appConfig.telegramChatId;
   }
@@ -501,6 +508,7 @@ export class TelegramAlertBot {
       { command: 'devstats', description: 'Dev stats: /devstats <wallet>' },
       { command: 'trending', description: 'Trending ticker scan' },
       { command: 'v3checklist', description: 'V3 go-live milestone status' },
+      { command: 'diagnostics', description: 'Signal pipeline health check' },
       { command: 'help', description: 'Show all commands' },
     ];
 
@@ -957,6 +965,124 @@ export class TelegramAlertBot {
         const errorMessage = error instanceof Error ? error.message : 'Unknown error';
         logger.error({ error, chatId }, 'Failed to run V3 checklist');
         await this.bot!.sendMessage(chatId, `V3 checklist failed: ${errorMessage}`);
+      }
+    });
+
+    // /diagnostics command - Signal pipeline health check
+    this.bot.onText(/\/diagnostics/, async (msg) => {
+      const chatId = msg.chat.id;
+      try {
+        // Get scan cycle diagnostics from signal generator
+        const diag = this.diagnosticsGetter?.();
+
+        // Get rate limit counts from DB
+        let hourlyCount = 0;
+        let dailyCount = 0;
+        try {
+          hourlyCount = await Database.getRecentSignalCount(1);
+          dailyCount = await Database.getRecentSignalCount(24);
+        } catch { /* DB may be unavailable */ }
+
+        // Get pending signal count
+        let pendingSignals = 0;
+        try {
+          const pendResult = await pool.query(
+            `SELECT COUNT(*) as c FROM signal_performance WHERE final_outcome IS NULL OR final_outcome = 'PENDING'`
+          );
+          pendingSignals = parseInt(pendResult.rows[0].c) || 0;
+        } catch { /* table may not exist */ }
+
+        const lines: string[] = [];
+        lines.push('🔍 *SIGNAL PIPELINE DIAGNOSTICS*');
+        lines.push('');
+
+        if (!diag || diag.timestamp.getTime() === 0) {
+          lines.push('⚠️ No scan cycle data yet — generator may not have started');
+        } else {
+          const age = Math.round((Date.now() - diag.timestamp.getTime()) / 1000);
+          const ageStr = age < 60 ? `${age}s ago` : age < 3600 ? `${Math.round(age / 60)}m ago` : `${Math.round(age / 3600)}h ago`;
+
+          lines.push(`*Scan Loop:* ${diag.isRunning ? '✅ RUNNING' : '❌ STOPPED'}`);
+          lines.push(`*Last Cycle:* ${ageStr} (${diag.cycleTimeMs}ms)`);
+          lines.push(`*Empty Cycles:* ${diag.consecutiveEmptyCycles} consecutive`);
+          lines.push('');
+
+          // Pipeline funnel
+          lines.push('*Pipeline Funnel:*');
+          lines.push(`  Candidates found: ${diag.candidates}`);
+          lines.push(`  Pre-filter passed: ${diag.preFilterPassed} (${diag.quickFilterFails} rejected)`);
+          lines.push(`  Surging tokens: ${diag.surging}`);
+          lines.push('');
+
+          // Filter breakdown
+          const totalFiltered = diag.safetyBlocked + diag.noMetrics + diag.screeningFailed
+            + diag.scamRejected + diag.rugcheckBlocked + diag.compoundRugBlocked
+            + diag.scoringFailed + diag.momentumFailed + diag.bundleBlocked
+            + diag.tierBlocked + diag.discoveryFailed;
+
+          if (totalFiltered > 0) {
+            lines.push('*Filter Breakdown:*');
+            if (diag.safetyBlocked > 0) lines.push(`  🛡️ Safety blocked: ${diag.safetyBlocked}`);
+            if (diag.noMetrics > 0) lines.push(`  📉 No metrics: ${diag.noMetrics}`);
+            if (diag.screeningFailed > 0) lines.push(`  📋 Screening failed: ${diag.screeningFailed}`);
+            if (diag.scamRejected > 0) lines.push(`  🚫 Scam rejected: ${diag.scamRejected}`);
+            if (diag.rugcheckBlocked > 0) lines.push(`  ☠️ Rugcheck blocked: ${diag.rugcheckBlocked}`);
+            if (diag.compoundRugBlocked > 0) lines.push(`  ☠️ Compound rug: ${diag.compoundRugBlocked}`);
+            if (diag.bundleBlocked > 0) lines.push(`  📦 Bundle blocked: ${diag.bundleBlocked}`);
+            if (diag.tierBlocked > 0) lines.push(`  📊 Tier blocked: ${diag.tierBlocked}`);
+            if (diag.scoringFailed > 0) lines.push(`  🎯 Below score threshold: ${diag.scoringFailed}`);
+            if (diag.momentumFailed > 0) lines.push(`  📈 Momentum failed: ${diag.momentumFailed}`);
+            if (diag.discoveryFailed > 0) lines.push(`  🔎 Discovery failed: ${diag.discoveryFailed}`);
+          } else {
+            lines.push('*Filter Breakdown:* No tokens reached evaluation');
+          }
+          lines.push('');
+
+          // Signals generated
+          const totalSigs = diag.signalsGenerated + diag.onchainSignals + diag.discoverySignals + diag.kolValidationSignals;
+          lines.push(`*Signals This Cycle:* ${totalSigs}`);
+          if (totalSigs > 0) {
+            if (diag.signalsGenerated > 0) lines.push(`  KOL buy: ${diag.signalsGenerated}`);
+            if (diag.onchainSignals > 0) lines.push(`  On-chain: ${diag.onchainSignals}`);
+            if (diag.discoverySignals > 0) lines.push(`  Discovery: ${diag.discoverySignals}`);
+            if (diag.kolValidationSignals > 0) lines.push(`  KOL validation: ${diag.kolValidationSignals}`);
+          }
+
+          // Error info
+          if (diag.lastError) {
+            const errAge = diag.lastErrorTime
+              ? Math.round((Date.now() - diag.lastErrorTime.getTime()) / 60000)
+              : 0;
+            lines.push('');
+            lines.push(`⚠️ *Last Error:* ${errAge}m ago`);
+            lines.push(`  \`${diag.lastError.slice(0, 100)}\``);
+          }
+        }
+
+        // Rate limits
+        lines.push('');
+        lines.push('*Rate Limits:*');
+        lines.push(`  Hourly: ${hourlyCount}/${RATE_LIMITS.MAX_SIGNALS_PER_HOUR}`);
+        lines.push(`  Daily: ${dailyCount}/${RATE_LIMITS.MAX_SIGNALS_PER_DAY}`);
+        lines.push(`  Pending tracking: ${pendingSignals}`);
+
+        // Uptime
+        if (this.startTime) {
+          const uptimeMs = Date.now() - this.startTime.getTime();
+          const hours = Math.floor(uptimeMs / 3600000);
+          const mins = Math.floor((uptimeMs % 3600000) / 60000);
+          lines.push('');
+          lines.push(`*Bot Uptime:* ${hours}h ${mins}m`);
+        }
+
+        await this.bot!.sendMessage(chatId, lines.join('\n'), {
+          parse_mode: 'Markdown',
+          disable_web_page_preview: true,
+        });
+      } catch (error) {
+        const errorMessage = error instanceof Error ? error.message : 'Unknown error';
+        logger.error({ error, chatId }, 'Failed to run diagnostics');
+        await this.bot!.sendMessage(chatId, `Diagnostics failed: ${errorMessage}`);
       }
     });
 

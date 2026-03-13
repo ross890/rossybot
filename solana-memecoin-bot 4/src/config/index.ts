@@ -36,7 +36,7 @@ const envSchema = z.object({
   MAX_MEMECOIN_PORTFOLIO_PERCENT: z.coerce.number().default(20),
   DEFAULT_POSITION_SIZE_PERCENT: z.coerce.number().default(2),
   MAX_SIGNALS_PER_HOUR: z.coerce.number().default(30),   // For MODERATE signals only; STRONG bypass limits
-  MAX_SIGNALS_PER_DAY: z.coerce.number().default(150),   // For MODERATE signals only; STRONG bypass limits
+  MAX_SIGNALS_PER_DAY: z.coerce.number().default(600),   // Raised from 150→600 — more headroom for rebalanced signal flow
   MIN_SCORE_BUY_SIGNAL: z.coerce.number().default(60),   // EMERGENCY FIX 4: Raised from 55→60 for better differentiation
   MIN_SCORE_WATCH_SIGNAL: z.coerce.number().default(30),
 

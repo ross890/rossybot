@@ -208,8 +208,8 @@ export class TelegramAlertBot {
 
     this.startTime = new Date();
 
-    // Set up command handlers
-    this.setupCommands();
+    // Set up command handlers (await to ensure menu is registered before continuing)
+    await this.setupCommands();
 
     // Initialize performance tracking system
     try {
@@ -485,38 +485,57 @@ export class TelegramAlertBot {
   /**
    * Set up bot commands
    */
-  private setupCommands(): void {
+  private async setupCommands(): Promise<void> {
     if (!this.bot) return;
 
-    // Set up Telegram command menu (appears in chat)
-    // Updated for Mature Token Strategy V2 with new features
-    const SIGNAL_BOT_COMMANDS: TelegramBot.BotCommand[] = [
+    // Unified command menu — single authoritative list for Telegram's command picker.
+    // IMPORTANT: Do NOT call setMyCommands anywhere else (e.g. trading-commands.ts)
+    // or it will overwrite this list and changes will appear to "never take effect".
+    const ALL_BOT_COMMANDS: TelegramBot.BotCommand[] = [
+      // Signal & Performance
       { command: 'status', description: 'Bot status & strategy info' },
       { command: 'stats', description: 'Signal performance dashboard' },
       { command: 'recent', description: 'Recent signals & outcomes' },
       { command: 'daily', description: 'Daily performance report' },
       { command: 'tierperf', description: 'Win rate by signal tier' },
+      { command: 'score_analysis', description: 'Win rate by score brackets' },
+      { command: 'bot_status', description: 'Comprehensive health check' },
+      { command: 'diagnostics', description: 'Signal pipeline health check' },
+
+      // Analysis & Discovery
       { command: 'safety', description: 'Safety check: /safety <token>' },
+      { command: 'devscore', description: 'Dev wallet score analysis' },
+      { command: 'rugcheck', description: 'Run RugCheck safety' },
+      { command: 'trending', description: 'Trending ticker scan' },
       { command: 'thresholds', description: 'View scoring thresholds' },
+      { command: 'set_threshold', description: 'Set threshold: /set_threshold <name> <value>' },
       { command: 'optimize', description: 'Run threshold optimization' },
+
+      // Wallet Tracking
       { command: 'addwallet', description: 'Track wallet: /addwallet <address>' },
       { command: 'wallets', description: 'List tracked wallets' },
       { command: 'removewallet', description: 'Remove tracked wallet' },
+
+      // Dev Tracking
       { command: 'devs', description: 'List tracked pump.fun devs' },
       { command: 'adddev', description: 'Track dev: /adddev <wallet> [alias]' },
       { command: 'removedev', description: 'Remove tracked dev' },
       { command: 'devstats', description: 'Dev stats: /devstats <wallet>' },
-      { command: 'trending', description: 'Trending ticker scan' },
+
+      // System
       { command: 'v3checklist', description: 'V3 go-live milestone status' },
-      { command: 'diagnostics', description: 'Signal pipeline health check' },
+      { command: 'pause', description: 'Pause signal scanning' },
+      { command: 'resume', description: 'Resume signal scanning' },
+      { command: 'portfolio', description: 'Portfolio risk status' },
       { command: 'help', description: 'Show all commands' },
     ];
 
-    this.bot.setMyCommands(SIGNAL_BOT_COMMANDS).then(() => {
-      logger.info('Bot command menu set up successfully');
-    }).catch((error) => {
+    try {
+      await this.bot.setMyCommands(ALL_BOT_COMMANDS);
+      logger.info(`Bot command menu set (${ALL_BOT_COMMANDS.length} commands)`);
+    } catch (error) {
       logger.error({ error }, 'Failed to set bot commands');
-    });
+    }
 
     // /start command
     this.bot.onText(/\/start/, async (msg) => {
@@ -563,13 +582,17 @@ export class TelegramAlertBot {
         '/stats - Performance dashboard\n' +
         '/recent - Recent signals & outcomes\n' +
         '/daily - Daily performance report\n' +
-        '/tierperf - Win rate by tier\n\n' +
+        '/tierperf - Win rate by tier\n' +
+        '/score\\_analysis - Win rate by score bracket\n' +
+        '/bot\\_status - Comprehensive health check\n' +
+        '/diagnostics - Signal pipeline health\n\n' +
         '*Analysis:*\n' +
         '/safety <token> - Safety check\n' +
         '/devscore <token> - Dev wallet score\n' +
         '/rugcheck <token> - RugCheck safety\n' +
         '/trending - Trending ticker scan\n' +
         '/thresholds - Scoring thresholds\n' +
+        '/set\\_threshold <name> <val> - Adjust threshold\n' +
         '/optimize - Run threshold optimization\n\n' +
         '*Wallet Tracking:*\n' +
         '/addwallet <addr> - Track smart wallet\n' +
@@ -580,6 +603,11 @@ export class TelegramAlertBot {
         '/adddev <wallet> [alias] - Track dev\n' +
         '/removedev <wallet> - Remove dev\n' +
         '/devstats <wallet> - Dev performance\n\n' +
+        '*System:*\n' +
+        '/pause - Pause signal scanning\n' +
+        '/resume - Resume signal scanning\n' +
+        '/portfolio - Portfolio risk status\n' +
+        '/v3checklist - V3 go-live milestones\n\n' +
         '_Signals are auto-delivered. DYOR._',
         { parse_mode: 'Markdown' }
       );

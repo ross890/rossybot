@@ -78,15 +78,13 @@ export class TradingCommands {
    * Initialize trading commands
    */
   async initialize(): Promise<void> {
-    // Set up bot commands menu
-    try {
-      await this.bot.setMyCommands(BOT_COMMANDS);
-      logger.info('Bot command menu set up successfully');
-    } catch (error) {
-      logger.error({ error }, 'Failed to set bot commands');
-    }
+    // NOTE: Do NOT call setMyCommands here — the unified command menu is
+    // registered in telegram.ts setupCommands(). Calling it here was
+    // overwriting the main menu and causing command menu changes to
+    // silently never take effect.
 
-    // Register command handlers
+    // Register trading-specific command handlers (handlers for commands
+    // already registered in telegram.ts are skipped to avoid double responses)
     this.registerCommands();
 
     // Register callback query handler for confirmation buttons
@@ -102,12 +100,11 @@ export class TradingCommands {
    * Register all command handlers
    */
   private registerCommands(): void {
-    // ============ POSITION COMMANDS ============
+    // NOTE: Handlers for /positions, /stats, /thresholds are already
+    // registered in telegram.ts — do NOT duplicate them here or users
+    // will get double responses for every command.
 
-    // /positions - View all open positions
-    this.bot.onText(/\/positions/, async (msg) => {
-      await this.handlePositions(msg.chat.id);
-    });
+    // ============ POSITION COMMANDS (trading-only) ============
 
     // /close <token> - Close a specific position
     this.bot.onText(/\/close\s+(\S+)/, async (msg, match) => {
@@ -187,21 +184,11 @@ export class TradingCommands {
       }
     });
 
-    // ============ STATS COMMANDS ============
-
-    // /stats
-    this.bot.onText(/\/stats/, async (msg) => {
-      await this.handleStats(msg.chat.id);
-    });
+    // ============ STATS COMMANDS (trading-only) ============
 
     // /history
     this.bot.onText(/\/history/, async (msg) => {
       await this.handleHistory(msg.chat.id);
-    });
-
-    // /thresholds - View current signal thresholds
-    this.bot.onText(/\/thresholds/, async (msg) => {
-      await this.handleThresholds(msg.chat.id);
     });
 
     // /reset_thresholds - Reset to defaults

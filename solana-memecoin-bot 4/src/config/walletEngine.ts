@@ -1,0 +1,82 @@
+// ===========================================
+// ALPHA WALLET ENGINE CONFIGURATION
+// ===========================================
+
+export const WALLET_ENGINE_CONFIG = {
+  // ============ DISCOVERY ============
+  GMGN_SCAN_INTERVAL_HOURS: 6,
+  MAX_CANDIDATES: 100,
+  CANDIDATE_POLL_INTERVAL_MINUTES: 5,
+  CANDIDATE_MAX_AGE_DAYS: 30,
+  COOLDOWN_DAYS: 60,
+
+  // ============ GMGN FILTERS ============
+  GMGN_FILTERS: {
+    minPnl30d: 0,
+    minTotalTrades: 50,
+    maxTotalTrades: 500,
+    minWinRate: 0.30,
+    maxWinRate: 0.70,
+    maxAvgEntryMcap: 500_000,
+    minAvgHoldTimeMinutes: 5,
+    maxAvgHoldTimeMinutes: 1440,
+    minDistinctTokens: 10,
+    maxSingleTokenPnlPercent: 0.50,
+  },
+
+  // ============ GRADUATION ============
+  MIN_OBSERVED_TRADES: 10,
+  MIN_OBSERVED_EV: 0,
+  MIN_OBSERVED_WIN_RATE: 0.25,
+  MAX_OBSERVED_AVG_MCAP: 500_000,
+  MIN_OBSERVED_AVG_HOLD_MINUTES: 5,
+  FAST_TRACK_WINNER_SCANS: 2,
+  MAX_OBSERVED_TRADES_FOR_PURGE: 30,
+
+  // ============ PERFORMANCE MANAGEMENT ============
+  MIN_SIGNALS_FOR_WEIGHT_ADJUST: 10,
+  WEIGHT_MIN: 0.5,
+  WEIGHT_MAX: 2.0,
+  WEIGHT_INCREASE_STEP: 0.1,
+  WEIGHT_DECREASE_STEP: 0.15,
+  PROBATION_DURATION_DAYS: 14,
+  LOSING_STREAK_THRESHOLD: 5,
+
+  // Performance tiers
+  TIER1_MIN_EV: 20,
+  TIER1_MIN_WIN_RATE: 0.30,
+  TIER1_MAX_WEIGHT: 2.0,
+
+  TIER2_MIN_EV: 5,
+  TIER2_MIN_WIN_RATE: 0.25,
+  TIER2_MAX_WEIGHT: 1.5,
+
+  TIER3_MAX_EV: 0,
+  TIER3_MIN_SIGNALS: 20,
+
+  TIER4_MAX_EV: -15,
+  TIER4_MIN_SIGNALS: 30,
+
+  // ============ ON-CHAIN DISCOVERY ============
+  ONCHAIN_MIN_WALLET_AGE_DAYS: 7,
+  ONCHAIN_MIN_SWAP_TRANSACTIONS: 20,
+  ONCHAIN_EARLY_BUYER_WINDOW_MINUTES: 5,
+  ONCHAIN_EARLY_TRANSACTIONS_TO_SCAN: 50,
+
+  // ============ CO-TRADER DISCOVERY ============
+  CO_TRADE_WINDOW_MINUTES: 10,
+  CO_TRADE_MIN_OCCURRENCES: 3,
+  CO_TRADE_TRANSACTIONS_TO_SCAN: 20,
+
+  // ============ RATE LIMITING ============
+  MAX_HELIUS_CALLS_PER_MINUTE_WALLETS: 10,
+
+  // ============ OBSERVATION ============
+  OBSERVATION_MCAP_MIN: 10_000,
+  OBSERVATION_MCAP_MAX: 1_000_000,
+  OBSERVATION_TRACK_HOURS: 48,
+} as const;
+
+export type WalletEngineConfig = typeof WALLET_ENGINE_CONFIG;
+
+export default WALLET_ENGINE_CONFIG;

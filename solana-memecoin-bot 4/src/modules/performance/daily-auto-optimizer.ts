@@ -249,6 +249,17 @@ export class DailyAutoOptimizer {
       const message = this.formatOptimizationReport(report) + kellyReportText;
       await this.sendTelegramMessage(message);
 
+      // Step 9: Run Alpha Wallet Engine daily review
+      try {
+        const { walletPerformanceManager } = await import('../../wallets/walletPerformance.js');
+        await walletPerformanceManager.runDailyReview();
+        const walletReport = await walletPerformanceManager.formatDailyReport();
+        await this.sendTelegramMessage(walletReport);
+        logger.info('Wallet engine daily review complete');
+      } catch (walletError) {
+        logger.warn({ walletError }, 'Wallet engine daily review failed (non-critical)');
+      }
+
       logger.info({
         winRate: stats.winRate,
         changesApplied: changesApplied.length,

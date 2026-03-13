@@ -113,6 +113,15 @@ function printStartupDiagnostics(): void {
   logger.info(`   Max Top10: ${appConfig.screening.maxTop10Concentration}% | Min Liquidity: $${appConfig.screening.minLiquidityPool.toLocaleString()}`);
   logger.info(`   Min Token Age: ${appConfig.screening.minTokenAgeMinutes} minutes`);
 
+  // Wallet Engine
+  logger.info('');
+  logger.info('ALPHA WALLET ENGINE');
+  logger.info('   GMGN Discovery: ENABLED (6h scan interval)');
+  logger.info('   Wallet Graduation: ENABLED (shadow tracking + auto-graduate)');
+  logger.info('   On-Chain Discovery: ENABLED (triggers on BIG_WIN/MASSIVE_WIN)');
+  logger.info('   Co-Trader Discovery: ENABLED (triggers on alpha signals)');
+  logger.info('   Performance Review: ENABLED (daily at 6 AM AEDT)');
+
   logger.info('');
   logger.info(divider);
   logger.info('              BOT READY - STARTING SCAN LOOP');
@@ -271,6 +280,16 @@ async function main(): Promise<void> {
     devStatsUpdater.stop();
     crossTokenRotationDetector.stop();
     regimeDetector.stop();
+
+    // Stop wallet engine modules
+    try {
+      const { gmgnDiscovery, walletGraduation } = await import('./wallets/index.js');
+      gmgnDiscovery.stop();
+      walletGraduation.stop();
+    } catch {
+      // Non-critical
+    }
+
     await telegramBot.stop();
     await pool.end();
 

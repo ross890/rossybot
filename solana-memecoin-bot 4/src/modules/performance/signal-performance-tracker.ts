@@ -920,6 +920,58 @@ export class SignalPerformanceTracker {
         exitReason,
         partialExitCount: partialExits.length,
       }, 'Signal outcome finalized (canonical)');
+
+      // === WALLET ENGINE HOOKS ===
+
+      // 1. Trigger on-chain discovery on big winners (BIG_WIN or MASSIVE_WIN)
+      if (outcomeCategory === 'BIG_WIN' || outcomeCategory === 'MASSIVE_WIN') {
+        try {
+          const signalRow = await pool.query(
+            'SELECT token_address, signal_time FROM signal_performance WHERE signal_id = $1',
+            [signalId]
+          );
+          if (signalRow.rows.length > 0) {
+            const { token_address, signal_time } = signalRow.rows[0];
+            const { onchainDiscovery } = await import('../../wallets/onchainDiscovery.js');
+            onchainDiscovery.onBigWinner(token_address, signal_time, realizedReturnPercent).catch(err => {
+              logger.debug({ err }, 'OnchainDiscovery hook error (non-critical)');
+            });
+          }
+        } catch (hookError) {
+          logger.debug({ hookError }, 'Wallet engine onBigWinner hook error');
+        }
+      }
+
+      // 2. Attribute signal result to engine wallet (if applicable)
+      try {
+        const signalRow = await pool.query(
+          'SELECT token_address, signal_type FROM signal_performance WHERE signal_id = $1',
+          [signalId]
+        );
+        if (signalRow.rows.length > 0 && signalRow.rows[0].signal_type === 'ALPHA_WALLET') {
+          const { walletEngine: engine } = await import('../../wallets/walletEngine.js');
+          const { Database: Db } = await import('../../utils/database.js');
+
+          // Find which engine wallet triggered this signal
+          const engineWallets = await engine.getActiveWallets();
+          for (const ew of engineWallets) {
+            // Check if this wallet produced a signal for this token recently
+            const recentSignals = await Db.getEngineSignalsForWallet(ew.id, 7);
+            const match = recentSignals.find((s: any) =>
+              s.token_address === signalRow.rows[0].token_address && !s.realized_return
+            );
+            if (match) {
+              await Db.updateObservation(match.id, {
+                returnPct: realizedReturnPercent,
+                outcome,
+              });
+              break;
+            }
+          }
+        }
+      } catch (hookError) {
+        logger.debug({ hookError }, 'Wallet engine signal attribution hook error');
+      }
     } catch (error) {
       logger.error({ error, signalId }, 'Failed to finalize signal (canonical)');
     }

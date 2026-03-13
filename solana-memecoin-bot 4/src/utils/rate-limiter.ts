@@ -299,3 +299,14 @@ export const solanaRpcRateLimiter = new RateLimiter({
   maxBackoff: 60000,
   maxRetries: 3,
 });
+
+// Twitter API v2: 180 requests per 15-min window (Basic tier)
+// = 12 per minute. Use conservative limit with retries.
+export const twitterRateLimiter = new RateLimiter({
+  serviceName: 'twitter',
+  maxRequestsPerMinute: 10,
+  minDelayBetweenRequests: 6000,
+  backoffMultiplier: 2,
+  maxBackoff: 120000,
+  maxRetries: 3,
+});

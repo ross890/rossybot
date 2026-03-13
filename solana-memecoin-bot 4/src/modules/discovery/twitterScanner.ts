@@ -7,6 +7,7 @@
 
 import { logger } from '../../utils/logger.js';
 import { pool } from '../../utils/database.js';
+import { twitterRateLimiter } from '../../utils/rate-limiter.js';
 
 // ============ TYPES ============
 
@@ -288,44 +289,79 @@ export class TwitterScanner {
     }
   }
 
+  // Track consecutive failures to back off when API is persistently broken
+  private consecutiveFailures = 0;
+  private static readonly MAX_CONSECUTIVE_FAILURES = 5;
+  private static readonly BACKOFF_MULTIPLIER_MS = 60_000; // extra 1 min per failure
+
   /**
    * Scan Twitter API for cashtag and address mentions.
    * Only runs if TWITTER_BEARER_TOKEN is configured.
+   * Uses rate limiter with exponential backoff and retry logic.
    */
   private async scanTwitter(): Promise<void> {
     if (!this.config.twitterEnabled || !this.config.twitterBearerToken) return;
 
+    // Circuit breaker: if too many consecutive failures, skip this cycle
+    // and slowly recover (decrement counter so it eventually retries)
+    if (this.consecutiveFailures >= TwitterScanner.MAX_CONSECUTIVE_FAILURES) {
+      this.consecutiveFailures--;
+      logger.warn(
+        { consecutiveFailures: this.consecutiveFailures + 1 },
+        'Twitter API circuit breaker active, skipping scan cycle',
+      );
+      return;
+    }
+
+    const bearerToken = this.config.twitterBearerToken;
+
     try {
-      // Twitter API v2 recent search
-      // Search for Solana contract addresses in tweets
-      const query = 'solana OR $SOL lang:en -is:retweet';
-      const url = `https://api.twitter.com/2/tweets/search/recent?query=${encodeURIComponent(query)}&max_results=100&tweet.fields=author_id,created_at,public_metrics`;
+      const tweets = await twitterRateLimiter.execute(async () => {
+        const query = 'solana OR $SOL lang:en -is:retweet';
+        const url = `https://api.twitter.com/2/tweets/search/recent?query=${encodeURIComponent(query)}&max_results=100&tweet.fields=author_id,created_at,public_metrics`;
 
-      const response = await fetch(url, {
-        headers: {
-          'Authorization': `Bearer ${this.config.twitterBearerToken}`,
-        },
-        signal: AbortSignal.timeout(15000),
-      });
+        const response = await fetch(url, {
+          headers: { 'Authorization': `Bearer ${bearerToken}` },
+          signal: AbortSignal.timeout(15000),
+        });
 
-      if (!response.ok) {
-        if (response.status === 429) {
-          logger.debug('Twitter API rate limited, will retry next cycle');
-          return;
+        if (!response.ok) {
+          // Read body for diagnostic info
+          let errorBody = '';
+          try { errorBody = await response.text(); } catch { /* ignore */ }
+
+          if (response.status === 429) {
+            const retryAfter = response.headers.get('retry-after');
+            logger.debug(
+              { retryAfter },
+              'Twitter API rate limited (429), rate limiter will handle backoff',
+            );
+            // Throw with response-like shape so RateLimiter recognizes 429
+            const err: any = new Error(`Twitter API 429`);
+            err.response = { status: 429 };
+            throw err;
+          }
+
+          logger.warn(
+            { status: response.status, body: errorBody.slice(0, 500) },
+            'Twitter API error',
+          );
+          const err: any = new Error(`Twitter API ${response.status}`);
+          err.response = { status: response.status };
+          throw err;
         }
-        logger.warn({ status: response.status }, 'Twitter API error');
-        return;
-      }
 
-      const data = await response.json() as any;
-      const tweets = data.data || [];
+        const data = await response.json() as any;
+        return (data.data || []) as any[];
+      }, 'tweets/search/recent');
+
+      // Success — reset failure counter
+      this.consecutiveFailures = 0;
 
       for (const tweet of tweets) {
-        // Extract Solana addresses from tweet text
         const addresses = tweet.text.match(SOLANA_ADDRESS_REGEX) || [];
 
         for (const address of addresses) {
-          // Skip common non-token addresses (SOL, USDC, etc.)
           if (this.isCommonAddress(address)) continue;
 
           const isKol = this.trackedKolHandles.has(tweet.author_id);
@@ -342,8 +378,15 @@ export class TwitterScanner {
       }
 
       logger.debug({ tweetCount: tweets.length }, 'Twitter scan complete');
-    } catch (error) {
-      logger.error({ error }, 'Twitter scan failed');
+    } catch (error: any) {
+      this.consecutiveFailures++;
+      logger.error(
+        {
+          error: error?.message || error,
+          consecutiveFailures: this.consecutiveFailures,
+        },
+        'Twitter scan failed',
+      );
     }
   }
 

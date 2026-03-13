@@ -82,14 +82,16 @@ export interface OnChainScore {
 // adding no discrimination. Converted to a gate (pass/fail in signal-generator)
 // so its weight here is redistributed to factors with actual predictive power.
 //
-// Momentum demoted to 5% — it's anti-predictive as entry signal,
-// but kept non-zero so the optimizer can still learn from the data.
+// v3 SCORING ALIGNMENT: Momentum REMOVED from composite score.
+// Correlation data: momentum = -0.04 (ANTI-PREDICTIVE at entry).
+// Momentum is still calculated and logged for analysis, but gets 0% weight.
+// Its 5% redistributed to marketStructure (holder count = strongest predictor).
 const WEIGHTS = {
-  momentum: 0.05,           // 5% - DEMOTED: anti-predictive, high momentum = late entry
+  momentum: 0.00,           // 0% - REMOVED: anti-predictive (-0.04 correlation)
   safety: 0.30,             // 30% - loss prevention edge
   bundleSafety: 0.25,       // 25% - insider detection critical
-  marketStructure: 0.35,    // 35% - PROMOTED: holder count (+0.37) + liquidity sweet spot
-  timing: 0.05,             // 5% - DEMOTED: inflated scores equally, no discrimination
+  marketStructure: 0.40,    // 40% - PROMOTED: holder count (+0.37) is strongest predictor
+  timing: 0.05,             // 5% - minimal, timing handled by signal-generator routing
 } as const;
 
 // ============ THRESHOLDS ============
@@ -336,43 +338,44 @@ export class OnChainScoringEngine {
     }
     // Below 50% of minimum liquidity = 0 points (too risky to trade)
 
-    // Holder count (0-40 points) - INCREASED from 25 (strongest positive correlation)
-    if (metrics.holderCount >= THRESHOLDS.IDEAL_HOLDER_COUNT) {
-      score += 40;
-    } else if (metrics.holderCount >= 300) {
-      score += 35;
-    } else if (metrics.holderCount >= 150) {
-      score += 28;
-    } else if (metrics.holderCount >= 75) {
-      score += 20;
-    } else if (metrics.holderCount >= THRESHOLDS.MIN_HOLDER_COUNT) {
-      score += 12;
-    } else if (metrics.holderCount >= 10) {
-      score += 5;
+    // v3: Holder count (0-40 points) — CONTINUOUS LOG CURVE
+    // Removes cliff effects in the strongest predictor (+0.37 correlation).
+    // holderScore: 10→0, 20→6, 50→14, 100→20, 200→26, 500→34, 1000→40
+    if (metrics.holderCount < 10) {
+      score += 0;
+    } else {
+      score += Math.min(40, Math.round(Math.log10(metrics.holderCount / 10) * 20));
     }
 
-    // Holder distribution (0-25 points)
+    // v3: Holder distribution (0-15 points) — REDUCED from 25
+    // Less predictive in micro-caps where concentration is naturally high.
     if (metrics.top10Concentration <= THRESHOLDS.IDEAL_TOP10_CONCENTRATION) {
-      score += 25;
+      score += 15;
     } else if (metrics.top10Concentration <= 50) {
-      score += 20;
-    } else if (metrics.top10Concentration <= THRESHOLDS.MAX_TOP10_CONCENTRATION) {
       score += 12;
+    } else if (metrics.top10Concentration <= THRESHOLDS.MAX_TOP10_CONCENTRATION) {
+      score += 7;
     } else {
-      // Too concentrated - risky
       score += 0;
     }
 
-    // Volume/MCap ratio (0-15 points)
-    if (metrics.volumeMarketCapRatio >= 0.5) {
-      score += 15;
-    } else if (metrics.volumeMarketCapRatio >= 0.2) {
+    // v3: Volume/MCap ratio (0-25 points) — EXTENDED from 15
+    // Extreme velocity is a strong continuation signal, uncapped.
+    const ratio = metrics.volumeMarketCapRatio;
+    if (ratio >= 2.0) {
+      score += 25;
+    } else if (ratio >= 1.0) {
+      score += 20;
+    } else if (ratio >= 0.5) {
+      score += 16;
+    } else if (ratio >= 0.2) {
       score += 12;
-    } else if (metrics.volumeMarketCapRatio >= 0.1) {
+    } else if (ratio >= 0.1) {
       score += 8;
-    } else if (metrics.volumeMarketCapRatio >= 0.05) {
+    } else if (ratio >= 0.05) {
       score += 4;
     }
+    // Sub-component total: Liquidity(20) + Holders(40) + Distribution(15) + Vol/MCap(25) = 100
 
     return Math.max(0, Math.min(100, score));
   }

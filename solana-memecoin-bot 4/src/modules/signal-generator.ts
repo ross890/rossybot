@@ -38,6 +38,9 @@ import { signalPerformanceTracker, thresholdOptimizer, performanceLogger } from 
 // Auto-trading integration
 import { autoTrader } from './trading/index.js';
 
+// Canonical exit strategy (v3 alignment)
+import { CANONICAL_EXIT_PARAMS, scoreToGrade, getInitialStopLoss } from './trading/exitStrategy.js';
+
 // Multi-source token discovery
 import { discoveryEngine, firstBuyerQuality, walletClustering, rotationDetector, bondingVelocityTracker } from './discovery/index.js';
 import { gmgnClient } from './gmgn-client.js';
@@ -1082,8 +1085,8 @@ export class SignalGenerator {
     // Social links (Twitter, Telegram, etc.) indicate project legitimacy
     const socialScore = this.calculateSocialScore(dexScreenerInfo);
 
-    // Add social score as a bonus to the total (max +25 points)
-    const socialBonus = Math.min(25, socialScore.score);
+    // v3: Social score is now ±15 (was 0-25). Can be negative for fake socials.
+    const socialBonus = Math.max(-7, Math.min(15, socialScore.score));
 
     // Surge detection bonus — tokens with active micro-surges get a score boost
     // This helps surging tokens clear thresholds faster (catching the ignition, not the peak)
@@ -1355,7 +1358,7 @@ export class SignalGenerator {
     // Lowered effective minimums:
     // - Learning mode: 35 (from 40) — let borderline tokens through for ML training
     // - Production mode: 40 (from MIN_ONCHAIN_SCORE which was 40-50)
-    // The social bonus (+0-25) and surge bonus (+0-15) can push tokens over the line
+    // The social bonus (-7 to +15) and surge bonus (+0-15) can push tokens over the line
     const effectiveMinScore = isLearningMode ? 35 : Math.min(40, MIN_ONCHAIN_SCORE);
 
     // Use adjustedTotal (which includes social verification bonus) for threshold comparison
@@ -1389,6 +1392,53 @@ export class SignalGenerator {
       momentumAnalyzer.analyze(tokenAddress),
     ]);
     const momentumScore = momentumData ? momentumAnalyzer.calculateScore(momentumData) : null;
+
+    // v3 HARD GATE: CRITICAL bundle risk = hard rejection
+    // 25% of composite score comes from bundle safety, but CRITICAL-level coordinated
+    // buying is so toxic it should block outright, not just reduce score.
+    if (bundleAnalysis.riskLevel === 'CRITICAL' && bundleAnalysis.bundleConfidence === 'HIGH') {
+      logger.info({
+        tokenAddress: shortAddr,
+        ticker: metrics.ticker,
+        bundleRiskScore: bundleAnalysis.riskScore,
+        flags: bundleAnalysis.flags,
+      }, 'EVAL: BLOCKED by CRITICAL bundle risk (hard gate)');
+      return SignalGenerator.EVAL_RESULTS.DISCOVERY_FAILED;
+    }
+
+    // v3 HARD GATE: ATH entry for mature tokens
+    // Buying a mature memecoin at ATH is reliably the worst entry.
+    // Token age > 30 min + price within 10% of ATH → BLOCK
+    // Token age ≤ 30 min + near ATH → -10 score penalty (initial price discovery)
+    if (metrics.tokenAge > 30) {
+      try {
+        const athPairs = await dexScreenerClient.getTokenPairs(tokenAddress);
+        if (athPairs && athPairs.length > 0) {
+          const pair = athPairs[0];
+          const h1Change = pair.priceChange?.h1 || 0;
+          const h6Change = pair.priceChange?.h6 || 0;
+          const h24Change = pair.priceChange?.h24 || 0;
+          // Heuristic: if all timeframes are strongly positive, price is near ATH
+          const isNearATH = (h1Change > 20 && h6Change > 30) ||
+                            (h24Change > 50 && h1Change > 10) ||
+                            (h6Change > 50);
+
+          if (isNearATH) {
+            logger.info({
+              tokenAddress: shortAddr,
+              ticker: metrics.ticker,
+              tokenAge: metrics.tokenAge,
+              h1Change,
+              h6Change,
+              h24Change,
+            }, 'EVAL: BLOCKED — mature token at ATH (hard gate)');
+            return SignalGenerator.EVAL_RESULTS.DISCOVERY_FAILED;
+          }
+        }
+      } catch {
+        // Non-critical — skip ATH check if DexScreener fails
+      }
+    }
 
     // Step 4.5: TRACK-SPECIFIC REQUIREMENTS
     // Different requirements for PROVEN_RUNNER vs EARLY_QUALITY
@@ -2158,18 +2208,18 @@ export class SignalGenerator {
       },
       positionSizePercent: Math.round(positionSize * 10) / 10,
       stopLoss: {
-        price: price * 0.7,
-        percent: 30,
+        price: getInitialStopLoss(price, scoreToGrade(score.compositeScore)),
+        percent: Math.abs(CANONICAL_EXIT_PARAMS.STOP_LOSS_BY_GRADE[scoreToGrade(score.compositeScore)] * 100),
       },
       takeProfit1: {
-        price: price * 1.5,
-        percent: 50,
+        price: price * (1 + CANONICAL_EXIT_PARAMS.TP1_PERCENT),
+        percent: CANONICAL_EXIT_PARAMS.TP1_PERCENT * 100,
       },
       takeProfit2: {
-        price: price * 2.5,
-        percent: 150,
+        price: price * (1 + CANONICAL_EXIT_PARAMS.TP2_PERCENT),
+        percent: CANONICAL_EXIT_PARAMS.TP2_PERCENT * 100,
       },
-      timeLimitHours: 72,
+      timeLimitHours: CANONICAL_EXIT_PARAMS.MAX_HOLD_HOURS,
 
       generatedAt: new Date(),
       signalType: SignalType.ALPHA_WALLET,
@@ -2333,10 +2383,10 @@ export class SignalGenerator {
   /**
    * Calculate social verification score from DexScreener info
    *
-   * Social links (Twitter, Telegram, Website) indicate project legitimacy.
-   * Scam tokens rarely have established social presence.
+   * v3 RECALIBRATED: Converted from 0-25 bonus to ±15 factor with negative signals.
+   * Bought followers and template websites are $5 — fake socials now penalize instead of boost.
    *
-   * Returns a bonus score (0-15 points) to add to the on-chain score.
+   * NET RANGE: -7 to +15 (was 0 to +25)
    */
   private calculateSocialScore(dexScreenerInfo: DexScreenerTokenInfo): {
     score: number;
@@ -2345,50 +2395,64 @@ export class SignalGenerator {
     const breakdown: string[] = [];
     let score = 0;
 
-    // Twitter verification is strongest signal (most effort to maintain)
+    // Twitter: +5 (reduced from +7)
     if (dexScreenerInfo.socialLinks.twitter) {
-      score += 7;
-      breakdown.push('Twitter: +7');
-    }
-
-    // Telegram shows active community
-    if (dexScreenerInfo.socialLinks.telegram) {
-      score += 4;
-      breakdown.push('Telegram: +4');
-    }
-
-    // Website shows commitment to project
-    if (dexScreenerInfo.socialLinks.website) {
-      score += 3;
-      breakdown.push('Website: +3');
-    }
-
-    // Discord is a bonus (less common for memecoins)
-    if (dexScreenerInfo.socialLinks.discord) {
-      score += 1;
-      breakdown.push('Discord: +1');
-    }
-
-    // Claimed DexScreener profile = owner manages the page (legitimacy signal)
-    if (dexScreenerInfo.hasClaimedProfile) {
       score += 5;
-      breakdown.push('Profile Claimed: +5');
+      breakdown.push('Twitter: +5');
     }
 
-    // Active boosts = paid advertising (marketing spend, but also common for rugs)
-    // Reduced from +3 to +1 per boost — boosts alone are NOT a trust signal
-    // Rugs frequently boost to attract victims
-    if (dexScreenerInfo.isBoosted) {
-      const boostPoints = Math.min(2, dexScreenerInfo.boostCount);
-      score += boostPoints;
-      breakdown.push(`Boosted (${dexScreenerInfo.boostCount}x): +${boostPoints}`);
+    // DexScreener profile claimed: +4 (reduced from +5)
+    if (dexScreenerInfo.hasClaimedProfile) {
+      score += 4;
+      breakdown.push('Profile Claimed: +4');
     }
 
-    // Has description shows effort put into project
-    if (dexScreenerInfo.description && dexScreenerInfo.description.length > 20) {
+    // Telegram: +3 (reduced from +4)
+    if (dexScreenerInfo.socialLinks.telegram) {
+      score += 3;
+      breakdown.push('Telegram: +3');
+    }
+
+    // Website: +2 (reduced from +3)
+    if (dexScreenerInfo.socialLinks.website) {
       score += 2;
-      breakdown.push('Description: +2');
+      breakdown.push('Website: +2');
+
+      // NEGATIVE: Template website detection (common memecoin template sites)
+      if (dexScreenerInfo.description) {
+        const desc = dexScreenerInfo.description.toLowerCase();
+        const templatePatterns = [
+          'the next 100x', 'moon guaranteed', 'buy now before',
+          'stealth launch', 'community driven token', 'fair launch token',
+          'next big thing', 'to the moon',
+        ];
+        const isTemplate = templatePatterns.some(p => desc.includes(p));
+        if (isTemplate) {
+          score -= 2;
+          breakdown.push('Template website: -2');
+        }
+      }
     }
+
+    // Description: +1 (reduced from +2)
+    if (dexScreenerInfo.description && dexScreenerInfo.description.length > 20) {
+      score += 1;
+      breakdown.push('Description: +1');
+    }
+
+    // Boosts: +0 (was +1-2) — paid visibility, not quality signal
+    // Rugs frequently boost to attract victims — no longer rewarded
+    if (dexScreenerInfo.isBoosted) {
+      breakdown.push(`Boosted (${dexScreenerInfo.boostCount}x): +0 (not scored)`);
+    }
+
+    // Discord: +0 (was +1) — empty servers are free, no signal
+    if (dexScreenerInfo.socialLinks.discord) {
+      breakdown.push('Discord: +0 (not scored)');
+    }
+
+    // Cap to range: -7 to +15
+    score = Math.max(-7, Math.min(15, score));
 
     return { score, breakdown };
   }
@@ -2568,18 +2632,18 @@ export class SignalGenerator {
       },
       positionSizePercent: Math.round(positionSize * 10) / 10,
       stopLoss: {
-        price: price * 0.7,
-        percent: 30,
+        price: getInitialStopLoss(price, scoreToGrade(score.compositeScore)),
+        percent: Math.abs(CANONICAL_EXIT_PARAMS.STOP_LOSS_BY_GRADE[scoreToGrade(score.compositeScore)] * 100),
       },
       takeProfit1: {
-        price: price * 1.5,
-        percent: 50,
+        price: price * (1 + CANONICAL_EXIT_PARAMS.TP1_PERCENT),
+        percent: CANONICAL_EXIT_PARAMS.TP1_PERCENT * 100,
       },
       takeProfit2: {
-        price: price * 2.5,
-        percent: 150,
+        price: price * (1 + CANONICAL_EXIT_PARAMS.TP2_PERCENT),
+        percent: CANONICAL_EXIT_PARAMS.TP2_PERCENT * 100,
       },
-      timeLimitHours: 72,
+      timeLimitHours: CANONICAL_EXIT_PARAMS.MAX_HOLD_HOURS,
 
       generatedAt: new Date(),
       signalType: SignalType.BUY,

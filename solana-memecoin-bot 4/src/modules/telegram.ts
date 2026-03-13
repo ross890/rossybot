@@ -2342,14 +2342,15 @@ export class TelegramAlertBot {
     msg += `└─ Narrative: ${socialMetrics.narrativeFit || 'N/A'}\n\n`;
 
     msg += `───────────────────────────────\n`;
-    // Suggested action
-    msg += `⚡ *SUGGESTED ACTION*\n`;
+    // Canonical exit plan (v3 aligned)
+    msg += `📊 *EXIT PLAN*\n`;
     msg += `├─ Entry Zone: $${this.formatPrice(signal.entryZone.low)} - $${this.formatPrice(signal.entryZone.high)}\n`;
     msg += `├─ Position Size: ${signal.positionSizePercent}% of portfolio\n`;
-    msg += `├─ Stop Loss: $${this.formatPrice(signal.stopLoss.price)} (-${signal.stopLoss.percent}%)\n`;
-    msg += `├─ Take Profit 1: $${this.formatPrice(signal.takeProfit1.price)} (+${signal.takeProfit1.percent}%)\n`;
-    msg += `├─ Take Profit 2: $${this.formatPrice(signal.takeProfit2.price)} (+${signal.takeProfit2.percent}%)\n`;
-    msg += `└─ Time Limit: ${signal.timeLimitHours}h max hold\n\n`;
+    msg += `🎯 TP1: $${this.formatPrice(signal.takeProfit1.price)} (+${signal.takeProfit1.percent}%) → sell 33%, stop → breakeven\n`;
+    msg += `🎯 TP2: $${this.formatPrice(signal.takeProfit2.price)} (+${signal.takeProfit2.percent}%) → sell 33%, activate trailing stop\n`;
+    msg += `🔄 Final 34%: rides 20% trailing stop\n`;
+    msg += `🛑 Stop: $${this.formatPrice(signal.stopLoss.price)} (-${signal.stopLoss.percent}%) [score-adjusted]\n`;
+    msg += `⏰ Max hold: ${signal.timeLimitHours}h\n\n`;
     
     // Flags
     if (score.flags.length > 0) {
@@ -4360,14 +4361,15 @@ export class TelegramAlertBot {
     msg += `└─ Bundle Risk: ${scamFilter.bundleAnalysis?.riskLevel === 'LOW' ? '🟢 CLEAR' : scamFilter.bundleAnalysis?.riskLevel === 'MEDIUM' ? '🟡 FLAGGED' : '🔴 HIGH'}\n\n`;
 
     msg += `───────────────────────────────\n`;
-    // Suggested action
-    msg += `⚡ *SUGGESTED ACTION*\n`;
+    // Canonical exit plan (v3 aligned)
+    msg += `📊 *EXIT PLAN*\n`;
     msg += `├─ Entry Zone: $${this.formatPrice(signal.entryZone.low)} - $${this.formatPrice(signal.entryZone.high)}\n`;
     msg += `├─ Position Size: ${signal.positionSizePercent}% of portfolio\n`;
-    msg += `├─ Stop Loss: $${this.formatPrice(signal.stopLoss.price)} (-${signal.stopLoss.percent}%)\n`;
-    msg += `├─ Take Profit 1: $${this.formatPrice(signal.takeProfit1.price)} (+${signal.takeProfit1.percent}%)\n`;
-    msg += `├─ Take Profit 2: $${this.formatPrice(signal.takeProfit2.price)} (+${signal.takeProfit2.percent}%)\n`;
-    msg += `└─ Time Limit: ${signal.timeLimitHours}h max hold\n\n`;
+    msg += `🎯 TP1: $${this.formatPrice(signal.takeProfit1.price)} (+${signal.takeProfit1.percent}%) → sell 33%, stop → breakeven\n`;
+    msg += `🎯 TP2: $${this.formatPrice(signal.takeProfit2.price)} (+${signal.takeProfit2.percent}%) → sell 33%, activate trailing stop\n`;
+    msg += `🔄 Final 34%: rides 20% trailing stop\n`;
+    msg += `🛑 Stop: $${this.formatPrice(signal.stopLoss.price)} (-${signal.stopLoss.percent}%) [score-adjusted]\n`;
+    msg += `⏰ Max hold: ${signal.timeLimitHours}h\n\n`;
 
     // Flags
     if (score.flags.length > 0) {
@@ -4500,14 +4502,15 @@ export class TelegramAlertBot {
     msg += `└─ Narrative: ${socialMetrics.narrativeFit || 'N/A'}\n\n`;
 
     msg += `───────────────────────────────\n`;
-    // Suggested action
-    msg += `⚡ *SUGGESTED ACTION*\n`;
+    // Canonical exit plan (v3 aligned)
+    msg += `📊 *EXIT PLAN*\n`;
     msg += `├─ Entry Zone: $${this.formatPrice(signal.entryZone.low)} - $${this.formatPrice(signal.entryZone.high)}\n`;
     msg += `├─ Position Size: ${signal.positionSizePercent}% of portfolio\n`;
-    msg += `├─ Stop Loss: $${this.formatPrice(signal.stopLoss.price)} (-${signal.stopLoss.percent}%)\n`;
-    msg += `├─ Take Profit 1: $${this.formatPrice(signal.takeProfit1.price)} (+${signal.takeProfit1.percent}%)\n`;
-    msg += `├─ Take Profit 2: $${this.formatPrice(signal.takeProfit2.price)} (+${signal.takeProfit2.percent}%)\n`;
-    msg += `└─ Time Limit: ${signal.timeLimitHours}h max hold\n\n`;
+    msg += `🎯 TP1: $${this.formatPrice(signal.takeProfit1.price)} (+${signal.takeProfit1.percent}%) → sell 33%, stop → breakeven\n`;
+    msg += `🎯 TP2: $${this.formatPrice(signal.takeProfit2.price)} (+${signal.takeProfit2.percent}%) → sell 33%, activate trailing stop\n`;
+    msg += `🔄 Final 34%: rides 20% trailing stop\n`;
+    msg += `🛑 Stop: $${this.formatPrice(signal.stopLoss.price)} (-${signal.stopLoss.percent}%) [score-adjusted]\n`;
+    msg += `⏰ Max hold: ${signal.timeLimitHours}h\n\n`;
 
     // Flags
     if (score.flags.length > 0) {

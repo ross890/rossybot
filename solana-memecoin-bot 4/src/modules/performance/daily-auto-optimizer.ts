@@ -9,6 +9,7 @@ import { logger } from '../../utils/logger.js';
 import { pool } from '../../utils/database.js';
 import { signalPerformanceTracker } from './signal-performance-tracker.js';
 import { thresholdOptimizer, ThresholdSet, ThresholdRecommendation } from './threshold-optimizer.js';
+import { kellySizer } from '../trading/kellySizer.js';
 import TelegramBot from 'node-telegram-bot-api';
 import { appConfig } from '../../config/index.js';
 
@@ -192,8 +193,18 @@ export class DailyAutoOptimizer {
       // Update last known win rate
       this.lastWinRate = stats.winRate;
 
-      // Step 7: Send Telegram notification
-      const message = this.formatOptimizationReport(report);
+      // Step 7: Generate Kelly report
+      let kellyReportText = '';
+      try {
+        kellySizer.invalidateCache();
+        const kellyReport = await kellySizer.calculateKellyReport();
+        kellyReportText = '\n' + kellySizer.formatKellyReport(kellyReport);
+      } catch (error) {
+        logger.error({ error }, 'Failed to generate Kelly report');
+      }
+
+      // Step 8: Send Telegram notification
+      const message = this.formatOptimizationReport(report) + kellyReportText;
       await this.sendTelegramMessage(message);
 
       logger.info({

@@ -62,7 +62,9 @@ export enum SignalType {
   ALERT = 'ALERT',
   DISCOVERY = 'DISCOVERY',        // Metrics-based early signal (no KOL required)
   KOL_VALIDATION = 'KOL_VALIDATION', // Follow-up when KOL buys a discovered token
-  ALPHA_WALLET = 'ALPHA_WALLET'   // Alpha wallet buy detected
+  ALPHA_WALLET = 'ALPHA_WALLET',  // Alpha wallet buy detected
+  SOCIAL_DISCOVERY = 'SOCIAL_DISCOVERY', // Twitter/social sentiment discovery
+  WHALE_CLUSTER = 'WHALE_CLUSTER',      // 3+ unknown whales buying same micro-cap
 }
 
 // Signal track for dual-strategy system

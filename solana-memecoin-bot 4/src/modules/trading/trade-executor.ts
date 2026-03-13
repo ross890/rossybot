@@ -9,6 +9,7 @@ import { jupiterClient, SwapResult } from './jupiter.js';
 import { raydiumClient } from './raydium.js';
 import { Database, pool } from '../../utils/database.js';
 import { SignalType, BuySignal, DiscoverySignal, ConvictionLevel } from '../../types/index.js';
+import { kellySizer } from './kellySizer.js';
 
 // ============ TYPES ============
 
@@ -51,6 +52,7 @@ export interface TradeRequest {
   score: number;
   currentPrice: number;
   requestedSolAmount?: number; // Override position sizing
+  liquidityUSD?: number;       // For slippage guard
 }
 
 export interface TradeResult {
@@ -243,15 +245,67 @@ export class TradeExecutor {
   }
 
   /**
-   * Calculate position size in SOL
+   * Calculate position size in SOL.
+   * Uses Kelly Criterion sizing when sufficient data exists,
+   * falls back to category-based sizing otherwise.
    */
-  async calculatePositionSize(category: SignalCategory): Promise<number> {
+  async calculatePositionSize(
+    category: SignalCategory,
+    signalType?: string,
+    liquidityUSD?: number,
+  ): Promise<number> {
     const balance = await botWallet.getSolBalance();
-    const sizeConfig = this.config.positionSizes[category];
 
-    // Use midpoint of range
-    const percent = (sizeConfig.min + sizeConfig.max) / 2;
+    // Try Kelly-based sizing first
+    let percent: number;
+    if (signalType) {
+      const kellyPercent = await kellySizer.getPositionSizePercent(signalType);
+      if (kellyPercent > 0) {
+        percent = kellyPercent;
+        logger.debug({ signalType, kellyPercent }, 'Using Kelly-based position size');
+      } else {
+        // Kelly says no edge — check if we have enough data to trust it
+        const hasEdge = await kellySizer.hasEdge(signalType);
+        if (!hasEdge) {
+          logger.info({ signalType }, 'Kelly: no edge detected, position size = 0');
+          return 0;
+        }
+        // Not enough data — fall back to category-based
+        const sizeConfig = this.config.positionSizes[category];
+        percent = (sizeConfig.min + sizeConfig.max) / 2;
+      }
+    } else {
+      // No signal type provided — use category-based sizing
+      const sizeConfig = this.config.positionSizes[category];
+      percent = (sizeConfig.min + sizeConfig.max) / 2;
+    }
+
     let solAmount = balance.sol * (percent / 100);
+
+    // Apply slippage guard if liquidity data available
+    if (liquidityUSD && liquidityUSD > 0) {
+      // Rough SOL→USD conversion (estimate)
+      const solPriceUSD = 150; // TODO: fetch real SOL price
+      const positionUSD = solAmount * solPriceUSD;
+      const slippageResult = kellySizer.applySlippageGuard(positionUSD, liquidityUSD);
+
+      if (slippageResult.skipped) {
+        logger.warn({
+          liquidityUSD,
+          expectedSlippage: slippageResult.expectedSlippage,
+        }, 'Slippage too high, skipping trade');
+        return 0;
+      }
+
+      if (slippageResult.adjustedSize < positionUSD) {
+        solAmount = slippageResult.adjustedSize / solPriceUSD;
+        logger.info({
+          originalSol: balance.sol * (percent / 100),
+          adjustedSol: solAmount,
+          expectedSlippage: slippageResult.expectedSlippage,
+        }, 'Position size reduced for slippage');
+      }
+    }
 
     // Apply limits
     solAmount = Math.min(solAmount, this.config.maxSingleTradeSol);
@@ -308,8 +362,12 @@ export class TradeExecutor {
       return this.failedResult(tokenAddress, tokenTicker, 'Already have open position');
     }
 
-    // Calculate position size
-    const solAmount = request.requestedSolAmount || await this.calculatePositionSize(signalCategory);
+    // Calculate position size (Kelly-aware)
+    const solAmount = request.requestedSolAmount || await this.calculatePositionSize(
+      signalCategory,
+      request.signalType,
+      request.liquidityUSD,
+    );
 
     if (solAmount < this.config.minTradeSol) {
       return this.failedResult(tokenAddress, tokenTicker, `Position size ${solAmount} SOL below minimum ${this.config.minTradeSol}`);

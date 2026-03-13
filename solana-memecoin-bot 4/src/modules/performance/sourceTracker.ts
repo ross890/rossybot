@@ -19,6 +19,8 @@ export type DiscoverySource =
   | 'PUMPFUN_DEV'
   | 'KOL'
   | 'DISCOVERY'
+  | 'SOCIAL_DISCOVERY'
+  | 'WHALE_CLUSTER'
   | 'ONCHAIN'
   | 'UNKNOWN';
 

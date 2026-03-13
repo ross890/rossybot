@@ -923,12 +923,20 @@ export class SignalGenerator {
       return SignalGenerator.EVAL_RESULTS.SKIPPED;
     }
 
+    // ============ ALPHA WALLET FAST-TRACK ============
+    // Alpha wallet-discovered tokens bypass tier/screening/scam gates.
+    // Smart money buying IS the signal — these wallets buy early when tokens
+    // have low holders, low volume, and tiny mcap (exactly what screening rejects).
+    // We still check safety (rug/honeypot) and protocol exclusion but skip
+    // tier filtering, screening criteria, and scam filter.
+    const isAlphaSource = this.candidateSources.get(tokenAddress) === 'ALPHA_WALLET';
+
     // FEATURE 1 & 5: Run enhanced safety check FIRST (before other checks)
     const safetyResult = await tokenSafetyChecker.checkTokenSafety(tokenAddress);
     const safetyBlock = tokenSafetyChecker.shouldBlockSignal(safetyResult);
 
     if (safetyBlock.blocked) {
-      logger.info({ tokenAddress: shortAddr, reason: safetyBlock.reason }, 'EVAL: Safety blocked');
+      logger.info({ tokenAddress: shortAddr, reason: safetyBlock.reason, isAlpha: isAlphaSource }, 'EVAL: Safety blocked');
       return SignalGenerator.EVAL_RESULTS.SAFETY_BLOCKED;
     }
 
@@ -955,6 +963,57 @@ export class SignalGenerator {
         reason: exclusionCheck.reason,
       }, 'EVAL: Excluded - protocol/stable/LP token');
       return SignalGenerator.EVAL_RESULTS.SCREENING_FAILED;
+    }
+
+    // ALPHA FAST-TRACK: Skip tier/screening/scam gates — go directly to alpha signal path
+    if (isAlphaSource) {
+      logger.info({
+        tokenAddress: shortAddr,
+        ticker: metrics.ticker,
+        mcap: metrics.marketCap,
+        holders: metrics.holderCount,
+        liq: metrics.liquidityPool,
+      }, 'EVAL: ALPHA FAST-TRACK — bypassing screening gates for alpha wallet buy');
+
+      // Get alpha wallet activity info from the discovery buffer
+      const alphaInfo = alphaWalletManager.getDiscoveredTokenInfo(tokenAddress);
+      if (alphaInfo) {
+        // Build minimal alpha activity for signal generation
+        const wallet = await alphaWalletManager.getWalletByAddress(alphaInfo.walletAddress);
+        if (wallet) {
+          const socialMetrics = await this.getSocialMetrics(tokenAddress, metrics);
+          const volumeAuthenticity = await calculateVolumeAuthenticity(tokenAddress);
+          const scamResult = await scamFilter.filterToken(tokenAddress);
+          const dexScreenerInfo = await dexScreenerClient.getTokenInfo(tokenAddress);
+          const ctoAnalysis = await analyzeCTO(
+            tokenAddress, metrics.name, metrics.ticker,
+            safetyResult.deployerHolding,
+            !safetyResult.mintAuthorityEnabled,
+            !safetyResult.freezeAuthorityEnabled,
+            metrics.tokenAge, dexScreenerInfo
+          );
+          const enrichment = await this.getSignalEnrichment(tokenAddress, metrics.marketCap);
+
+          const alphaActivities = [{
+            wallet,
+            transaction: {
+              signature: alphaInfo.txSignature,
+              solAmount: alphaInfo.solAmount,
+              tokensAcquired: 0,
+              timestamp: new Date(alphaInfo.discoveredAt),
+            },
+            signalWeight: wallet.signalWeight,
+          }];
+
+          return await this.handleAlphaSignal(
+            tokenAddress, metrics, socialMetrics, volumeAuthenticity,
+            scamResult, alphaActivities, safetyResult,
+            dexScreenerInfo, ctoAnalysis, enrichment
+          );
+        }
+      }
+      // If we can't resolve the alpha wallet info, fall through to normal path
+      logger.warn({ tokenAddress: shortAddr }, 'EVAL: Alpha fast-track failed to resolve wallet info, falling through');
     }
 
     // TIER-AWARE FILTERING: Check market cap tier before proceeding
@@ -2592,6 +2651,9 @@ export class SignalGenerator {
     if (await bondingCurveMonitor.isPumpfunToken(tokenAddress)) {
       await bondingCurveMonitor.trackToken(tokenAddress);
     }
+
+    // Clear from alpha discovery buffer to prevent duplicate signals
+    alphaWalletManager.markProcessed(tokenAddress);
 
     this.recentlySignaledTokens.set(tokenAddress, Date.now());
     return SignalGenerator.EVAL_RESULTS.SIGNAL_SENT;

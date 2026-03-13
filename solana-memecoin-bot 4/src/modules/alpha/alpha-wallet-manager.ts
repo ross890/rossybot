@@ -108,8 +108,10 @@ export class AlphaWalletManager {
   }
 
   /**
-   * Get tokens discovered by alpha wallet buys and clear the buffer.
+   * Get tokens discovered by alpha wallet buys and return them as candidates.
    * Called by signal generator's getCandidateTokens() each scan cycle.
+   * NOTE: No longer clears the map — tokens stay available for fast-track lookup
+   * via getDiscoveredTokenInfo(). Expiry handles cleanup.
    */
   drainDiscoveredTokens(): string[] {
     const now = Date.now();
@@ -122,10 +124,8 @@ export class AlphaWalletManager {
       }
     }
 
-    // Drain: return tokens and clear map to prevent re-sending the same candidates
-    const tokens = Array.from(this.alphaDiscoveredTokens.keys());
-    this.alphaDiscoveredTokens.clear();
-    return tokens;
+    // Return token addresses but keep the map intact for fast-track lookup
+    return Array.from(this.alphaDiscoveredTokens.keys());
   }
 
   /**
@@ -133,6 +133,28 @@ export class AlphaWalletManager {
    */
   isAlphaDiscovered(tokenAddress: string): boolean {
     return this.alphaDiscoveredTokens.has(tokenAddress);
+  }
+
+  /**
+   * Get discovery info for a token (used by signal generator alpha fast-track).
+   * Returns the wallet address, SOL amount, and tx signature that triggered discovery.
+   */
+  getDiscoveredTokenInfo(tokenAddress: string): {
+    walletAddress: string;
+    walletLabel: string | null;
+    solAmount: number;
+    txSignature: string;
+    discoveredAt: number;
+  } | null {
+    return this.alphaDiscoveredTokens.get(tokenAddress) || null;
+  }
+
+  /**
+   * Mark a token as processed (remove from discovery buffer after signal sent).
+   * Called after a successful alpha signal to prevent duplicate signals.
+   */
+  markProcessed(tokenAddress: string): void {
+    this.alphaDiscoveredTokens.delete(tokenAddress);
   }
 
   /**

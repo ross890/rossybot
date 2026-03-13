@@ -277,6 +277,32 @@ export class TelegramAlertBot {
       logger.warn({ error }, 'Failed to wire smart money notifications');
     }
 
+    // Initialize Alpha Wallet Engine
+    try {
+      const { walletEngine, gmgnDiscovery, walletGraduation } = await import('../wallets/index.js');
+      const { registerWalletCommands } = await import('./telegram/wallet-commands.js');
+
+      // Set notification callback
+      walletEngine.setNotifyCallback(async (message: string) => {
+        if (this.bot && this.chatId) {
+          await this.bot.sendMessage(this.chatId, message, { parse_mode: 'Markdown' });
+        }
+      });
+
+      // Start discovery and graduation
+      gmgnDiscovery.start();
+      walletGraduation.start();
+
+      // Register Telegram commands
+      if (this.bot) {
+        registerWalletCommands(this.bot, this.chatId);
+      }
+
+      logger.info('Alpha Wallet Engine initialized (GMGN discovery + graduation)');
+    } catch (error) {
+      logger.warn({ error }, 'Failed to initialize Alpha Wallet Engine');
+    }
+
     // Start trending ticker scanner (runs every 12 hours, sends digest to chat)
     trendingScanner.start(12 * 60 * 60 * 1000);
     logger.info('Trending scanner started (12h interval)');

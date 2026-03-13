@@ -96,6 +96,9 @@ export class AlphaWalletManager {
     // Start trade monitoring (every 5 minutes)
     this.startTradeMonitoring();
 
+    // Start engine wallet monitoring (active engine wallets feed into signal pipeline)
+    this.startEngineWalletMonitoring();
+
     const activeWallets = await Database.getActiveAlphaWallets();
     logger.info({ walletCount: activeWallets.length }, 'Alpha Wallet Manager initialized');
   }
@@ -785,6 +788,96 @@ export class AlphaWalletManager {
     }
   }
 
+  // ============ ENGINE WALLET MONITORING ============
+
+  private engineWalletTimer: NodeJS.Timeout | null = null;
+
+  /**
+   * Monitor active engine wallets for trades that feed into the signal pipeline.
+   * Engine wallets are managed by the wallet engine (auto-discovered, graduated, weighted).
+   * Their buys are treated exactly like existing alpha wallet buys.
+   */
+  private startEngineWalletMonitoring(): void {
+    const INTERVAL_MS = 5 * 60 * 1000; // Every 5 minutes, same as existing
+
+    this.engineWalletTimer = setInterval(async () => {
+      try {
+        await this.monitorEngineWallets();
+      } catch (error) {
+        logger.error({ error }, 'Error in engine wallet monitoring');
+      }
+    }, INTERVAL_MS);
+
+    logger.info('Engine wallet trade monitoring started (5 min interval)');
+  }
+
+  /**
+   * Poll active engine wallets for new buy transactions.
+   * Feeds discovered tokens into the same alphaDiscoveredTokens buffer
+   * so the signal generator picks them up in the next scan cycle.
+   */
+  private async monitorEngineWallets(): Promise<void> {
+    if (appConfig.heliusDisabled) return;
+
+    try {
+      const { walletEngine: engine } = await import('../../wallets/walletEngine.js');
+      const { coTraderDiscovery } = await import('../../wallets/coTraderDiscovery.js');
+      const activeEngineWallets = await engine.getActiveWallets();
+
+      for (const ew of activeEngineWallets) {
+        try {
+          // Use Helius enhanced transactions (same as existing alpha wallet monitoring)
+          const enhancedTxs = await heliusClient.getEnhancedTransactions(ew.walletAddress, 5);
+
+          for (const tx of enhancedTxs) {
+            try {
+              const trade = this.parseEnhancedTransaction(tx, {
+                address: ew.walletAddress,
+              } as any);
+              if (!trade || trade.tradeType !== 'BUY') continue;
+              if (trade.solAmount < 0.1) continue;
+
+              // Feed into the signal pipeline (same buffer as existing alpha wallets)
+              if (!this.alphaDiscoveredTokens.has(trade.tokenAddress)) {
+                this.alphaDiscoveredTokens.set(trade.tokenAddress, {
+                  walletAddress: ew.walletAddress,
+                  walletLabel: `Engine:${ew.source}`,
+                  solAmount: trade.solAmount,
+                  txSignature: trade.txSignature,
+                  discoveredAt: Date.now(),
+                });
+
+                logger.info({
+                  wallet: ew.walletAddress.slice(0, 8),
+                  token: trade.tokenAddress.slice(0, 8),
+                  sol: trade.solAmount.toFixed(2),
+                  weight: ew.weight.toFixed(2),
+                }, 'Engine wallet BUY detected — token added to signal pipeline');
+
+                // Trigger co-trader discovery
+                try {
+                  await coTraderDiscovery.onAlphaWalletBuy(
+                    ew.walletAddress,
+                    trade.tokenAddress,
+                    trade.timestamp
+                  );
+                } catch (e) {
+                  // Non-critical — don't block signal flow
+                }
+              }
+            } catch (error) {
+              logger.debug({ error }, 'Error parsing engine wallet transaction');
+            }
+          }
+        } catch (error) {
+          logger.debug({ error, wallet: ew.walletAddress.slice(0, 8) }, 'Error monitoring engine wallet');
+        }
+      }
+    } catch (error) {
+      logger.error({ error }, 'Error in engine wallet monitoring cycle');
+    }
+  }
+
   // ============ PERFORMANCE EVALUATION ============
 
   /**
@@ -1094,6 +1187,10 @@ export class AlphaWalletManager {
     if (this.tradeMonitorTimer) {
       clearInterval(this.tradeMonitorTimer);
       this.tradeMonitorTimer = null;
+    }
+    if (this.engineWalletTimer) {
+      clearInterval(this.engineWalletTimer);
+      this.engineWalletTimer = null;
     }
     logger.info('Alpha Wallet Manager stopped');
   }

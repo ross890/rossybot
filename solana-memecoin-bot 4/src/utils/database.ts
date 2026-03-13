@@ -1155,6 +1155,110 @@ CREATE INDEX IF NOT EXISTS idx_pumpfun_devs_active ON pumpfun_devs(is_active);
 CREATE INDEX IF NOT EXISTS idx_pumpfun_dev_tokens_mint ON pumpfun_dev_tokens(token_mint);
 CREATE INDEX IF NOT EXISTS idx_pumpfun_dev_tokens_dev ON pumpfun_dev_tokens(dev_id);
 CREATE INDEX IF NOT EXISTS idx_pumpfun_dev_tokens_launched ON pumpfun_dev_tokens(launched_at DESC);
+
+-- ============ ALPHA WALLET ENGINE TABLES ============
+
+-- Engine wallet status enum (extends existing alpha_wallet_status with CANDIDATE/PURGED)
+DO $$ BEGIN
+  CREATE TYPE engine_wallet_status AS ENUM ('CANDIDATE', 'ACTIVE', 'PROBATION', 'SUSPENDED', 'PURGED');
+EXCEPTION
+  WHEN duplicate_object THEN null;
+END $$;
+
+-- Engine wallet source enum
+DO $$ BEGIN
+  CREATE TYPE engine_wallet_source AS ENUM ('GMGN_LEADERBOARD', 'ONCHAIN_WINNER_SCAN', 'CO_TRADER', 'MANUAL');
+EXCEPTION
+  WHEN duplicate_object THEN null;
+END $$;
+
+-- Engine observation outcome enum
+DO $$ BEGIN
+  CREATE TYPE observation_outcome AS ENUM ('WIN', 'LOSS', 'PENDING');
+EXCEPTION
+  WHEN duplicate_object THEN null;
+END $$;
+
+-- Alpha Wallet Engine - main wallet tracking table
+CREATE TABLE IF NOT EXISTS engine_wallets (
+  id SERIAL PRIMARY KEY,
+  wallet_address VARCHAR(64) UNIQUE NOT NULL,
+  status VARCHAR(20) NOT NULL DEFAULT 'CANDIDATE',
+  source VARCHAR(30) NOT NULL DEFAULT 'MANUAL',
+  weight DECIMAL(3,2) DEFAULT 1.0,
+  added_at TIMESTAMP NOT NULL DEFAULT NOW(),
+  graduated_at TIMESTAMP,
+  suspended_at TIMESTAMP,
+  probation_start TIMESTAMP,
+
+  -- Discovery metadata
+  discovered_from_token VARCHAR(64),
+  co_trade_count INTEGER DEFAULT 0,
+  winner_scan_appearances INTEGER DEFAULT 0,
+
+  -- Observation period stats (pre-graduation)
+  observed_trades INTEGER DEFAULT 0,
+  observed_win_rate DECIMAL(5,4) DEFAULT 0,
+  observed_ev DECIMAL(10,4) DEFAULT 0,
+  observed_avg_mcap DECIMAL(15,2) DEFAULT 0,
+  observed_avg_hold_min DECIMAL(10,2) DEFAULT 0,
+
+  -- Active performance stats (post-graduation, from Rossybot signals)
+  total_signals INTEGER DEFAULT 0,
+  signal_win_rate DECIMAL(5,4) DEFAULT 0,
+  signal_ev DECIMAL(10,4) DEFAULT 0,
+  signal_avg_win DECIMAL(10,4) DEFAULT 0,
+  signal_avg_loss DECIMAL(10,4) DEFAULT 0,
+  signal_kelly_f DECIMAL(10,4) DEFAULT 0,
+  current_streak INTEGER DEFAULT 0,
+  last_30d_ev DECIMAL(10,4) DEFAULT 0,
+
+  updated_at TIMESTAMP DEFAULT NOW()
+);
+
+-- Alpha Wallet Engine - candidate observation trades (shadow tracking)
+CREATE TABLE IF NOT EXISTS engine_wallet_observations (
+  id SERIAL PRIMARY KEY,
+  wallet_id INTEGER REFERENCES engine_wallets(id) ON DELETE CASCADE,
+  token_address VARCHAR(64) NOT NULL,
+  token_name VARCHAR(100),
+  buy_price DECIMAL(20,10),
+  buy_mcap DECIMAL(15,2),
+  buy_time TIMESTAMP NOT NULL,
+  peak_price DECIMAL(20,10),
+  exit_price DECIMAL(20,10),
+  return_pct DECIMAL(10,4),
+  hold_time_minutes DECIMAL(10,2),
+  outcome VARCHAR(10) DEFAULT 'PENDING',
+  created_at TIMESTAMP DEFAULT NOW()
+);
+
+-- Alpha Wallet Engine - cooldowns for purged wallets
+CREATE TABLE IF NOT EXISTS engine_wallet_cooldowns (
+  wallet_address VARCHAR(64) PRIMARY KEY,
+  purged_at TIMESTAMP NOT NULL,
+  reason VARCHAR(200),
+  cooldown_until TIMESTAMP NOT NULL
+);
+
+-- Alpha Wallet Engine - signal attribution (links signals to source wallets)
+CREATE TABLE IF NOT EXISTS engine_wallet_signals (
+  id SERIAL PRIMARY KEY,
+  wallet_id INTEGER REFERENCES engine_wallets(id) ON DELETE CASCADE,
+  signal_id VARCHAR(64),
+  token_address VARCHAR(64) NOT NULL,
+  realized_return DECIMAL(10,4),
+  outcome VARCHAR(10),
+  created_at TIMESTAMP DEFAULT NOW()
+);
+
+-- Indexes for engine tables
+CREATE INDEX IF NOT EXISTS idx_engine_wallets_status ON engine_wallets(status);
+CREATE INDEX IF NOT EXISTS idx_engine_wallets_address ON engine_wallets(wallet_address);
+CREATE INDEX IF NOT EXISTS idx_engine_observations_wallet ON engine_wallet_observations(wallet_id, outcome);
+CREATE INDEX IF NOT EXISTS idx_engine_observations_pending ON engine_wallet_observations(outcome) WHERE outcome = 'PENDING';
+CREATE INDEX IF NOT EXISTS idx_engine_cooldowns_until ON engine_wallet_cooldowns(cooldown_until);
+CREATE INDEX IF NOT EXISTS idx_engine_signals_wallet ON engine_wallet_signals(wallet_id);
 `;
 
 // ============ DATABASE OPERATIONS ============
@@ -2721,6 +2825,248 @@ export class Database {
       createdAt: row.created_at,
       updatedAt: row.updated_at,
     };
+  }
+  // ============ WALLET ENGINE OPERATIONS ============
+
+  static async getEngineWallet(address: string): Promise<any | null> {
+    const result = await pool.query(
+      'SELECT * FROM engine_wallets WHERE wallet_address = $1',
+      [address]
+    );
+    if (result.rows.length === 0) return null;
+    return result.rows[0];
+  }
+
+  static async getEngineWalletById(id: number): Promise<any | null> {
+    const result = await pool.query(
+      'SELECT * FROM engine_wallets WHERE id = $1',
+      [id]
+    );
+    if (result.rows.length === 0) return null;
+    return result.rows[0];
+  }
+
+  static async getEngineWalletsByStatus(status: string): Promise<any[]> {
+    const result = await pool.query(
+      'SELECT * FROM engine_wallets WHERE status = $1 ORDER BY added_at DESC',
+      [status]
+    );
+    return result.rows;
+  }
+
+  static async getActiveEngineWallets(): Promise<any[]> {
+    const result = await pool.query(
+      `SELECT * FROM engine_wallets WHERE status = 'ACTIVE' ORDER BY weight DESC`
+    );
+    return result.rows;
+  }
+
+  static async createEngineWallet(data: {
+    walletAddress: string;
+    source: string;
+    status?: string;
+    discoveredFromToken?: string;
+  }): Promise<{ id: number; isNew: boolean }> {
+    // Check cooldown
+    const cooldown = await pool.query(
+      `SELECT 1 FROM engine_wallet_cooldowns WHERE wallet_address = $1 AND cooldown_until > NOW()`,
+      [data.walletAddress]
+    );
+    if (cooldown.rows.length > 0) {
+      return { id: 0, isNew: false };
+    }
+
+    // Check existing
+    const existing = await pool.query(
+      'SELECT id, status FROM engine_wallets WHERE wallet_address = $1',
+      [data.walletAddress]
+    );
+    if (existing.rows.length > 0) {
+      return { id: existing.rows[0].id, isNew: false };
+    }
+
+    const result = await pool.query(
+      `INSERT INTO engine_wallets (wallet_address, source, status, discovered_from_token)
+       VALUES ($1, $2, $3, $4)
+       ON CONFLICT (wallet_address) DO NOTHING
+       RETURNING id`,
+      [data.walletAddress, data.source, data.status || 'CANDIDATE', data.discoveredFromToken || null]
+    );
+
+    if (result.rows.length === 0) {
+      const fallback = await pool.query('SELECT id FROM engine_wallets WHERE wallet_address = $1', [data.walletAddress]);
+      return { id: fallback.rows[0]?.id || 0, isNew: false };
+    }
+
+    return { id: result.rows[0].id, isNew: true };
+  }
+
+  static async updateEngineWalletStatus(id: number, status: string, extra?: Record<string, any>): Promise<void> {
+    const sets = ['status = $2', 'updated_at = NOW()'];
+    const params: any[] = [id, status];
+    let idx = 3;
+
+    if (extra) {
+      for (const [key, value] of Object.entries(extra)) {
+        sets.push(`${key} = $${idx}`);
+        params.push(value);
+        idx++;
+      }
+    }
+
+    await pool.query(`UPDATE engine_wallets SET ${sets.join(', ')} WHERE id = $1`, params);
+  }
+
+  static async updateEngineWalletStats(id: number, stats: Record<string, any>): Promise<void> {
+    const sets = ['updated_at = NOW()'];
+    const params: any[] = [id];
+    let idx = 2;
+
+    for (const [key, value] of Object.entries(stats)) {
+      sets.push(`${key} = $${idx}`);
+      params.push(value);
+      idx++;
+    }
+
+    await pool.query(`UPDATE engine_wallets SET ${sets.join(', ')} WHERE id = $1`, params);
+  }
+
+  static async incrementEngineWalletField(id: number, field: string, amount: number = 1): Promise<void> {
+    await pool.query(
+      `UPDATE engine_wallets SET ${field} = ${field} + $2, updated_at = NOW() WHERE id = $1`,
+      [id, amount]
+    );
+  }
+
+  static async createEngineObservation(data: {
+    walletId: number;
+    tokenAddress: string;
+    tokenName?: string;
+    buyPrice: number;
+    buyMcap: number;
+    buyTime: Date;
+  }): Promise<number> {
+    const result = await pool.query(
+      `INSERT INTO engine_wallet_observations (wallet_id, token_address, token_name, buy_price, buy_mcap, buy_time)
+       VALUES ($1, $2, $3, $4, $5, $6)
+       RETURNING id`,
+      [data.walletId, data.tokenAddress, data.tokenName || null, data.buyPrice, data.buyMcap, data.buyTime]
+    );
+    return result.rows[0].id;
+  }
+
+  static async getPendingObservations(): Promise<any[]> {
+    const result = await pool.query(
+      `SELECT o.*, w.wallet_address FROM engine_wallet_observations o
+       JOIN engine_wallets w ON w.id = o.wallet_id
+       WHERE o.outcome = 'PENDING'
+       ORDER BY o.buy_time ASC`
+    );
+    return result.rows;
+  }
+
+  static async updateObservation(id: number, data: {
+    peakPrice?: number;
+    exitPrice?: number;
+    returnPct?: number;
+    holdTimeMinutes?: number;
+    outcome?: string;
+  }): Promise<void> {
+    const sets: string[] = [];
+    const params: any[] = [id];
+    let idx = 2;
+
+    if (data.peakPrice !== undefined) { sets.push(`peak_price = $${idx}`); params.push(data.peakPrice); idx++; }
+    if (data.exitPrice !== undefined) { sets.push(`exit_price = $${idx}`); params.push(data.exitPrice); idx++; }
+    if (data.returnPct !== undefined) { sets.push(`return_pct = $${idx}`); params.push(data.returnPct); idx++; }
+    if (data.holdTimeMinutes !== undefined) { sets.push(`hold_time_minutes = $${idx}`); params.push(data.holdTimeMinutes); idx++; }
+    if (data.outcome !== undefined) { sets.push(`outcome = $${idx}`); params.push(data.outcome); idx++; }
+
+    if (sets.length > 0) {
+      await pool.query(`UPDATE engine_wallet_observations SET ${sets.join(', ')} WHERE id = $1`, params);
+    }
+  }
+
+  static async getObservationsForWallet(walletId: number): Promise<any[]> {
+    const result = await pool.query(
+      `SELECT * FROM engine_wallet_observations WHERE wallet_id = $1 ORDER BY buy_time DESC`,
+      [walletId]
+    );
+    return result.rows;
+  }
+
+  static async getCompletedObservationsForWallet(walletId: number): Promise<any[]> {
+    const result = await pool.query(
+      `SELECT * FROM engine_wallet_observations WHERE wallet_id = $1 AND outcome != 'PENDING' ORDER BY buy_time DESC`,
+      [walletId]
+    );
+    return result.rows;
+  }
+
+  static async addEngineCooldown(walletAddress: string, reason: string, cooldownDays: number = 60): Promise<void> {
+    await pool.query(
+      `INSERT INTO engine_wallet_cooldowns (wallet_address, purged_at, reason, cooldown_until)
+       VALUES ($1, NOW(), $2, NOW() + INTERVAL '${cooldownDays} days')
+       ON CONFLICT (wallet_address) DO UPDATE SET
+         purged_at = NOW(), reason = $2, cooldown_until = NOW() + INTERVAL '${cooldownDays} days'`,
+      [walletAddress, reason]
+    );
+  }
+
+  static async isOnCooldown(walletAddress: string): Promise<boolean> {
+    const result = await pool.query(
+      `SELECT 1 FROM engine_wallet_cooldowns WHERE wallet_address = $1 AND cooldown_until > NOW()`,
+      [walletAddress]
+    );
+    return result.rows.length > 0;
+  }
+
+  static async recordEngineSignal(data: {
+    walletId: number;
+    signalId?: string;
+    tokenAddress: string;
+    realizedReturn?: number;
+    outcome?: string;
+  }): Promise<number> {
+    const result = await pool.query(
+      `INSERT INTO engine_wallet_signals (wallet_id, signal_id, token_address, realized_return, outcome)
+       VALUES ($1, $2, $3, $4, $5)
+       RETURNING id`,
+      [data.walletId, data.signalId || null, data.tokenAddress, data.realizedReturn || null, data.outcome || null]
+    );
+    return result.rows[0].id;
+  }
+
+  static async getEngineSignalsForWallet(walletId: number, days: number = 30): Promise<any[]> {
+    const result = await pool.query(
+      `SELECT * FROM engine_wallet_signals
+       WHERE wallet_id = $1 AND created_at > NOW() - INTERVAL '${days} days'
+       ORDER BY created_at DESC`,
+      [walletId]
+    );
+    return result.rows;
+  }
+
+  static async getEngineWalletCounts(): Promise<{ candidates: number; active: number; probation: number; suspended: number; purged: number }> {
+    const result = await pool.query(
+      `SELECT status, COUNT(*)::int as count FROM engine_wallets GROUP BY status`
+    );
+    const counts = { candidates: 0, active: 0, probation: 0, suspended: 0, purged: 0 };
+    for (const row of result.rows) {
+      if (row.status === 'CANDIDATE') counts.candidates = row.count;
+      else if (row.status === 'ACTIVE') counts.active = row.count;
+      else if (row.status === 'PROBATION') counts.probation = row.count;
+      else if (row.status === 'SUSPENDED') counts.suspended = row.count;
+      else if (row.status === 'PURGED') counts.purged = row.count;
+    }
+    return counts;
+  }
+
+  static async cleanExpiredCooldowns(): Promise<number> {
+    const result = await pool.query(
+      `DELETE FROM engine_wallet_cooldowns WHERE cooldown_until < NOW()`
+    );
+    return result.rowCount || 0;
   }
 }
 

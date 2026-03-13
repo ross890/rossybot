@@ -62,7 +62,9 @@ export enum SignalType {
   ALERT = 'ALERT',
   DISCOVERY = 'DISCOVERY',        // Metrics-based early signal (no KOL required)
   KOL_VALIDATION = 'KOL_VALIDATION', // Follow-up when KOL buys a discovered token
-  ALPHA_WALLET = 'ALPHA_WALLET'   // Alpha wallet buy detected
+  ALPHA_WALLET = 'ALPHA_WALLET',  // Alpha wallet buy detected
+  SOCIAL_DISCOVERY = 'SOCIAL_DISCOVERY', // Twitter/social sentiment discovery
+  WHALE_CLUSTER = 'WHALE_CLUSTER',      // 3+ unknown whales buying same micro-cap
 }
 
 // Signal track for dual-strategy system
@@ -943,6 +945,30 @@ export interface SignalEnrichment {
     accelerating: boolean;
     timeToMigrationMinutes: number | null;
     tier: 'ROCKET' | 'FAST' | 'STEADY' | 'STALLING' | 'UNKNOWN';
+  };
+  /** Phase 2: Social velocity — Twitter/social mention velocity */
+  socialVelocity?: {
+    uniqueMentions5m: number;
+    uniqueMentions1h: number;
+    velocityTier: 'VIRAL' | 'HIGH' | 'MODERATE' | 'LOW';
+    kolMentions: string[];
+    bonusPoints: number;
+  };
+  /** Phase 2: Whale detection — unknown whale buy patterns */
+  whaleActivity?: {
+    whaleCount: number;
+    qualityWhales: number;
+    suspiciousFresh: number;
+    isCluster: boolean;
+    totalSolDeployed: number;
+    bonusPoints: number;
+  };
+  /** Phase 2: Liquidity additions — LP add/burn events */
+  liquidity?: {
+    recentLpAdded: boolean;
+    deployerDoubledDown: boolean;
+    lpBurned: boolean;
+    bonusPoints: number;
   };
 }
 

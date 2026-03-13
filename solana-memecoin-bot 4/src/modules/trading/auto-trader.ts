@@ -186,7 +186,11 @@ export class AutoTrader {
 
     const confirmationWindow = tradeExecutor.getConfirmationWindow(category);
     const expiresAt = new Date(Date.now() + confirmationWindow * 1000);
-    const suggestedSolAmount = await tradeExecutor.calculatePositionSize(category);
+    const suggestedSolAmount = await tradeExecutor.calculatePositionSize(
+      category,
+      signal.signalType,
+      signal.tokenMetrics.liquidityPool,
+    );
 
     const confirmationId = uuidv4();
 

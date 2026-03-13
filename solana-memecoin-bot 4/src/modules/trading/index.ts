@@ -18,3 +18,4 @@ export {
 } from './trade-executor.js';
 export { positionManager, PositionManager, ManagedPosition, PositionCheckResult } from './position-manager.js';
 export { autoTrader, AutoTrader, AutoTradeResult } from './auto-trader.js';
+export { kellySizer, KellySizer, KellyParams, KellyReport } from './kellySizer.js';

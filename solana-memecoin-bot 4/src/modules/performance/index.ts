@@ -38,3 +38,8 @@ export {
   TradeLogData,
   ScanCycleData,
 } from './performance-logger.js';
+
+export {
+  V3ChecklistAutomation,
+  v3ChecklistAutomation,
+} from './v3-checklist-automation.js';

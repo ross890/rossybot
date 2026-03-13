@@ -6,6 +6,63 @@
 import { logger } from '../../utils/logger.js';
 import type { PumpfunDev, DevSignal, DevSignalPriority } from '../../types/index.js';
 
+// ============ DEV QUALITY TIERS (Phase 3.4) ============
+
+/**
+ * Dev quality tiers based on historical peak market cap performance.
+ *
+ * TIER S: bestPeakMC > $5M OR avgSuccessPeakMC > $1M
+ *   → Score bonus: +10 points, immediate entry (skip pullback)
+ *
+ * TIER A: bestPeakMC > $1M OR avgSuccessPeakMC > $500K
+ *   → Score bonus: +5 points, normal entry flow
+ *
+ * TIER B: bestPeakMC > $200K (baseline, current threshold)
+ *   → No bonus, normal entry flow
+ */
+export type DevQualityTier = 'S' | 'A' | 'B';
+
+export interface DevTierResult {
+  tier: DevQualityTier;
+  scoreBonus: number;
+  skipPullback: boolean;
+  reason: string;
+}
+
+export function calculateDevTier(dev: PumpfunDev): DevTierResult {
+  // TIER S: exceptional track record
+  if (dev.bestPeakMc > 5_000_000 || dev.avgPeakMc > 1_000_000) {
+    return {
+      tier: 'S',
+      scoreBonus: 10,
+      skipPullback: true,
+      reason: dev.bestPeakMc > 5_000_000
+        ? `Best launch hit ${formatMarketCap(dev.bestPeakMc)}`
+        : `Avg success peak ${formatMarketCap(dev.avgPeakMc)}`,
+    };
+  }
+
+  // TIER A: strong track record
+  if (dev.bestPeakMc > 1_000_000 || dev.avgPeakMc > 500_000) {
+    return {
+      tier: 'A',
+      scoreBonus: 5,
+      skipPullback: false,
+      reason: dev.bestPeakMc > 1_000_000
+        ? `Best launch hit ${formatMarketCap(dev.bestPeakMc)}`
+        : `Avg success peak ${formatMarketCap(dev.avgPeakMc)}`,
+    };
+  }
+
+  // TIER B: baseline (current threshold $200K+)
+  return {
+    tier: 'B',
+    scoreBonus: 0,
+    skipPullback: false,
+    reason: 'Meets baseline criteria',
+  };
+}
+
 // ============ SIGNAL PRIORITY ============
 
 /**
@@ -59,6 +116,7 @@ export function createDevSignal(
   bondingCurveProgress?: number,
 ): DevSignal {
   const priority = calculateDevSignalPriority(dev);
+  const tierResult = calculateDevTier(dev);
   const rugRate = dev.totalLaunches > 0 ? dev.rugCount / dev.totalLaunches : 0;
 
   const signal: DevSignal = {
@@ -89,6 +147,9 @@ export function createDevSignal(
     devWallet: dev.walletAddress,
     tokenMint,
     priority,
+    devTier: tierResult.tier,
+    scoreBonus: tierResult.scoreBonus,
+    skipPullback: tierResult.skipPullback,
     successRate: dev.successRate,
   }, 'Dev signal created');
 
@@ -110,6 +171,17 @@ export function formatDevSignalTelegram(signal: DevSignal): string {
   const mintShort = token.mint.slice(0, 6) + '...' + token.mint.slice(-4);
   const devWalletShort = dev.walletAddress.slice(0, 6) + '...' + dev.walletAddress.slice(-4);
 
+  // Calculate dev quality tier for display
+  const devRecord: PumpfunDev = {
+    id: 0, walletAddress: dev.walletAddress, alias: dev.alias,
+    totalLaunches: dev.totalLaunches, successfulLaunches: Math.round(dev.successRate * dev.totalLaunches),
+    bestPeakMc: dev.bestPeakMc, avgPeakMc: dev.avgPeakMc, rugCount: Math.round(dev.rugRate * dev.totalLaunches),
+    successRate: dev.successRate, lastLaunchAt: null, trackedSince: new Date(),
+    isActive: true, notes: null, createdAt: new Date(), updatedAt: new Date(),
+  };
+  const tierResult = calculateDevTier(devRecord);
+  const tierEmoji = tierResult.tier === 'S' ? '👑' : tierResult.tier === 'A' ? '⭐' : '📊';
+
   const platformDisplay = token.platform === 'pumpfun' ? 'Pump.fun'
     : token.platform === 'raydium_launchlab' ? 'Raydium LaunchLab'
     : token.platform;
@@ -120,13 +192,14 @@ export function formatDevSignalTelegram(signal: DevSignal): string {
   msg += `*Platform:* ${platformDisplay}\n`;
   msg += `*Launched:* Just now\n\n`;
 
-  msg += `*👷 DEV PROFILE*\n`;
+  msg += `*👷 DEV PROFILE* ${tierEmoji} *TIER ${tierResult.tier}*\n`;
   msg += `├─ Wallet: \`${devWalletShort}\`${devAlias}\n`;
   msg += `├─ Total Launches: ${dev.totalLaunches}\n`;
   msg += `├─ Hit $200K+: ${Math.round(dev.successRate * dev.totalLaunches)} (${successPct}%)\n`;
   msg += `├─ Best Launch: ${formatMarketCap(dev.bestPeakMc)} peak MC\n`;
   msg += `├─ Avg Peak MC: ${formatMarketCap(dev.avgPeakMc)}\n`;
   msg += `├─ Rug Rate: ${rugPct}%\n`;
+  msg += `├─ Tier Bonus: +${tierResult.scoreBonus} pts${tierResult.skipPullback ? ' | SKIP PULLBACK' : ''}\n`;
   msg += `└─ Last Launch: ${dev.lastLaunchAge}\n\n`;
 
   msg += `*⚡ SIGNAL PRIORITY:* ${priorityEmoji} ${signal.priority}\n\n`;

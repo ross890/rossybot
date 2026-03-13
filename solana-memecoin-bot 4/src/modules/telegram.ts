@@ -3533,6 +3533,27 @@ export class TelegramAlertBot {
   }
 
   /**
+   * Send a raw formatted message (used by portfolio manager, rotation detector, etc.)
+   */
+  async sendRawMessage(message: string): Promise<boolean> {
+    if (!this.bot) {
+      logger.warn('Bot not initialized - cannot send raw message');
+      return false;
+    }
+
+    try {
+      await this.bot.sendMessage(this.chatId, message, {
+        parse_mode: 'Markdown',
+        disable_web_page_preview: true,
+      });
+      return true;
+    } catch (error) {
+      logger.error({ error }, 'Failed to send raw message');
+      return false;
+    }
+  }
+
+  /**
    * Format discovery signal message
    */
   private formatDiscoverySignal(signal: DiscoverySignal): string {

@@ -2661,7 +2661,7 @@ export class SignalGenerator {
     }
 
     if (failedCriteria.length > 0) {
-      logger.info({
+      logger.debug({
         ticker: metrics.ticker,
         address: metrics.address?.slice(0, 8),
         failedCriteria,

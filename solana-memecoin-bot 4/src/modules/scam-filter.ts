@@ -330,17 +330,17 @@ export async function quickScamCheck(tokenAddress: string): Promise<{
 
     // Mint authority - flag only, don't block (new pump.fun tokens have it briefly)
     if (!contractAnalysis.mintAuthorityRevoked) {
-      logger.info({ tokenAddress }, 'Quick check FLAG: Mint authority not revoked');
+      logger.debug({ tokenAddress: tokenAddress.slice(0, 8) }, 'Quick check FLAG: Mint authority not revoked');
       warnings.push('Mint authority not revoked (may be new token)');
     }
 
     // Freeze authority - flag only, not a hard block
     if (!contractAnalysis.freezeAuthorityRevoked) {
-      logger.info({ tokenAddress }, 'Quick check FLAG: Freeze authority not revoked');
+      logger.debug({ tokenAddress: tokenAddress.slice(0, 8) }, 'Quick check FLAG: Freeze authority not revoked');
       warnings.push('Freeze authority not revoked');
     }
 
-    logger.info({ tokenAddress, warnings }, 'Quick check PASS');
+    logger.debug({ tokenAddress: tokenAddress.slice(0, 8), warnings }, 'Quick check PASS');
     return { pass: true, warnings: warnings.length > 0 ? warnings : undefined };
   } catch (error) {
     logger.error({ error, tokenAddress }, 'Quick scam check failed with exception');

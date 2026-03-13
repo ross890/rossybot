@@ -207,8 +207,9 @@ export class TokenSafetyChecker {
         freezeAuthorityEnabled: info.freezeAuthority !== null,
       };
     } catch (error) {
-      logger.warn({ error, tokenMint }, 'Failed to check mint authorities');
-      return { mintAuthorityEnabled: false, freezeAuthorityEnabled: false };
+      logger.warn({ tokenMint: tokenMint.slice(0, 8) }, 'Failed to check mint authorities');
+      // Fail-closed: assume authorities ARE enabled when we can't verify
+      return { mintAuthorityEnabled: true, freezeAuthorityEnabled: true };
     }
   }
 
@@ -252,8 +253,9 @@ export class TokenSafetyChecker {
 
       return { top10HolderConcentration, deployerHolding };
     } catch (error) {
-      logger.warn({ error, tokenMint }, 'Failed to check holder concentration');
-      return { top10HolderConcentration: 0, deployerHolding: 0 };
+      logger.warn({ tokenMint: tokenMint.slice(0, 8) }, 'Failed to check holder concentration');
+      // Fail-closed: assume high concentration when we can't verify
+      return { top10HolderConcentration: 80, deployerHolding: 15 };
     }
   }
 

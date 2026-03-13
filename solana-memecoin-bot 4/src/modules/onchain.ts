@@ -313,16 +313,23 @@ class HeliusClient {
   
   async getRecentTransactions(address: string, limit = 100): Promise<any[]> {
     try {
-      const response = await this.client.post('', {
-        jsonrpc: '2.0',
-        id: 'tx-request',
-        method: 'getSignaturesForAddress',
-        params: [address, { limit }],
-      });
+      return await this.executeWithRateLimit(async () => {
+        const response = await this.client.post('', {
+          jsonrpc: '2.0',
+          id: 'tx-request',
+          method: 'getSignaturesForAddress',
+          params: [address, { limit }],
+        });
 
-      return response.data.result || [];
-    } catch (error) {
-      logger.error({ error, address }, 'Failed to get transactions from Helius');
+        return response.data.result || [];
+      });
+    } catch (error: any) {
+      const status = error?.response?.status;
+      if (status === 429) {
+        logger.debug({ address: address.slice(0, 8) }, 'Failed to get transactions from Helius (rate limited)');
+      } else {
+        logger.warn({ address: address.slice(0, 8), status }, 'Failed to get transactions from Helius');
+      }
       return [];
     }
   }
@@ -333,27 +340,36 @@ class HeliusClient {
    */
   async getEnhancedTransactions(address: string, limit = 20): Promise<any[]> {
     try {
-      const url = `https://api.helius.xyz/v0/addresses/${address}/transactions?api-key=${this.apiKey}&limit=${limit}&type=SWAP`;
-      const response = await axios.get(url, { timeout: 30000 });
-      return response.data || [];
+      return await this.executeWithRateLimit(async () => {
+        const url = `https://api.helius.xyz/v0/addresses/${address}/transactions?api-key=${this.apiKey}&limit=${limit}&type=SWAP`;
+        const response = await axios.get(url, { timeout: 30000 });
+        return response.data || [];
+      });
     } catch (error) {
-      logger.warn({ error, address }, 'Enhanced transactions API failed, will use RPC fallback');
+      logger.debug({ address: address.slice(0, 8) }, 'Enhanced transactions API failed, will use RPC fallback');
       return [];
     }
   }
-  
+
   async getTransaction(signature: string): Promise<any> {
     try {
-      const response = await this.client.post('', {
-        jsonrpc: '2.0',
-        id: 'tx-detail',
-        method: 'getTransaction',
-        params: [signature, { encoding: 'jsonParsed', maxSupportedTransactionVersion: 0 }],
+      return await this.executeWithRateLimit(async () => {
+        const response = await this.client.post('', {
+          jsonrpc: '2.0',
+          id: 'tx-detail',
+          method: 'getTransaction',
+          params: [signature, { encoding: 'jsonParsed', maxSupportedTransactionVersion: 0 }],
+        });
+
+        return response.data.result;
       });
-      
-      return response.data.result;
-    } catch (error) {
-      logger.error({ error, signature }, 'Failed to get transaction details');
+    } catch (error: any) {
+      const status = error?.response?.status;
+      if (status === 429) {
+        logger.debug({ signature: signature.slice(0, 8) }, 'Failed to get transaction details (rate limited)');
+      } else {
+        logger.warn({ signature: signature.slice(0, 8), status }, 'Failed to get transaction details');
+      }
       return null;
     }
   }
@@ -460,30 +476,28 @@ class HeliusClient {
     slot: number;
   } | null> {
     try {
-      // Get the oldest signatures for this mint (limit 1, before=null gets oldest)
-      const response = await this.client.post('', {
-        jsonrpc: '2.0',
-        id: 'creation-sig',
-        method: 'getSignaturesForAddress',
-        params: [mintAddress, { limit: 1 }],
+      return await this.executeWithRateLimit(async () => {
+        const response = await this.client.post('', {
+          jsonrpc: '2.0',
+          id: 'creation-sig',
+          method: 'getSignaturesForAddress',
+          params: [mintAddress, { limit: 1 }],
+        });
+
+        const signatures = response.data.result || [];
+        if (signatures.length === 0) {
+          return null;
+        }
+
+        const sig = signatures[0];
+        return {
+          signature: sig.signature,
+          blockTime: sig.blockTime || 0,
+          slot: sig.slot || 0,
+        };
       });
-
-      const signatures = response.data.result || [];
-      if (signatures.length === 0) {
-        return null;
-      }
-
-      // The last signature in history is the creation
-      // But getSignaturesForAddress returns newest first, so we need to get the oldest
-      // For now, return the first one we get (recent activity indicator)
-      const sig = signatures[0];
-      return {
-        signature: sig.signature,
-        blockTime: sig.blockTime || 0,
-        slot: sig.slot || 0,
-      };
     } catch (error) {
-      logger.debug({ error, mintAddress }, 'Failed to get token creation signature');
+      logger.debug({ mintAddress: mintAddress.slice(0, 8) }, 'Failed to get token creation signature');
       return null;
     }
   }
@@ -1663,13 +1677,13 @@ export async function analyzeTokenContract(address: string): Promise<TokenContra
       `Helius security for ${address.slice(0, 8)}: mintAuth=${mintInfo?.mintAuthority || 'null'} freezeAuth=${mintInfo?.freezeAuthority || 'null'}`
     );
 
-    // Handle null/undefined response
+    // Handle null/undefined response — fail-closed: assume authorities are NOT revoked
+    // This prevents tokens from bypassing security checks when Helius is rate-limited
     if (!mintInfo) {
-      logger.warn(`No mint info from Helius for ${address.slice(0, 8)} - letting through`);
-      // Return permissive defaults when RPC returns nothing (let token through)
+      logger.debug(`No mint info from Helius for ${address.slice(0, 8)} - assuming unsafe defaults`);
       return {
-        mintAuthorityRevoked: true,
-        freezeAuthorityRevoked: true,
+        mintAuthorityRevoked: false,
+        freezeAuthorityRevoked: false,
         metadataMutable: false,
         isKnownScamTemplate: false,
       };
@@ -1683,11 +1697,11 @@ export async function analyzeTokenContract(address: string): Promise<TokenContra
       isKnownScamTemplate: false,
     };
   } catch (error) {
-    logger.error({ error, address }, 'Failed to analyze token contract');
-    // Return permissive defaults on error (let token through to later checks)
+    logger.warn({ address: address.slice(0, 8) }, 'Failed to analyze token contract');
+    // Fail-closed: assume authorities are NOT revoked when we can't verify
     return {
-      mintAuthorityRevoked: true,
-      freezeAuthorityRevoked: true,
+      mintAuthorityRevoked: false,
+      freezeAuthorityRevoked: false,
       metadataMutable: false,
       isKnownScamTemplate: false,
     };

@@ -946,6 +946,30 @@ export interface SignalEnrichment {
     timeToMigrationMinutes: number | null;
     tier: 'ROCKET' | 'FAST' | 'STEADY' | 'STALLING' | 'UNKNOWN';
   };
+  /** Phase 2: Social velocity — Twitter/social mention velocity */
+  socialVelocity?: {
+    uniqueMentions5m: number;
+    uniqueMentions1h: number;
+    velocityTier: 'VIRAL' | 'HIGH' | 'MODERATE' | 'LOW';
+    kolMentions: string[];
+    bonusPoints: number;
+  };
+  /** Phase 2: Whale detection — unknown whale buy patterns */
+  whaleActivity?: {
+    whaleCount: number;
+    qualityWhales: number;
+    suspiciousFresh: number;
+    isCluster: boolean;
+    totalSolDeployed: number;
+    bonusPoints: number;
+  };
+  /** Phase 2: Liquidity additions — LP add/burn events */
+  liquidity?: {
+    recentLpAdded: boolean;
+    deployerDoubledDown: boolean;
+    lpBurned: boolean;
+    bonusPoints: number;
+  };
 }
 
 // ============ PUMP.FUN DEV TRACKER TYPES ============

@@ -48,7 +48,7 @@ import { pullbackDetector } from './entry/pullbackDetector.js';
 import { sourceTracker } from './performance/sourceTracker.js';
 
 // Multi-source token discovery
-import { discoveryEngine, firstBuyerQuality, walletClustering, rotationDetector, bondingVelocityTracker } from './discovery/index.js';
+import { discoveryEngine, firstBuyerQuality, walletClustering, rotationDetector, bondingVelocityTracker, twitterScanner, whaleDetector, liquidityMonitor } from './discovery/index.js';
 import { gmgnClient } from './gmgn-client.js';
 
 // RugCheck integration — hard-gate for DANGER tokens
@@ -1050,7 +1050,7 @@ export class SignalGenerator {
     }
 
     // Enrichment: run predictive analysis modules in parallel
-    const enrichment = await this.getSignalEnrichment(tokenAddress);
+    const enrichment = await this.getSignalEnrichment(tokenAddress, metrics.marketCap);
 
     // Get KOL activity for this token
     const kolActivities = await kolWalletMonitor.getKolActivityForToken(
@@ -1232,7 +1232,19 @@ export class SignalGenerator {
       // Candlestick analysis is best-effort — don't block evaluation
     }
 
-    const adjustedTotal = Math.min(100, Math.max(0, onChainScore.total + socialBonus + surgeBonus + candlestickBonus));
+    // Phase 2: Apply enrichment bonuses from social velocity, whale detection, LP additions
+    let enrichmentBonus = 0;
+    if (enrichment.socialVelocity) {
+      enrichmentBonus += enrichment.socialVelocity.bonusPoints;
+    }
+    if (enrichment.whaleActivity) {
+      enrichmentBonus += enrichment.whaleActivity.bonusPoints;
+    }
+    if (enrichment.liquidity) {
+      enrichmentBonus += enrichment.liquidity.bonusPoints;
+    }
+
+    const adjustedTotal = Math.min(100, Math.max(0, onChainScore.total + socialBonus + surgeBonus + candlestickBonus + enrichmentBonus));
 
     logger.debug({
       tokenAddress: shortAddr,
@@ -1241,6 +1253,7 @@ export class SignalGenerator {
       socialBonus,
       surgeBonus,
       candlestickBonus,
+      enrichmentBonus,
       adjustedTotal,
       candlestickInfo: candlestickInfo || 'N/A',
       recommendation: onChainScore.recommendation,
@@ -1248,7 +1261,12 @@ export class SignalGenerator {
       momentum: onChainScore.components.momentum,
       safety: onChainScore.components.safety,
       socialBreakdown: socialScore.breakdown.length > 0 ? socialScore.breakdown.join(', ') : 'None',
-    }, 'EVAL: On-chain + social + candlestick scoring complete');
+      phase2Enrichment: enrichmentBonus > 0 ? {
+        social: enrichment.socialVelocity?.bonusPoints || 0,
+        whale: enrichment.whaleActivity?.bonusPoints || 0,
+        lp: enrichment.liquidity?.bonusPoints || 0,
+      } : undefined,
+    }, 'EVAL: On-chain + social + candlestick + enrichment scoring complete');
 
     // Step 2: Check if bundle/safety risk is too high
     // CRITICAL risk is ALWAYS blocked (non-negotiable)
@@ -2789,15 +2807,24 @@ export class SignalGenerator {
    * Collect predictive enrichment data from discovery modules.
    * All four analyses run in parallel to minimize latency.
    */
-  private async getSignalEnrichment(tokenAddress: string): Promise<SignalEnrichment> {
+  private async getSignalEnrichment(tokenAddress: string, marketCap?: number): Promise<SignalEnrichment> {
     const enrichment: SignalEnrichment = {};
 
     try {
-      const [buyerResult, clusterResult, rotationResult, velocityResult] = await Promise.allSettled([
+      // Phase 1 enrichments + Phase 2 new sources — all in parallel
+      const [
+        buyerResult, clusterResult, rotationResult, velocityResult,
+        socialResult, whaleResult, lpResult,
+      ] = await Promise.allSettled([
+        // Phase 1
         firstBuyerQuality.analyze(tokenAddress),
         walletClustering.analyze(tokenAddress),
         rotationDetector.getRotationContext(tokenAddress),
         bondingVelocityTracker.getVelocity(tokenAddress),
+        // Phase 2: Social velocity, whale detection, liquidity monitoring
+        twitterScanner.getVelocity(tokenAddress),
+        marketCap ? whaleDetector.getWhaleScoreBonus(tokenAddress, marketCap) : Promise.resolve(null),
+        liquidityMonitor.getLiquidityScoreBonus(tokenAddress),
       ]);
 
       if (buyerResult.status === 'fulfilled' && buyerResult.value.buyersAnalyzed > 0) {
@@ -2844,6 +2871,42 @@ export class SignalGenerator {
           accelerating: v.accelerating,
           timeToMigrationMinutes: v.timeToMigrationMinutes,
           tier: v.tier,
+        };
+      }
+
+      // Phase 2: Social velocity enrichment
+      if (socialResult.status === 'fulfilled' && socialResult.value.velocityTier !== 'LOW') {
+        const s = socialResult.value;
+        enrichment.socialVelocity = {
+          uniqueMentions5m: s.uniqueMentions5m,
+          uniqueMentions1h: s.uniqueMentions1h,
+          velocityTier: s.velocityTier,
+          kolMentions: s.kolMentions,
+          bonusPoints: s.bonusPoints,
+        };
+      }
+
+      // Phase 2: Whale activity enrichment
+      if (whaleResult.status === 'fulfilled' && whaleResult.value && whaleResult.value.totalBonus !== 0) {
+        const w = whaleResult.value;
+        enrichment.whaleActivity = {
+          whaleCount: w.singleWhaleBuyBonus > 0 ? 1 : 0,
+          qualityWhales: w.qualityWhaleBonus > 0 ? 1 : 0,
+          suspiciousFresh: w.suspiciousFreshPenalty < 0 ? 1 : 0,
+          isCluster: w.whaleClusterBonus > 0,
+          totalSolDeployed: 0, // Populated from cluster data if available
+          bonusPoints: w.totalBonus,
+        };
+      }
+
+      // Phase 2: Liquidity enrichment
+      if (lpResult.status === 'fulfilled' && lpResult.value.bonusPoints > 0) {
+        const l = lpResult.value;
+        enrichment.liquidity = {
+          recentLpAdded: l.recentLpAddition,
+          deployerDoubledDown: l.deployerDoubledDown,
+          lpBurned: l.lpBurned,
+          bonusPoints: l.bonusPoints,
         };
       }
     } catch (error) {

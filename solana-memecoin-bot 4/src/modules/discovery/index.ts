@@ -22,8 +22,15 @@ export { bondingVelocityTracker, type BondingVelocity } from './bonding-velocity
 export { walletClustering, type ClusterAnalysis } from './wallet-clustering.js';
 export { trendingScanner, type TrendingDigest, type TrendingToken } from './trending-scanner.js';
 
+// Phase 2: New discovery sources
+export { twitterScanner, TwitterScanner, type SocialVelocity } from './twitterScanner.js';
+export { whaleDetector, WhaleDetector, type WhaleBuy, type WhaleCluster, type WhaleScoreBonus } from './whaleDetector.js';
+export { liquidityMonitor, LiquidityMonitor, type LiquidityEvent, type LiquidityScoreBonus } from './liquidityMonitor.js';
+
 import { smartMoneyScanner } from './smart-money-scanner.js';
 import { walletDiscoveryEngine } from './wallet-discovery.js';
+import { twitterScanner } from './twitterScanner.js';
+import { whaleDetector } from './whaleDetector.js';
 import { logger } from '../../utils/logger.js';
 
 // ============ UNIFIED DISCOVERY ENGINE ============
@@ -34,7 +41,9 @@ class DiscoveryEngine {
   async initialize(): Promise<void> {
     logger.info('Initializing discovery engine...');
     await smartMoneyScanner.initialize();
-    logger.info('Discovery engine initialized');
+    await twitterScanner.initialize();
+    await whaleDetector.initialize();
+    logger.info('Discovery engine initialized (smart money + twitter + whale detector)');
   }
 
   start(): void {
@@ -42,7 +51,8 @@ class DiscoveryEngine {
     this.isRunning = true;
     smartMoneyScanner.start();
     walletDiscoveryEngine.start();
-    logger.info('Discovery engine started (smart money + wallet discovery active)');
+    twitterScanner.start();
+    logger.info('Discovery engine started (smart money + wallet discovery + twitter active)');
   }
 
   stop(): void {
@@ -50,6 +60,7 @@ class DiscoveryEngine {
     this.isRunning = false;
     smartMoneyScanner.stop();
     walletDiscoveryEngine.stop();
+    twitterScanner.stop();
     logger.info('Discovery engine stopped');
   }
 

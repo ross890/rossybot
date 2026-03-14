@@ -147,7 +147,7 @@ export class HeliusWebSocketManager extends EventEmitter {
   }
 
   private async onClose(code: number, reason: string): Promise<void> {
-    logger.warn({ code, reason }, 'Helius WebSocket closed');
+    console.error(`Helius WebSocket closed: code=${code} reason=${reason}`);
     this.clearTimers();
 
     await this.logHealth(WsHealthEvent.DISCONNECTED, { code, reason });
@@ -160,7 +160,7 @@ export class HeliusWebSocketManager extends EventEmitter {
   }
 
   private async onError(err: Error & { code?: string }): Promise<void> {
-    logger.error({ error: err.message, code: err.code, stack: err.stack?.split('\n')[1]?.trim() }, 'Helius WebSocket error');
+    console.error(`Helius WebSocket error: ${err.message} | code: ${err.code || 'none'}`);
     // onClose will be called after onError, which triggers reconnect
   }
 

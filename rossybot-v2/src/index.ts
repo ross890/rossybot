@@ -27,9 +27,16 @@ class RossyBotV2 {
   private dailySummaryInterval: ReturnType<typeof setInterval> | null = null;
 
   constructor() {
-    // Derive public key from private key
-    const keypair = Keypair.fromSecretKey(bs58.decode(config.wallet.privateKey));
-    const publicKey = keypair.publicKey.toBase58();
+    // Derive public key from private key (optional in shadow mode)
+    let publicKey: string;
+    if (config.wallet.privateKey) {
+      const keypair = Keypair.fromSecretKey(bs58.decode(config.wallet.privateKey));
+      publicKey = keypair.publicKey.toBase58();
+    } else {
+      // Shadow mode — use a dummy key for balance checks (will read 0 SOL = MICRO tier)
+      publicKey = '11111111111111111111111111111111';
+      console.log('No WALLET_PRIVATE_KEY set — running in shadow-only mode (MICRO tier, 0 SOL)');
+    }
 
     // Initialize all modules
     this.capitalManager = new CapitalManager(publicKey);

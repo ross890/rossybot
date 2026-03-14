@@ -209,13 +209,31 @@ export class DailyAutoOptimizer {
         stats.winRate
       );
 
-      // Step 5: Apply new thresholds if there are changes
+      // Step 5: DO NOT auto-apply threshold changes.
+      // REASON: The scoring model is inverted (low scores predict wins), so the
+      // optimizer was in a doom loop — it kept tightening thresholds which filtered
+      // OUT winners. Data collection and analysis still run; applying changes is
+      // blocked until the scoring model is fixed. Use /approve_thresholds to
+      // manually apply after human review.
       if (changesApplied.length > 0) {
-        thresholdOptimizer.setThresholds(newThresholds);
-        await this.saveThresholdsToDatabase(newThresholds);
+        // Previously: thresholdOptimizer.setThresholds(newThresholds);
+        // Previously: await this.saveThresholdsToDatabase(newThresholds);
+        // Previously: await this.updateSignalGeneratorThresholds(newThresholds);
 
-        // Also update the signal generator constants
-        await this.updateSignalGeneratorThresholds(newThresholds);
+        logger.warn({
+          recommendedThresholds: newThresholds,
+          changesApplied,
+          reasoning,
+        }, 'Threshold optimizer DISABLED — changes recommended but NOT applied. Scoring model is inverted; optimizer was in a doom loop.');
+
+        // Notify via Telegram that manual approval is required
+        await this.sendTelegramMessage(
+          `⚠️ *OPTIMIZER DISABLED — MANUAL APPROVAL REQUIRED*\n\n` +
+          `The threshold optimizer has generated recommendations but they have NOT been applied.\n\n` +
+          `*Reason:* Scoring model is inverted — optimizer was in a doom loop (tightening thresholds filtered OUT winners).\n\n` +
+          `*Recommended changes:*\n${changesApplied.map(c => `• ${c}`).join('\n')}\n\n` +
+          `Use /approve\\_thresholds to review and apply manually.`
+        );
       }
 
       // Step 6: Build report

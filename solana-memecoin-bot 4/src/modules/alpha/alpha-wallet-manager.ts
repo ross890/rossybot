@@ -100,7 +100,37 @@ export class AlphaWalletManager {
     this.startEngineWalletMonitoring();
 
     const activeWallets = await Database.getActiveAlphaWallets();
-    logger.info({ walletCount: activeWallets.length }, 'Alpha Wallet Manager initialized');
+
+    // DIAGNOSTIC: Log alpha pipeline readiness
+    let engineWalletCount = 0;
+    try {
+      const { walletEngine: engine } = await import('../../wallets/walletEngine.js');
+      const engineWallets = await engine.getActiveWallets();
+      engineWalletCount = engineWallets.length;
+    } catch { /* non-critical */ }
+
+    logger.info({
+      alphaWalletCount: activeWallets.length,
+      engineWalletCount,
+      heliusDisabled: appConfig.heliusDisabled,
+      discoveryBufferSize: this.alphaDiscoveredTokens.size,
+    }, 'Alpha Wallet Manager initialized');
+
+    if (activeWallets.length === 0 && engineWalletCount === 0) {
+      logger.warn(
+        'ALPHA PIPELINE WARNING: Zero active wallets (alpha + engine). ' +
+        'No wallet buys will be detected until wallets are added via /addwallet or graduated by the engine. ' +
+        'GMGN discovery seeds candidates but graduation requires Helius-based observation.'
+      );
+    }
+
+    if (appConfig.heliusDisabled) {
+      logger.warn(
+        'ALPHA PIPELINE WARNING: Helius is DISABLED (HELIUS_DISABLED=true). ' +
+        'Wallet trade monitoring, engine wallet monitoring, and candidate graduation ALL require Helius. ' +
+        'Alpha wallet signals will NOT fire until Helius is re-enabled.'
+      );
+    }
   }
 
   /**
@@ -121,14 +151,26 @@ export class AlphaWalletManager {
     const EXPIRY_MS = 30 * 60 * 1000;
 
     // Expire entries older than 30 minutes
+    let expiredCount = 0;
     for (const [token, info] of this.alphaDiscoveredTokens) {
       if (now - info.discoveredAt > EXPIRY_MS) {
         this.alphaDiscoveredTokens.delete(token);
+        expiredCount++;
       }
     }
 
+    const tokens = Array.from(this.alphaDiscoveredTokens.keys());
+
+    // Log when buffer has tokens (info) or periodically when empty (debug)
+    if (tokens.length > 0 || expiredCount > 0) {
+      logger.info({
+        activeTokens: tokens.length,
+        expired: expiredCount,
+      }, 'Alpha discovery buffer drained by signal generator');
+    }
+
     // Return token addresses but keep the map intact for fast-track lookup
-    return Array.from(this.alphaDiscoveredTokens.keys());
+    return tokens;
   }
 
   /**
@@ -158,6 +200,32 @@ export class AlphaWalletManager {
    */
   markProcessed(tokenAddress: string): void {
     this.alphaDiscoveredTokens.delete(tokenAddress);
+  }
+
+  /**
+   * Inject a token into the discovery buffer from an external source
+   * (e.g. Nansen Smart Alert webhook). Signal generator will pick it up
+   * in the next scan cycle via drainDiscoveredTokens().
+   */
+  injectDiscoveredToken(tokenAddress: string, metadata: {
+    walletAddress: string;
+    walletLabel: string | null;
+    solAmount: number;
+    txSignature?: string;
+  }): boolean {
+    if (this.alphaDiscoveredTokens.has(tokenAddress)) {
+      return false; // Already in buffer
+    }
+
+    this.alphaDiscoveredTokens.set(tokenAddress, {
+      walletAddress: metadata.walletAddress,
+      walletLabel: metadata.walletLabel,
+      solAmount: metadata.solAmount,
+      txSignature: metadata.txSignature || 'nansen-alert',
+      discoveredAt: Date.now(),
+    });
+
+    return true;
   }
 
   /**
@@ -429,6 +497,15 @@ export class AlphaWalletManager {
     // Monitor every 5 minutes
     const INTERVAL_MS = 5 * 60 * 1000;
 
+    // Run initial scan after 15s delay (let Helius client settle)
+    setTimeout(async () => {
+      try {
+        await this.monitorTrades();
+      } catch (error) {
+        logger.error({ error }, 'Error in initial trade monitoring scan');
+      }
+    }, 15_000);
+
     this.tradeMonitorTimer = setInterval(async () => {
       try {
         await this.monitorTrades();
@@ -437,14 +514,23 @@ export class AlphaWalletManager {
       }
     }, INTERVAL_MS);
 
-    logger.info('Alpha wallet trade monitoring started (5 min interval)');
+    logger.info('Alpha wallet trade monitoring started (5 min interval, initial scan in 15s)');
   }
 
   /**
    * Monitor trades for all active alpha wallets
    */
   private async monitorTrades(): Promise<void> {
+    if (appConfig.heliusDisabled) {
+      logger.debug('Alpha trade monitoring skipped — Helius disabled');
+      return;
+    }
+
     const wallets = await Database.getActiveAlphaWallets();
+
+    if (wallets.length === 0) {
+      logger.debug('Alpha trade monitoring: no active alpha wallets to monitor');
+    }
 
     for (const wallet of wallets) {
       try {
@@ -457,6 +543,11 @@ export class AlphaWalletManager {
     // Also monitor cluster destination wallets for sells
     // This creates cross-wallet round-trips: source buys → transfers → dest sells
     await this.monitorClusterDestinations();
+
+    logger.debug({
+      walletsMonitored: wallets.length,
+      discoveryBufferSize: this.alphaDiscoveredTokens.size,
+    }, 'Alpha trade monitoring cycle complete');
   }
 
   /**
@@ -573,7 +664,7 @@ export class AlphaWalletManager {
    * Falls back to raw RPC parsing with WSOL support if enhanced API fails.
    */
   private async monitorWalletTrades(wallet: AlphaWallet): Promise<void> {
-    if (appConfig.heliusDisabled) return;
+    // Helius check moved to monitorTrades() caller — don't silently skip here
 
     // Try Helius Enhanced Transactions API first (pre-parsed swaps)
     const enhancedTxs = await heliusClient.getEnhancedTransactions(wallet.address, 20);
@@ -1092,6 +1183,15 @@ export class AlphaWalletManager {
   private startEngineWalletMonitoring(): void {
     const INTERVAL_MS = 5 * 60 * 1000; // Every 5 minutes, same as existing
 
+    // Run initial scan after 30s delay (after trade monitor's initial scan)
+    setTimeout(async () => {
+      try {
+        await this.monitorEngineWallets();
+      } catch (error) {
+        logger.error({ error }, 'Error in initial engine wallet monitoring scan');
+      }
+    }, 30_000);
+
     this.engineWalletTimer = setInterval(async () => {
       try {
         await this.monitorEngineWallets();
@@ -1100,7 +1200,7 @@ export class AlphaWalletManager {
       }
     }, INTERVAL_MS);
 
-    logger.info('Engine wallet trade monitoring started (5 min interval)');
+    logger.info('Engine wallet trade monitoring started (5 min interval, initial scan in 30s)');
   }
 
   /**
@@ -1109,12 +1209,19 @@ export class AlphaWalletManager {
    * so the signal generator picks them up in the next scan cycle.
    */
   private async monitorEngineWallets(): Promise<void> {
-    if (appConfig.heliusDisabled) return;
+    if (appConfig.heliusDisabled) {
+      logger.debug('Engine wallet monitoring skipped — Helius disabled');
+      return;
+    }
 
     try {
       const { walletEngine: engine } = await import('../../wallets/walletEngine.js');
       const { coTraderDiscovery } = await import('../../wallets/coTraderDiscovery.js');
       const activeEngineWallets = await engine.getActiveWallets();
+
+      if (activeEngineWallets.length === 0) {
+        logger.debug('Engine wallet monitoring: no active engine wallets to monitor (candidates need to graduate first)');
+      }
 
       for (const ew of activeEngineWallets) {
         try {
@@ -1165,6 +1272,10 @@ export class AlphaWalletManager {
           logger.debug({ error, wallet: ew.walletAddress.slice(0, 8) }, 'Error monitoring engine wallet');
         }
       }
+      logger.debug({
+        engineWalletsMonitored: activeEngineWallets.length,
+        discoveryBufferSize: this.alphaDiscoveredTokens.size,
+      }, 'Engine wallet monitoring cycle complete');
     } catch (error) {
       logger.error({ error }, 'Error in engine wallet monitoring cycle');
     }

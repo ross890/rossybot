@@ -307,7 +307,37 @@ export class WalletPerformanceManager {
       msg += '\n';
     }
 
-    msg += `*CANDIDATES:* ${report.totalCandidates} observing (avg ${report.candidateAvgTrades.toFixed(1)} trades observed)`;
+    msg += `*CANDIDATES:* ${report.totalCandidates} observing (avg ${report.candidateAvgTrades.toFixed(1)} trades observed)\n\n`;
+
+    // Discovery source breakdown
+    try {
+      const activeWallets = await walletEngine.getActiveWallets();
+      const candidates = await walletEngine.getCandidates();
+      const allWallets = [...activeWallets, ...candidates];
+
+      const sourceCounts: Record<string, number> = {};
+      for (const w of allWallets) {
+        sourceCounts[w.source] = (sourceCounts[w.source] || 0) + 1;
+      }
+
+      if (Object.keys(sourceCounts).length > 0) {
+        msg += `*DISCOVERY SOURCES*\n`;
+        for (const [source, count] of Object.entries(sourceCounts).sort((a, b) => b[1] - a[1])) {
+          msg += `  ${source}: ${count}\n`;
+        }
+
+        const nansenCount = (sourceCounts['NANSEN_PNL_LEADERBOARD'] || 0)
+                          + (sourceCounts['NANSEN_WINNER_SCAN'] || 0)
+                          + (sourceCounts['NANSEN_SMART_ALERT'] || 0);
+        const gmgnCount = sourceCounts['GMGN_LEADERBOARD'] || 0;
+
+        if (nansenCount > 0 || gmgnCount > 0) {
+          msg += `  _Nansen: ${nansenCount} | GMGN: ${gmgnCount}_\n`;
+        }
+      }
+    } catch {
+      // Non-critical
+    }
 
     return msg;
   }

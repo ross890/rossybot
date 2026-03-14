@@ -118,6 +118,13 @@ export class ThresholdOptimizer {
   private currentThresholds: ThresholdSet;
   private lastOptimization: Date | null = null;
 
+  // Phase 1A: Optimizer DISABLED by default.
+  // Scoring model is inverted (low scores predict wins), so the optimizer
+  // was in a doom loop — tightening thresholds filtered OUT winners.
+  // Data collection and recommendation generation still run; auto-apply is blocked.
+  // Use /approve_thresholds to manually apply recommendations after review.
+  enabled: boolean = false;
+
   constructor() {
     this.currentThresholds = { ...DEFAULT_THRESHOLDS };
   }
@@ -248,7 +255,16 @@ export class ThresholdOptimizer {
       const appliedChanges: string[] = [];
       let autoApplied = false;
 
-      if (autoApply && recommendations.length > 0) {
+      // Phase 1A: When optimizer is disabled, generate recommendations but NEVER apply.
+      // Scoring model is inverted — optimizer doom-loops by tightening away winners.
+      if (!this.enabled) {
+        logger.warn(
+          'Threshold optimizer is DISABLED — recommendations generated but NOT applied. Use /approve_thresholds to apply.'
+        );
+        appliedChanges.push('OPTIMIZER DISABLED: Recommendations generated but NOT auto-applied. Use /approve_thresholds to apply.');
+      }
+
+      if (this.enabled && autoApply && recommendations.length > 0) {
         const validationResult = await this.holdoutValidation(recommendedThresholds);
         appliedChanges.push(`EV regime: ${evRegime} | Sortino: ${sortinoRatio.toFixed(2)}`);
 

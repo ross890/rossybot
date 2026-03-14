@@ -385,6 +385,9 @@ export class SignalPerformanceTracker {
       uniqueBuyers?: number;
       signalTrack?: string;      // DUAL-TRACK: 'PROVEN_RUNNER' | 'EARLY_QUALITY'
       kolReputation?: string;    // DUAL-TRACK: KOL tier for EARLY_QUALITY
+      // Phase 2C: Time-based features
+      hourOfDayUtc?: number;
+      holderGrowthRate?: number;
     }
   ): Promise<void> {
     try {
@@ -403,8 +406,9 @@ export class SignalPerformanceTracker {
           entry_top10_concentration, entry_buy_sell_ratio, entry_unique_buyers,
           signal_track, kol_reputation,
           exit_state_json, data_quality, data_epoch,
+          hour_of_day_utc, holder_growth_rate,
           signal_time, tracked, final_outcome
-        ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, NOW(), true, 'PENDING')
+        ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23, $24, NOW(), true, 'PENDING')
         ON CONFLICT (signal_id) DO NOTHING
       `, [
         signalId, tokenAddress, tokenTicker, signalType,
@@ -420,7 +424,9 @@ export class SignalPerformanceTracker {
         metrics.kolReputation || null,
         JSON.stringify(initialExitState),
         'canonical',  // Mark as post-alignment
-        'post_emergency_fix',  // EMERGENCY FIX: Data epoch for fresh performance tracking
+        'phase1_fix_v2',  // Phase 2C: Data epoch for score-as-sizing era
+        metrics.hourOfDayUtc ?? new Date().getUTCHours(),
+        metrics.holderGrowthRate ?? null,
       ]);
 
       logger.info({
@@ -1589,6 +1595,13 @@ export class SignalPerformanceTracker {
           -- EMERGENCY FIX 5: Liquidity at entry for collapse detection
           IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name = 'signal_performance' AND column_name = 'exit_liquidity') THEN
             ALTER TABLE signal_performance ADD COLUMN exit_liquidity DECIMAL(30, 2);
+          END IF;
+          -- Phase 2C: Time-based features for model rebuild
+          IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name = 'signal_performance' AND column_name = 'hour_of_day_utc') THEN
+            ALTER TABLE signal_performance ADD COLUMN hour_of_day_utc INTEGER;
+          END IF;
+          IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name = 'signal_performance' AND column_name = 'holder_growth_rate') THEN
+            ALTER TABLE signal_performance ADD COLUMN holder_growth_rate DECIMAL(10, 4);
           END IF;
         END $$;
       `);

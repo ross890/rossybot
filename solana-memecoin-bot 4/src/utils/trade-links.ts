@@ -122,7 +122,7 @@ export function getInlineKeyboardButtons(tokenMint: string): InlineButton[][] {
     [
       { text: 'DexScreener', url: links.dexscreener },
       { text: 'RugCheck', url: links.rugcheck },
-      { text: 'Photon', url: links.photon },
+      { text: 'BullX', url: links.bullx },
     ],
     // Row 3: Explorer
     [

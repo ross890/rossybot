@@ -379,6 +379,23 @@ class HeliusClient {
     }
   }
 
+  /**
+   * Get token transfer transactions (non-swap) for a wallet.
+   * Used to detect if a wallet is transferring tokens out instead of selling on DEX.
+   */
+  async getTokenTransfers(address: string, limit = 50): Promise<any[]> {
+    try {
+      return await this.executeWithRateLimit(async () => {
+        const url = `https://api.helius.xyz/v0/addresses/${address}/transactions?api-key=${this.apiKey}&limit=${limit}&type=TRANSFER`;
+        const response = await axios.get(url, { timeout: 30000 });
+        return response.data || [];
+      });
+    } catch (error) {
+      logger.debug({ address: address.slice(0, 8) }, 'Token transfers API failed');
+      return [];
+    }
+  }
+
   async getTransaction(signature: string): Promise<any> {
     try {
       return await this.executeWithRateLimit(async () => {

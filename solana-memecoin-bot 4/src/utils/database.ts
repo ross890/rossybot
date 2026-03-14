@@ -407,6 +407,35 @@ CREATE TABLE IF NOT EXISTS alpha_wallet_evaluations (
   evaluated_at TIMESTAMP DEFAULT NOW()
 );
 
+-- Alpha Wallet Transfers - tracks where tokens go after buy (transfer intelligence)
+CREATE TABLE IF NOT EXISTS alpha_wallet_transfers (
+  id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+  wallet_id UUID REFERENCES alpha_wallets(id) ON DELETE CASCADE,
+  wallet_address VARCHAR(64) NOT NULL,
+  token_address VARCHAR(64) NOT NULL,
+  destination_address VARCHAR(64) NOT NULL,
+  token_amount DECIMAL(30, 10),
+  tx_signature VARCHAR(128) UNIQUE,
+  timestamp TIMESTAMP NOT NULL,
+  -- Linked buy trade (which BUY preceded this transfer)
+  source_buy_trade_id UUID REFERENCES alpha_wallet_trades(id),
+  created_at TIMESTAMP DEFAULT NOW()
+);
+
+-- Wallet Clusters - links source wallets to their destination wallets
+-- When same source transfers to same dest 3+ times, they form a cluster
+CREATE TABLE IF NOT EXISTS wallet_clusters (
+  id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+  source_address VARCHAR(64) NOT NULL,
+  destination_address VARCHAR(64) NOT NULL,
+  transfer_count INTEGER DEFAULT 1,
+  first_seen TIMESTAMP DEFAULT NOW(),
+  last_seen TIMESTAMP DEFAULT NOW(),
+  -- Whether the destination is being monitored for sells
+  is_monitored BOOLEAN DEFAULT FALSE,
+  UNIQUE(source_address, destination_address)
+);
+
 -- Alpha wallet indexes
 CREATE INDEX IF NOT EXISTS idx_alpha_wallets_address ON alpha_wallets(address);
 CREATE INDEX IF NOT EXISTS idx_alpha_wallets_status ON alpha_wallets(status);
@@ -416,6 +445,13 @@ CREATE INDEX IF NOT EXISTS idx_alpha_wallet_trades_token ON alpha_wallet_trades(
 CREATE INDEX IF NOT EXISTS idx_alpha_wallet_trades_timestamp ON alpha_wallet_trades(timestamp DESC);
 CREATE INDEX IF NOT EXISTS idx_alpha_wallet_trades_signature ON alpha_wallet_trades(tx_signature);
 CREATE INDEX IF NOT EXISTS idx_alpha_wallet_evaluations_wallet ON alpha_wallet_evaluations(wallet_id);
+CREATE INDEX IF NOT EXISTS idx_alpha_wallet_transfers_wallet ON alpha_wallet_transfers(wallet_address);
+CREATE INDEX IF NOT EXISTS idx_alpha_wallet_transfers_dest ON alpha_wallet_transfers(destination_address);
+CREATE INDEX IF NOT EXISTS idx_alpha_wallet_transfers_token ON alpha_wallet_transfers(token_address);
+CREATE INDEX IF NOT EXISTS idx_alpha_wallet_transfers_signature ON alpha_wallet_transfers(tx_signature);
+CREATE INDEX IF NOT EXISTS idx_wallet_clusters_source ON wallet_clusters(source_address);
+CREATE INDEX IF NOT EXISTS idx_wallet_clusters_dest ON wallet_clusters(destination_address);
+CREATE INDEX IF NOT EXISTS idx_wallet_clusters_monitored ON wallet_clusters(is_monitored) WHERE is_monitored = TRUE;
 
 -- Indexes for performance
 CREATE INDEX IF NOT EXISTS idx_kol_wallets_address ON kol_wallets(address);
@@ -2083,6 +2119,123 @@ export class Database {
       holdTimeHours: row.hold_time_hours ? parseFloat(row.hold_time_hours) : null,
       createdAt: row.created_at,
     };
+  }
+
+  // ============ ALPHA WALLET TRANSFER INTELLIGENCE ============
+
+  static async recordAlphaWalletTransfer(transfer: {
+    walletId: string;
+    walletAddress: string;
+    tokenAddress: string;
+    destinationAddress: string;
+    tokenAmount: number;
+    txSignature: string;
+    timestamp: Date;
+    sourceBuyTradeId?: string;
+  }): Promise<string> {
+    const result = await pool.query(
+      `INSERT INTO alpha_wallet_transfers (
+        wallet_id, wallet_address, token_address, destination_address,
+        token_amount, tx_signature, timestamp, source_buy_trade_id
+      ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+      ON CONFLICT (tx_signature) DO NOTHING
+      RETURNING id`,
+      [
+        transfer.walletId, transfer.walletAddress, transfer.tokenAddress,
+        transfer.destinationAddress, transfer.tokenAmount,
+        transfer.txSignature, transfer.timestamp, transfer.sourceBuyTradeId
+      ]
+    );
+    return result.rows[0]?.id || '';
+  }
+
+  static async upsertWalletCluster(
+    sourceAddress: string,
+    destinationAddress: string
+  ): Promise<{ transferCount: number; isNew: boolean }> {
+    const result = await pool.query(
+      `INSERT INTO wallet_clusters (source_address, destination_address)
+       VALUES ($1, $2)
+       ON CONFLICT (source_address, destination_address)
+       DO UPDATE SET
+         transfer_count = wallet_clusters.transfer_count + 1,
+         last_seen = NOW()
+       RETURNING transfer_count`,
+      [sourceAddress, destinationAddress]
+    );
+    const count = result.rows[0]?.transfer_count || 1;
+    return { transferCount: count, isNew: count === 1 };
+  }
+
+  static async getWalletClusterDestinations(sourceAddress: string): Promise<any[]> {
+    const result = await pool.query(
+      `SELECT * FROM wallet_clusters
+       WHERE source_address = $1
+       ORDER BY transfer_count DESC`,
+      [sourceAddress]
+    );
+    return result.rows;
+  }
+
+  static async getClusterSourcesForDestination(destinationAddress: string): Promise<any[]> {
+    const result = await pool.query(
+      `SELECT wc.*, aw.id as alpha_wallet_id, aw.status, aw.signal_weight, aw.label
+       FROM wallet_clusters wc
+       JOIN alpha_wallets aw ON aw.address = wc.source_address
+       WHERE wc.destination_address = $1 AND wc.transfer_count >= 2`,
+      [destinationAddress]
+    );
+    return result.rows;
+  }
+
+  static async setClusterMonitored(
+    sourceAddress: string,
+    destinationAddress: string,
+    monitored: boolean
+  ): Promise<void> {
+    await pool.query(
+      `UPDATE wallet_clusters SET is_monitored = $3
+       WHERE source_address = $1 AND destination_address = $2`,
+      [sourceAddress, destinationAddress, monitored]
+    );
+  }
+
+  static async getMonitoredClusterDestinations(): Promise<any[]> {
+    const result = await pool.query(
+      `SELECT DISTINCT wc.destination_address, wc.source_address,
+              aw.id as alpha_wallet_id, aw.label, aw.status
+       FROM wallet_clusters wc
+       JOIN alpha_wallets aw ON aw.address = wc.source_address
+       WHERE wc.is_monitored = TRUE AND aw.status IN ('PROBATION', 'ACTIVE', 'TRUSTED')`
+    );
+    return result.rows;
+  }
+
+  static async getTransfersForToken(
+    walletAddress: string,
+    tokenAddress: string
+  ): Promise<any[]> {
+    const result = await pool.query(
+      `SELECT * FROM alpha_wallet_transfers
+       WHERE wallet_address = $1 AND token_address = $2
+       ORDER BY timestamp DESC`,
+      [walletAddress, tokenAddress]
+    );
+    return result.rows;
+  }
+
+  static async getRecentTransfersByWallet(
+    walletAddress: string,
+    limitDays: number = 30
+  ): Promise<any[]> {
+    const result = await pool.query(
+      `SELECT * FROM alpha_wallet_transfers
+       WHERE wallet_address = $1
+         AND timestamp > NOW() - INTERVAL '${limitDays} days'
+       ORDER BY timestamp DESC`,
+      [walletAddress]
+    );
+    return result.rows;
   }
 
   // ============ SMART MONEY DISCOVERY OPERATIONS ============

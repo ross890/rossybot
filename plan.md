@@ -1,140 +1,175 @@
-# ROSSYBOT EDGE IMPROVEMENT PLAN
+# ROSSYBOT SYSTEM REDESIGN PLAN
 
-## Priority Tiers
+## The Problem
 
-Grouped by expected impact on win rate / EV. Each item is a concrete code change.
+The current system has ~80 TypeScript files, 11+ modules, and layers of features that were
+never validated. Social metrics return hardcoded values. Three exit systems contradict each
+other. Market regime detection exists but isn't wired in. There's no backtesting, no
+automated execution, and the strategic analysis rates it 4.2/10 for profitability.
 
----
-
-## TIER 1: HIGH IMPACT — Direct Edge Gains (Do First)
-
-### 1. Integrate Market Regime Detection Into Signal Generator
-**Gap:** `bonding-monitor.ts` already has `getMarketRegime()` (BULL/CAUTION/BEAR/ROTATION with position multipliers) but it's **never called** from signal generation.
-**Fix:** Wire regime into signal generator — adjust position sizing and threshold strictness based on regime. BEAR → tighten thresholds + smaller positions. BULL → allow more signals.
-**Files:** `signal-generator.ts`, import from `pumpfun/bonding-monitor.ts`
-**Effort:** Small — wiring existing code
-
-### 2. Align The 3 Exit/Target Systems
-**Gap:** Three misaligned systems operate simultaneously:
-- Position manager: category-based (TP1 +100% to +400%, TP2 +250% to +1500%)
-- Signal Telegram display: fixed +50%/+150% TP, -30% SL
-- Performance tracker: +100%/-40% WIN/LOSS classification
-
-The Telegram targets show +50% TP1 but position manager won't sell until +100% to +400%. The performance tracker classifies differently than both. This means the learning system is optimizing for different outcomes than what the position manager actually trades.
-**Fix:**
-- Update signal Telegram display to show the ACTUAL position manager targets for the signal's category
-- Align performance tracker WIN/LOSS thresholds with position manager TP/SL levels (or at least make them configurable per category)
-**Files:** `signal-generator.ts` (telegram formatting), `signal-performance-tracker.ts` (outcome classification)
-**Effort:** Medium
-
-### 3. Optimize for EV Instead of Win Rate
-**Gap:** Optimizer targets 30% win rate, but a 20% win rate with 5x avg winners beats a 40% win rate with 1.5x avg winners. The system doesn't track or optimize for EV.
-**Fix:** Add EV calculation to performance tracker and daily optimizer. Change optimization target from pure win rate to `EV = (winRate × avgWinReturn) - ((1-winRate) × avgLossReturn)`. Threshold adjustments should maximize EV, not win rate.
-**Files:** `daily-auto-optimizer.ts`, `threshold-optimizer.ts`, `signal-performance-tracker.ts`
-**Effort:** Medium
-
-### 4. Add Max Concurrent Positions Limit
-**Gap:** No portfolio-level position limit. Could have 30 open positions at once, concentrating risk. Signal generator only checks if already holding THAT token, not total exposure.
-**Fix:** Add `MAX_CONCURRENT_POSITIONS` config (e.g., 8-10). Check open positions count before generating new signals. If at limit, only allow signals scoring in top 10% (quality over quantity).
-**Files:** `signal-generator.ts`, `config/index.ts`
-**Effort:** Small
-
-### 5. Wire Rotation Detection Into Scoring
-**Gap:** `rotation-detector.ts` exists and is called for enrichment but the rotation signal **doesn't affect the score**. When 3+ alpha wallets are rotating into a token, that's a strong signal being wasted.
-**Fix:** Add rotation bonus to composite score (similar to surge bonus). 2 wallets = +5, 3+ wallets = +10, high SOL volume = additional +5.
-**Files:** `signal-generator.ts` (where enrichment is applied)
-**Effort:** Small
+**Nothing works as a cohesive system. It needs to be stripped back to a working core and
+rebuilt deliberately.**
 
 ---
 
-## TIER 2: MEDIUM IMPACT — Reduce Losses & Sharpen Signals
+## Phase 0: Strip Back to Bare Minimum (Working Foundation)
 
-### 6. ATH Entry Gate (Not Just Warning)
-**Gap:** ATH detection warns but still sends signal. Buying at ATH is a known loss pattern.
-**Fix:** In production mode, if token is near ATH (>+25% in 1h for new tokens), either block the signal or auto-adjust entry zone to the suggested pullback price. Add "WAIT_FOR_PULLBACK" signal type that re-evaluates after price drops.
-**Files:** `signal-generator.ts` (ATH detection section)
-**Effort:** Medium
+**Goal:** A bot that does ONE thing well — detects alpha wallet buys and sends clean
+Telegram alerts. Nothing else. No scoring, no optimization, no phases 3/4.
 
-### 7. Continuous Holder Count Scoring (Remove Step Function)
-**Gap:** Holder scoring jumps 5→12→20→28→35→40 at arbitrary thresholds. A token with 99 holders gets 20 points while 100 gets 40 — a 100% scoring jump for 1 holder difference.
-**Fix:** Replace with continuous function: `points = min(40, round(40 × log(holders/10) / log(100/10)))` or similar log curve. Smooth transition from 10 holders (0 pts) to 300+ holders (40 pts).
-**Files:** `onchain-scoring.ts` (market structure scoring section)
-**Effort:** Small
+### Keep:
+- `src/index.ts` — gutted to just: database init, telegram init, signal loop
+- `src/config/index.ts` — simplified config
+- `src/utils/database.ts` — PostgreSQL connection + minimal schema
+- `src/utils/logger.ts` — logging
+- `src/modules/telegram.ts` — Telegram bot (simplified, fewer commands)
+- `src/modules/signal-generator.ts` — stripped to CORE logic only
+- `src/modules/onchain-scoring.ts` — simplified scoring (safety + holder + liquidity only)
+- `src/modules/scam-filter.ts` — essential safety gates
+- `src/modules/rugcheck.ts` — contract safety check
+- `src/modules/alpha/alpha-wallet-manager.ts` — alpha wallet tracking (the actual edge)
+- `src/types/index.ts` — shared types
+- `src/utils/rate-limiter.ts` — API rate limiting
 
-### 8. Slippage-Aware Position Sizing
-**Gap:** Position sizing ignores execution cost. On a $2K liquidity pool, a $50 trade might have 5-10% slippage, eating into edge.
-**Fix:** Estimate slippage from liquidity: `estimatedSlippage = positionSize / (liquidity × 2)`. If slippage > 3%, reduce position. If > 8%, skip or minimum size only.
-**Files:** `trading/trade-executor.ts` (calculatePositionSize)
-**Effort:** Small
+### Remove (move to `/archive` so nothing is lost):
+- `src/nansen/` — entire directory (unvalidated integration)
+- `src/risk/` — portfolio manager, correlation tracker (premature)
+- `src/analysis/` — regime detector, narrative detector, time optimizer, rotation detector (never validated)
+- `src/wallets/` — wallet engine, graduation, GMGN discovery (over-engineered)
+- `src/modules/pumpfun/` — dev tracker (separate concern, add back later)
+- `src/modules/discovery/` — 8 discovery sources is too many. Keep alpha wallets only
+- `src/modules/trading/` — auto-trader, jupiter, raydium (not functional)
+- `src/modules/performance/` — daily optimizer, threshold optimizer (optimizing what?)
+- `src/modules/signals/` — conviction tracker, sell detector
+- `src/modules/momentum-analyzer.ts` — anti-predictive per your own data
+- `src/modules/candlestick-analyzer.ts` — noise
+- `src/modules/kol/` — KOL analytics
+- `src/modules/entry/` — pullback detector
+- `src/modules/telegram/` — wallet commands, trading commands, daily digest
 
-### 9. Remove or Invert Momentum Weight
-**Gap:** Momentum is -0.04 correlated — actively anti-predictive. 5% weight is small but still adds noise and can push borderline tokens the wrong way.
-**Fix:** Option A: Set weight to 0% and redistribute (safety 32.5%, market structure 37.5%, bundle 25%, timing 5%). Option B: Invert — use LOW momentum as a positive signal (early entry before crowd). Track both approaches in performance data.
-**Files:** `onchain-scoring.ts` (weight constants)
-**Effort:** Small
+### Simplify `signal-generator.ts`:
+- Remove: surge detection, momentum scoring, social metrics (all placeholder/broken)
+- Remove: multi-tier market cap routing, discovery signals, KOL validation signals
+- Keep: alpha wallet buy detection → safety check → basic scoring → Telegram alert
+- One signal type: "Alpha wallet X bought Y" with safety score and basic metrics
 
-### 10. Social Bonus Correlation Check
-**Gap:** Social bonus adds up to +25 points — enough to push a 33-point token to 58 (above threshold). Unknown if social presence actually predicts micro-cap wins.
-**Fix:** Add `has_social_profiles` boolean to performance tracking. After 2 weeks of data, run correlation analysis. If not predictive, cap bonus at +10 or remove.
-**Files:** `signal-performance-tracker.ts` (add field), `signal-generator.ts` (record it)
-**Effort:** Small
-
----
-
-## TIER 3: LEARNING SYSTEM IMPROVEMENTS
-
-### 11. Add Holdout Validation Set
-**Gap:** Optimizer could overfit to last 7 days. No way to detect if threshold changes actually improve performance or just fit noise.
-**Fix:** Split signals 80/20 — optimizer trains on 80%, validates on 20%. Only apply changes if improvement shows on both sets. Use signal_id modulo for deterministic split.
-**Files:** `threshold-optimizer.ts`, `daily-auto-optimizer.ts`
-**Effort:** Medium
-
-### 12. Faster Regime Adaptation
-**Gap:** Daily optimizer caps changes at 5% per cycle. In a market crash, it takes 10+ days to meaningfully tighten.
-**Fix:** Add "emergency adaptation" — if win rate drops below 15% over 48h sample (min 20 signals), allow 15% threshold change in a single cycle. Log as emergency adjustment.
-**Files:** `daily-auto-optimizer.ts`
-**Effort:** Small
-
-### 13. Track Interaction Effects
-**Gap:** Factor analysis looks at each metric independently. Doesn't capture "high holders + low liquidity = good" vs "low holders + low liquidity = bad".
-**Fix:** Add 2-factor interaction analysis to the daily report. For the top 3 predictive factors, compute win rates for each quadrant (high/high, high/low, low/high, low/low). Report to Telegram so you can see patterns.
-**Files:** `daily-auto-optimizer.ts` (factor analysis section)
-**Effort:** Medium
-
-### 14. Close the 48h→72h Tracking Gap
-**Gap:** Signals have 72h time limit but tracking stops at 48h. 24 hours of untracked performance data.
-**Fix:** Extend tracking to 72h to match signal time limit. Or reduce signal time limit to 48h to match tracking.
-**Files:** `signal-performance-tracker.ts` (MAX_TRACKING_HOURS constant)
-**Effort:** Trivial
+### Simplify `onchain-scoring.ts`:
+- Remove: 5-dimension weighted scoring, momentum weight, social bonus
+- Replace with 3 hard gates + 1 simple score:
+  - Gate 1: RugCheck safety pass (hard reject on fail)
+  - Gate 2: Minimum liquidity ($5K+)
+  - Gate 3: Not in exclusion list (stablecoins, LP tokens, etc.)
+  - Score: holder count + liquidity depth + token age (simple additive, 0-100)
 
 ---
 
-## TIER 4: FUTURE CONSIDERATIONS (Research First)
+## Phase 1: Data Collection Mode (Weeks 1-2)
 
-### 15. Multivariate Threshold Optimization
-Replace simple win/loss averages with logistic regression on all factors simultaneously. Would capture interaction effects and non-linear relationships. Requires more data (500+ signals minimum).
+**Goal:** Run the stripped bot in observation mode. Log everything. Build the dataset
+needed to make informed decisions about what to add back.
 
-### 16. Cross-Token Flow Detection
-Monitor when large holders of Token A start buying Token B. Indicates narrative rotation. Would need Helius webhook or frequent holder polling — API cost consideration.
+### What to build:
+1. **Signal logger** — every alert the bot would send, log to DB with full context:
+   - Token address, discovery time, alpha wallet that triggered it
+   - Price at signal, price at +1h, +4h, +12h, +24h, +48h
+   - Liquidity, holders, age at signal time
+   - Outcome: peak price, trough price, final price
 
-### 17. Narrative/Sentiment Layer
-Add Twitter/Telegram monitoring for trending tickers. Would catch narrative-driven pumps before on-chain metrics react. Requires new API integration (Twitter API or scraping service).
+2. **Simple Telegram output:**
+   - Clean signal: wallet label, token, mcap, liquidity, holders, links
+   - No scoring numbers, no TP/SL targets, no position sizing
+   - Just the facts — let yourself make the trading decisions
 
-### 18. A/B Testing Framework
-Run two threshold sets simultaneously — send both signals but only trade one. Compare performance after N signals. Would require shadow signal tracking infrastructure.
+3. **Price tracker** — background job that updates signal outcomes over time
+   - Poll DexScreener every 5 min for open signals
+   - Record price history for each signaled token
+
+### What NOT to build:
+- No auto-optimization
+- No threshold adjustment
+- No position management
+- No exit strategies
+- No multiple discovery sources
 
 ---
 
-## IMPLEMENTATION ORDER
+## Phase 2: Analysis & Validation (Week 3)
 
-**Phase 1 (immediate — wire existing code):**
-1, 4, 5, 9, 14 → Small changes, use what already exists
+**Goal:** With 2 weeks of clean data, answer the fundamental questions.
 
-**Phase 2 (this week — medium changes):**
-2, 3, 7, 8, 10, 12 → Direct edge improvements
+### Questions to answer from the data:
+1. What % of alpha wallet signals are profitable at +1h? +4h? +24h?
+2. What's the average return if you bought at signal and sold at +4h?
+3. Do any specific wallets consistently outperform others?
+4. Does holder count at signal time predict outcome?
+5. Does liquidity depth predict outcome?
+6. Does time of day matter?
+7. What's the optimal hold time?
 
-**Phase 3 (next week — learning system):**
-6, 11, 13 → Better adaptation
+### Deliverable:
+- A Telegram `/stats` command that shows real performance data
+- A clear go/no-go decision: is there actually an edge here?
 
-**Phase 4 (research/future):**
-15-18 → Need more data or new infrastructure
+---
+
+## Phase 3: Rebuild With Evidence (Weeks 4+)
+
+**Only add features that the data from Phase 2 justifies:**
+
+### If alpha wallet signals show edge:
+- Add wallet performance weighting (trust wallets with track record)
+- Add simple position sizing based on wallet confidence
+- Add ONE exit strategy (time-based or trailing stop, whichever data supports)
+- Consider adding Jupiter auto-execution for speed
+
+### If alpha wallet signals DON'T show edge:
+- Pivot strategy entirely
+- Options: bonding curve plays, KOL exit signals (inverse), high-conviction multi-wallet
+- The stripped-back architecture makes pivoting easy
+
+### Features to add back ONLY with evidence:
+- Market regime detection — only if data shows regime affects win rate
+- Multiple discovery sources — only if alpha wallets alone miss opportunities
+- Scoring complexity — only if simple gates leave money on the table
+- Auto-optimization — only after manual optimization proves the concept
+
+---
+
+## Implementation Approach
+
+### Step 1: Archive current code
+```
+mkdir -p archive/v1
+cp -r src/ archive/v1/
+```
+
+### Step 2: Gut `index.ts`
+Remove all Phase 3/4 imports, Nansen, wallet engine, dev tracker.
+Keep: database, telegram, signal generator.
+
+### Step 3: Rewrite `signal-generator.ts`
+~200 lines max. Single responsibility: detect alpha wallet buys, check safety, alert.
+
+### Step 4: Simplify `onchain-scoring.ts`
+3 gates + simple score. No weights, no dimensions, no optimization hooks.
+
+### Step 5: Add signal logger + price tracker
+New: `src/modules/signal-logger.ts` — logs signals with outcome tracking.
+
+### Step 6: Clean up Telegram
+Minimal commands: `/start`, `/status`, `/stats`, `/help`
+
+### Step 7: Test locally, deploy, observe
+
+---
+
+## What This Achieves
+
+- **From ~80 files to ~15 files**
+- **From 11 modules to 3** (telegram, signal detection, safety checking)
+- **From "nothing works" to "one thing works well"**
+- **From guessing to data-driven decisions**
+- **From feature creep to deliberate, evidence-based expansion**
+
+The hardest part isn't building features — it's having the discipline to NOT build
+them until the data says you should.

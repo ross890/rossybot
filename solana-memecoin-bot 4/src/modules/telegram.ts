@@ -152,9 +152,14 @@ export class TelegramAlertBot {
 
   // Diagnostics callback — set from index.ts to avoid circular deps
   private diagnosticsGetter: (() => any) | null = null;
+  private rollingStatsGetter: ((windowMs: number) => any) | null = null;
 
   setDiagnosticsGetter(getter: () => any): void {
     this.diagnosticsGetter = getter;
+  }
+
+  setRollingStatsGetter(getter: (windowMs: number) => any): void {
+    this.rollingStatsGetter = getter;
   }
 
   constructor() {
@@ -1119,6 +1124,68 @@ export class TelegramAlertBot {
         lines.push(`  Hourly: ${hourlyCount}/${RATE_LIMITS.MAX_SIGNALS_PER_HOUR}`);
         lines.push(`  Daily: ${dailyCount}/${RATE_LIMITS.MAX_SIGNALS_PER_DAY}`);
         lines.push(`  Pending tracking: ${pendingSignals}`);
+
+        // Rolling pipeline funnel (1h and 24h)
+        if (this.rollingStatsGetter) {
+          const stats1h = this.rollingStatsGetter(60 * 60 * 1000);
+          const stats24h = this.rollingStatsGetter(24 * 60 * 60 * 1000);
+
+          for (const [label, stats] of [['1 HOUR', stats1h], ['24 HOURS', stats24h]] as const) {
+            const s = stats as any;
+            if (s.totalCycles === 0) continue;
+
+            const totalSignals = s.signalsGenerated + s.onchainSignals + s.discoverySignals + s.kolValidationSignals;
+            const totalFiltered = s.safetyBlocked + s.noMetrics + s.screeningFailed
+              + s.scamRejected + s.rugcheckBlocked + s.compoundRugBlocked
+              + s.scoringFailed + s.momentumFailed + s.bundleBlocked
+              + s.tierBlocked + s.discoveryFailed;
+            const passRate = s.candidates > 0
+              ? ((totalSignals / s.candidates) * 100).toFixed(2)
+              : '0.00';
+
+            lines.push('');
+            lines.push(`📊 *ROLLING ${label}* (${s.totalCycles} cycles)`);
+            lines.push(`  Candidates scanned: ${s.candidates}`);
+            lines.push(`  Pre-filter passed: ${s.preFilterPassed} (${s.quickFilterFails} rejected)`);
+            lines.push(`  *Signals sent: ${totalSignals}* (${passRate}% pass rate)`);
+            if (totalSignals > 0) {
+              if (s.signalsGenerated > 0) lines.push(`    KOL: ${s.signalsGenerated}`);
+              if (s.onchainSignals > 0) lines.push(`    On-chain: ${s.onchainSignals}`);
+              if (s.discoverySignals > 0) lines.push(`    Discovery: ${s.discoverySignals}`);
+              if (s.kolValidationSignals > 0) lines.push(`    KOL validation: ${s.kolValidationSignals}`);
+            }
+            if (totalFiltered > 0) {
+              lines.push(`  *Filtered out: ${totalFiltered}*`);
+              // Show top 3 filters by count
+              const filters: [string, number][] = [
+                ['Safety', s.safetyBlocked],
+                ['No metrics', s.noMetrics],
+                ['Screening', s.screeningFailed],
+                ['Scam', s.scamRejected],
+                ['RugCheck', s.rugcheckBlocked],
+                ['Compound rug', s.compoundRugBlocked],
+                ['Score', s.scoringFailed],
+                ['Momentum', s.momentumFailed],
+                ['Bundle', s.bundleBlocked],
+                ['Tier', s.tierBlocked],
+                ['Discovery', s.discoveryFailed],
+              ];
+              filters
+                .filter(([, count]) => count > 0)
+                .sort((a, b) => b[1] - a[1])
+                .slice(0, 5)
+                .forEach(([name, count]) => {
+                  const pct = s.preFilterPassed > 0
+                    ? ((count / s.preFilterPassed) * 100).toFixed(0)
+                    : '0';
+                  lines.push(`    ${name}: ${count} (${pct}%)`);
+                });
+            }
+            if (s.errorCount > 0) {
+              lines.push(`  ⚠️ Errors: ${s.errorCount}`);
+            }
+          }
+        }
 
         // Uptime
         if (this.startTime) {

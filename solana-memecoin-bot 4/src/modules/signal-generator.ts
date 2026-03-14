@@ -306,6 +306,54 @@ export interface ScanDiagnostics {
   consecutiveEmptyCycles: number;
 }
 
+// Rolling cumulative stats for pipeline health diagnosis
+export interface RollingPipelineStats {
+  windowMs: number;        // Window size (e.g. 1h, 24h)
+  totalCycles: number;
+  candidates: number;
+  preFilterPassed: number;
+  quickFilterFails: number;
+  safetyBlocked: number;
+  noMetrics: number;
+  screeningFailed: number;
+  scamRejected: number;
+  rugcheckBlocked: number;
+  compoundRugBlocked: number;
+  scoringFailed: number;
+  momentumFailed: number;
+  bundleBlocked: number;
+  tierBlocked: number;
+  discoveryFailed: number;
+  signalsGenerated: number;
+  onchainSignals: number;
+  discoverySignals: number;
+  kolValidationSignals: number;
+  errorCount: number;
+}
+
+interface CycleSnapshot {
+  timestamp: number;
+  candidates: number;
+  preFilterPassed: number;
+  quickFilterFails: number;
+  safetyBlocked: number;
+  noMetrics: number;
+  screeningFailed: number;
+  scamRejected: number;
+  rugcheckBlocked: number;
+  compoundRugBlocked: number;
+  scoringFailed: number;
+  momentumFailed: number;
+  bundleBlocked: number;
+  tierBlocked: number;
+  discoveryFailed: number;
+  signalsGenerated: number;
+  onchainSignals: number;
+  discoverySignals: number;
+  kolValidationSignals: number;
+  hadError: boolean;
+}
+
 export class SignalGenerator {
   private isRunning = false;
   // Track recently-signaled tokens to skip re-evaluation
@@ -317,6 +365,10 @@ export class SignalGenerator {
 
   // v3: Track source of each candidate for pullback routing & source EV tracking
   private candidateSources: Map<string, string> = new Map();
+
+  // Rolling pipeline stats: keep last 24h of cycle snapshots
+  private _cycleHistory: CycleSnapshot[] = [];
+  private readonly CYCLE_HISTORY_MAX_AGE_MS = 24 * 60 * 60 * 1000; // 24h
 
   // Diagnostics: last cycle state for /diagnostics command
   private _diagnostics: ScanDiagnostics = {
@@ -349,6 +401,97 @@ export class SignalGenerator {
 
   getDiagnostics(): ScanDiagnostics {
     return { ...this._diagnostics, isRunning: this.isRunning };
+  }
+
+  /**
+   * Get rolling pipeline stats for a given time window.
+   * Aggregates all cycle snapshots within the window.
+   */
+  getRollingStats(windowMs: number): RollingPipelineStats {
+    const cutoff = Date.now() - windowMs;
+    const relevant = this._cycleHistory.filter(s => s.timestamp >= cutoff);
+
+    const stats: RollingPipelineStats = {
+      windowMs,
+      totalCycles: relevant.length,
+      candidates: 0,
+      preFilterPassed: 0,
+      quickFilterFails: 0,
+      safetyBlocked: 0,
+      noMetrics: 0,
+      screeningFailed: 0,
+      scamRejected: 0,
+      rugcheckBlocked: 0,
+      compoundRugBlocked: 0,
+      scoringFailed: 0,
+      momentumFailed: 0,
+      bundleBlocked: 0,
+      tierBlocked: 0,
+      discoveryFailed: 0,
+      signalsGenerated: 0,
+      onchainSignals: 0,
+      discoverySignals: 0,
+      kolValidationSignals: 0,
+      errorCount: 0,
+    };
+
+    for (const s of relevant) {
+      stats.candidates += s.candidates;
+      stats.preFilterPassed += s.preFilterPassed;
+      stats.quickFilterFails += s.quickFilterFails;
+      stats.safetyBlocked += s.safetyBlocked;
+      stats.noMetrics += s.noMetrics;
+      stats.screeningFailed += s.screeningFailed;
+      stats.scamRejected += s.scamRejected;
+      stats.rugcheckBlocked += s.rugcheckBlocked;
+      stats.compoundRugBlocked += s.compoundRugBlocked;
+      stats.scoringFailed += s.scoringFailed;
+      stats.momentumFailed += s.momentumFailed;
+      stats.bundleBlocked += s.bundleBlocked;
+      stats.tierBlocked += s.tierBlocked;
+      stats.discoveryFailed += s.discoveryFailed;
+      stats.signalsGenerated += s.signalsGenerated;
+      stats.onchainSignals += s.onchainSignals;
+      stats.discoverySignals += s.discoverySignals;
+      stats.kolValidationSignals += s.kolValidationSignals;
+      if (s.hadError) stats.errorCount++;
+    }
+
+    return stats;
+  }
+
+  /**
+   * Record a cycle snapshot for rolling stats
+   */
+  private recordCycleSnapshot(diag: ScanDiagnostics, hadError: boolean): void {
+    this._cycleHistory.push({
+      timestamp: Date.now(),
+      candidates: diag.candidates,
+      preFilterPassed: diag.preFilterPassed,
+      quickFilterFails: diag.quickFilterFails,
+      safetyBlocked: diag.safetyBlocked,
+      noMetrics: diag.noMetrics,
+      screeningFailed: diag.screeningFailed,
+      scamRejected: diag.scamRejected,
+      rugcheckBlocked: diag.rugcheckBlocked,
+      compoundRugBlocked: diag.compoundRugBlocked,
+      scoringFailed: diag.scoringFailed,
+      momentumFailed: diag.momentumFailed,
+      bundleBlocked: diag.bundleBlocked,
+      tierBlocked: diag.tierBlocked,
+      discoveryFailed: diag.discoveryFailed,
+      signalsGenerated: diag.signalsGenerated,
+      onchainSignals: diag.onchainSignals,
+      discoverySignals: diag.discoverySignals,
+      kolValidationSignals: diag.kolValidationSignals,
+      hadError,
+    });
+
+    // Prune old snapshots
+    const cutoff = Date.now() - this.CYCLE_HISTORY_MAX_AGE_MS;
+    while (this._cycleHistory.length > 0 && this._cycleHistory[0].timestamp < cutoff) {
+      this._cycleHistory.shift();
+    }
   }
   
   /**
@@ -722,6 +865,9 @@ export class SignalGenerator {
           : 0,
       };
 
+      // Record cycle snapshot for rolling stats
+      this.recordCycleSnapshot(this._diagnostics, false);
+
       await performanceLogger.logScanCycle({
         totalCandidates: candidates.length,
         preFilterPassed: preFiltered.length,
@@ -740,6 +886,7 @@ export class SignalGenerator {
       // Capture error in diagnostics
       this._diagnostics.lastError = error instanceof Error ? error.message : String(error);
       this._diagnostics.lastErrorTime = new Date();
+      this.recordCycleSnapshot(this._diagnostics, true);
       logger.error({ error }, 'Error in scan cycle');
       await performanceLogger.logError('SYSTEM', 'Scan cycle error', error).catch(() => {});
     }

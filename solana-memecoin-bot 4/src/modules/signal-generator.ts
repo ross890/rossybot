@@ -359,6 +359,7 @@ export class SignalGenerator {
   // Track recently-signaled tokens to skip re-evaluation
   private recentlySignaledTokens: Map<string, number> = new Map();
   private scanTimer: NodeJS.Timeout | null = null;
+  private scanCycleCount = 0;
 
   // Track discovery signals for KOL follow-up alerts
   private discoverySignals: Map<string, DiscoverySignal> = new Map();
@@ -519,6 +520,13 @@ export class SignalGenerator {
         maxBundleRiskScore: thresholds.maxBundleRiskScore,
       });
       logger.info({ thresholds }, 'Threshold optimizer synced with on-chain scoring engine');
+      // Phase 1A: Optimizer is DISABLED — thresholds are frozen at current values.
+      // Scoring model is inverted, so auto-optimization was in a doom loop.
+      // Thresholds loaded above are kept as-is; no future auto-changes will be applied.
+      logger.warn(
+        { enabled: thresholdOptimizer.enabled },
+        'Threshold optimizer auto-apply is DISABLED. Thresholds frozen at loaded values. Use /approve_thresholds to apply changes manually.'
+      );
     } catch (error) {
       logger.warn({ error }, 'Failed to sync optimizer thresholds');
     }
@@ -588,6 +596,8 @@ export class SignalGenerator {
             uniqueBuyers: meta.momentumData?.uniqueBuyers5m || 0,
             signalTrack: meta.signalTrack,
             kolReputation: meta.kolReputationTier,
+            hourOfDayUtc: new Date().getUTCHours(),
+            holderGrowthRate: meta.momentumData?.holderGrowthRate,
           }
         );
 
@@ -676,6 +686,22 @@ export class SignalGenerator {
    */
   private async runScanCycle(): Promise<void> {
     const cycleStartTime = Date.now();
+    this.scanCycleCount++;
+
+    // Log alpha pipeline status every 30 cycles (~10 minutes at 20s interval)
+    if (this.scanCycleCount % 30 === 1) {
+      try {
+        const alphaBufferSize = alphaWalletManager.drainDiscoveredTokens().length;
+        logger.info({
+          cycle: this.scanCycleCount,
+          alphaDiscoveryBufferSize: alphaBufferSize,
+          heliusDisabled: appConfig.heliusDisabled,
+        }, 'ALPHA PIPELINE STATUS — periodic check');
+      } catch {
+        // Non-critical
+      }
+    }
+
     try {
       // v3: Clear candidate source tracking for this cycle
       this.candidateSources.clear();
@@ -1150,13 +1176,21 @@ export class SignalGenerator {
       // Check wallet performance — don't signal from wallets with proven negative edge
       const alphaInfo = alphaWalletManager.getDiscoveredTokenInfo(tokenAddress);
       if (alphaInfo) {
-        const wallet = await alphaWalletManager.getWalletByAddress(alphaInfo.walletAddress);
-        if (wallet) {
-          // Block signals from wallets with 0% win rate on 10+ total trades
-          // These wallets have demonstrated they have NO edge
-          const totalTrades = wallet.totalTrades ?? 0;
-          const winRate = wallet.winRate ?? 0;
-          const status = wallet.status;
+        // Try alpha wallet DB first, then engine wallet DB
+        const alphaWallet = await alphaWalletManager.getWalletByAddress(alphaInfo.walletAddress);
+        let engineWallet: any = null;
+        if (!alphaWallet) {
+          try {
+            const { walletEngine: engine } = await import('../wallets/walletEngine.js');
+            engineWallet = await engine.getWalletByAddress(alphaInfo.walletAddress);
+          } catch { /* non-critical */ }
+        }
+
+        if (alphaWallet) {
+          // Block signals from alpha wallets with 0% win rate on 10+ total trades
+          const totalTrades = alphaWallet.totalTrades ?? 0;
+          const winRate = alphaWallet.winRate ?? 0;
+          const status = alphaWallet.status;
           if (totalTrades >= 10 && winRate === 0) {
             logger.info({
               tokenAddress: shortAddr,
@@ -1178,6 +1212,16 @@ export class SignalGenerator {
             }, 'EVAL: ALPHA BLOCKED — wallet suspended/removed');
             return SignalGenerator.EVAL_RESULTS.SAFETY_BLOCKED;
           }
+        } else if (engineWallet) {
+          // Block signals from engine wallets with bad status
+          if (engineWallet.status === 'SUSPENDED' || engineWallet.status === 'PURGED') {
+            logger.info({
+              tokenAddress: shortAddr,
+              walletAddress: alphaInfo.walletAddress.slice(0, 8),
+              status: engineWallet.status,
+            }, 'EVAL: ALPHA BLOCKED — engine wallet suspended/purged');
+            return SignalGenerator.EVAL_RESULTS.SAFETY_BLOCKED;
+          }
         }
       }
 
@@ -1192,7 +1236,48 @@ export class SignalGenerator {
       // Get alpha wallet activity info from the discovery buffer
       if (alphaInfo) {
         // Build minimal alpha activity for signal generation
-        const wallet = await alphaWalletManager.getWalletByAddress(alphaInfo.walletAddress);
+        // Try alpha wallet DB first, then engine wallet DB (engine wallets aren't in alpha_wallets table)
+        let wallet = await alphaWalletManager.getWalletByAddress(alphaInfo.walletAddress);
+        let resolvedSignalWeight = wallet?.signalWeight ?? 0.6;
+
+        if (!wallet) {
+          // Engine wallet — build a compatible AlphaWallet-like object from engine wallet data
+          try {
+            const { walletEngine: engine } = await import('../wallets/walletEngine.js');
+            const ew = await engine.getWalletByAddress(alphaInfo.walletAddress);
+            if (ew) {
+              resolvedSignalWeight = ew.weight;
+              // Create a compatible wallet object for the alpha signal handler
+              wallet = {
+                id: ew.id,
+                address: ew.walletAddress,
+                label: alphaInfo.walletLabel || `Engine:${ew.source}`,
+                status: ew.status as any,
+                signalWeight: ew.weight,
+                totalTrades: ew.totalSignals || ew.observedTrades,
+                wins: 0,
+                losses: 0,
+                winRate: ew.signalWinRate || ew.observedWinRate,
+                avgRoi: ew.signalEv || ew.observedEv,
+                addedAt: ew.addedAt,
+                addedBy: 'engine',
+                lastTradeAt: ew.updatedAt,
+                suspendedAt: ew.suspendedAt,
+                suspensionCount: 0,
+                updatedAt: ew.updatedAt,
+              } as any;
+              logger.info({
+                tokenAddress: shortAddr,
+                walletAddress: alphaInfo.walletAddress.slice(0, 8),
+                source: ew.source,
+                weight: ew.weight,
+              }, 'EVAL: ALPHA resolved via engine wallet DB');
+            }
+          } catch (err) {
+            logger.debug({ err }, 'EVAL: Failed to look up engine wallet');
+          }
+        }
+
         if (wallet) {
           const socialMetrics = await this.getSocialMetrics(tokenAddress, metrics);
           const volumeAuthenticity = await calculateVolumeAuthenticity(tokenAddress);
@@ -1215,7 +1300,7 @@ export class SignalGenerator {
               tokensAcquired: 0,
               timestamp: new Date(alphaInfo.discoveredAt),
             },
-            signalWeight: wallet.signalWeight,
+            signalWeight: resolvedSignalWeight,
           }];
 
           return await this.handleAlphaSignal(
@@ -1796,37 +1881,24 @@ export class SignalGenerator {
       }, 'EVAL: Routing transition zone token to PROVEN RUNNER track');
     }
 
-    // Step 3: Check minimum thresholds (dynamically loaded from optimizer)
+    // Step 3: Score-based gates (PHASE 1B: DISABLED)
+    // Thresholds still loaded for reference/logging but NOT used as pass/fail gates.
+    // Scoring model is inverted — low scores predict winners (+237% EV in Q1 vs -27% in Q4).
     const thresholds = thresholdOptimizer.getCurrentThresholds();
-    const MIN_MOMENTUM_SCORE = thresholds.minMomentumScore;
-    const MIN_ONCHAIN_SCORE = thresholds.minOnChainScore;
+    // MIN_MOMENTUM_SCORE and MIN_ONCHAIN_SCORE no longer used as gates (Phase 1B)
 
-    // Momentum hard gate: skip in learning mode, enforce in production.
-    // Momentum is weighted at only 5% in the total score (anti-predictive),
-    // so the hard gate prevents truly dead tokens from generating signals.
-
-    if (!isLearningMode && onChainScore.components.momentum < MIN_MOMENTUM_SCORE) {
-      logger.debug({
-        tokenAddress: shortAddr,
-        ticker: metrics.ticker,
-        momentumScore: onChainScore.components.momentum,
-        minRequired: MIN_MOMENTUM_SCORE,
-        learningMode: isLearningMode,
-      }, 'EVAL: BLOCKED - Momentum below threshold (production mode)');
-      return SignalGenerator.EVAL_RESULTS.MOMENTUM_FAILED;
-    }
-
-    // Log momentum status in learning mode
-    if (isLearningMode) {
-      logger.debug({
-        tokenAddress: shortAddr,
-        ticker: metrics.ticker,
-        momentumScore: onChainScore.components.momentum,
-        safetyScore: onChainScore.components.safety,
-        totalWeighted: onChainScore.total,
-        note: 'Learning mode: momentum hard gate skipped, using weighted total',
-      }, 'EVAL: Learning mode - evaluating by weighted total score');
-    }
+    // PHASE 1B FIX: Momentum hard gate REMOVED.
+    // Scoring model is inverted — low scores predict winners (+237% EV in Q1 vs -27% in Q4).
+    // Score-based filtering was actively filtering OUT the best trades.
+    // Scores are still calculated for data collection and position sizing.
+    logger.debug({
+      tokenAddress: shortAddr,
+      ticker: metrics.ticker,
+      momentumScore: onChainScore.components.momentum,
+      safetyScore: onChainScore.components.safety,
+      totalWeighted: onChainScore.total,
+      note: 'Score-based filtering DISABLED — scores used for sizing only',
+    }, 'EVAL: Phase 1B — momentum hard gate removed, score recorded for data collection');
 
     // Check if on-chain score recommends action
     // LEARNING MODE FIX: When learningMode is enabled (default: true), only block STRONG_AVOID
@@ -1852,25 +1924,17 @@ export class SignalGenerator {
     // since the numerical check is the primary quality gate.
     const shouldBlockByRecommendation = onChainScore.recommendation === 'STRONG_AVOID';
 
-    // PIPELINE FIX: Lower thresholds to increase signal flow.
-    // Data shows EARLY_QUALITY (33% WR) is the winning track but gets only 3% of signals.
-    // The safety gates (RugCheck, compound rug, scam filter) already block actual rugs.
-    // Score thresholds should filter quality, not duplicate safety filtering.
-    const effectiveMinScore = signalTrack === SignalTrack.EARLY_QUALITY
-      ? (isLearningMode ? 30 : 45)   // EARLY_QUALITY: relaxed — early entry IS the edge
-      : (isLearningMode ? 35 : 50);  // PROVEN_RUNNER: relaxed from 60/45
-
-    // Use adjustedTotal (which includes social verification bonus) for threshold comparison
-    // This rewards tokens with verified social presence (Twitter, Telegram, etc.)
-    if (adjustedTotal < effectiveMinScore || shouldBlockByRecommendation) {
+    // PHASE 1B FIX: Score threshold check REMOVED.
+    // Scoring model is inverted — effectiveMinScore was filtering OUT the best trades.
+    // Only STRONG_AVOID (CRITICAL risk tokens) is still blocked — that's a structural safety filter.
+    if (shouldBlockByRecommendation) {
       logger.info({
         tokenAddress: tokenAddress.slice(0, 8),
         ticker: metrics.ticker,
         score: adjustedTotal,
-        minRequired: effectiveMinScore,
         recommendation: onChainScore.recommendation,
-        blockedBy: adjustedTotal < effectiveMinScore ? 'SCORE_TOO_LOW' : 'RECOMMENDATION',
-      }, 'EVAL: On-chain score too low');
+        blockedBy: 'STRONG_AVOID_RECOMMENDATION',
+      }, 'EVAL: Blocked by STRONG_AVOID (CRITICAL risk) — structural filter, not score gate');
       return SignalGenerator.EVAL_RESULTS.DISCOVERY_FAILED;
     }
 
@@ -1882,7 +1946,8 @@ export class SignalGenerator {
       adjustedTotal,
       recommendation: onChainScore.recommendation,
       learningMode: isLearningMode,
-    }, 'Token PASSED on-chain + social score check - proceeding to evaluation');
+      note: 'Score-based filtering DISABLED (Phase 1B) — scores used for sizing only',
+    }, 'Token PASSED structural filters — score gates bypassed (Phase 1B)');
 
     // Step 4: Get additional data for position sizing and display
     // Run bundle, momentum, and MEV analysis in parallel for speed
@@ -1952,7 +2017,7 @@ export class SignalGenerator {
       // but require positive holder growth (sign of life, not a specific rate).
       // The on-chain score + safety gates already filter quality.
       const MIN_HOLDER_GROWTH_RATE = 0.01; // Positive growth = still alive
-      const MIN_PROVEN_SCORE = isLearningMode ? 50 : 60; // Relaxed from 70
+      // PHASE 1B: MIN_PROVEN_SCORE removed — score gates disabled
       const MIN_PROVEN_HOLDERS = metrics.tokenAge >= PROVEN_RUNNER_MIN_AGE ? 100 : 75; // Relaxed from 200/100
       const holderDataAvailable = momentumData?.holderCount != null && momentumData.holderCount > 0;
 
@@ -1968,19 +2033,12 @@ export class SignalGenerator {
         return SignalGenerator.EVAL_RESULTS.DISCOVERY_FAILED;
       }
 
-      // Score gate — relaxed to let more through; safety gates handle risk
-      if (onChainScore.total < MIN_PROVEN_SCORE) {
-        logger.debug({
-          tokenAddress: shortAddr,
-          ticker: metrics.ticker,
-          score: onChainScore.total,
-          minRequired: MIN_PROVEN_SCORE,
-          track: 'PROVEN_RUNNER',
-        }, 'EVAL: BLOCKED - Score too low for proven runner');
-        return SignalGenerator.EVAL_RESULTS.DISCOVERY_FAILED;
-      }
+      // PHASE 1B FIX: PROVEN_RUNNER score gate REMOVED.
+      // Score-based filtering was actively filtering OUT the best trades (inverted model).
+      // Structural filters (holders, growth, safety) remain.
+      // Score is still calculated and logged for data collection.
 
-      // Holder count gate — relaxed
+      // Holder count gate — structural filter (kept)
       if (metrics.holderCount < MIN_PROVEN_HOLDERS) {
         logger.debug({
           tokenAddress: shortAddr,
@@ -2062,6 +2120,39 @@ export class SignalGenerator {
       }, 'EVAL: PASSED Early Quality requirements');
     }
 
+    // PHASE 1B: Log all score components for every token that passes structural filters.
+    // This data will be used to rebuild the scoring model with correct polarity.
+    logger.info({
+      data_epoch: 'phase1_fix_v2',
+      tokenAddress: shortAddr,
+      ticker: metrics.ticker,
+      signalTrack,
+      tokenAge: metrics.tokenAge,
+      scores: {
+        total: onChainScore.total,
+        adjustedTotal,
+        momentum: onChainScore.components.momentum,
+        safety: onChainScore.components.safety,
+        bundleSafety: onChainScore.components.bundleSafety,
+        marketStructure: onChainScore.components.marketStructure,
+        timing: onChainScore.components.timing,
+        socialBonus,
+      },
+      recommendation: onChainScore.recommendation,
+      confidence: onChainScore.confidence,
+      bullishSignals: onChainScore.bullishSignals,
+      warnings: onChainScore.warnings,
+      metrics: {
+        holderCount: metrics.holderCount,
+        liquidityPool: metrics.liquidityPool,
+        holderGrowthRate,
+        bundleRiskScore: bundleAnalysis.riskScore,
+        bundleRiskLevel: bundleAnalysis.riskLevel,
+        safetyScore: safetyResult.safetyScore,
+      },
+      learningMode: isLearningMode,
+    }, 'PHASE1B_DATA: Token passed all structural filters — score data recorded for model rebuild');
+
     // Step 5: Calculate position size using small capital manager
     // Create a compatible MomentumScore object for the manager
     const mockMomentumScore = {
@@ -2133,9 +2224,29 @@ export class SignalGenerator {
       signalStrength,
       kolValidated: false,
     };
+    // PHASE 2B: Score-as-sizing — scores no longer filter, they SIZE positions
+    // Lower scores (counter-intuitively) have shown higher EV, but we size conservatively
+    // until the scoring model is rebuilt
+    const BASE_POSITION_SIZE = appConfig.trading.defaultPositionSizePercent;
+    let positionMultiplier = 1.0;
+
+    // Use onchain score for sizing (inverted model — lower = historically better)
+    // Conservative approach: all signals get base size, no premium for any score level
+    // This avoids amplifying the inverted model's errors
+    if (onChainScore) {
+      if (onChainScore.total >= 70) {
+        positionMultiplier = 0.5;  // High score = historically worse = smaller position
+      } else if (onChainScore.total >= 50) {
+        positionMultiplier = 0.75; // Medium score = standard position
+      } else {
+        positionMultiplier = 1.0;  // Low score = historically better = full position
+      }
+    }
+
+    const scoreSizedAmount = BASE_POSITION_SIZE * positionMultiplier * tierConfig.positionSizeMultiplier;
     const positionSize = {
-      solAmount: tierConfig.positionSizeMultiplier * appConfig.trading.defaultPositionSizePercent,
-      rationale: `${tier} tier, ${signalStrength} signal, ${tierConfig.positionSizeMultiplier}x multiplier`,
+      solAmount: scoreSizedAmount,
+      rationale: `${tier} tier, ${signalStrength} signal, score ${onChainScore?.total ?? '?'} → ${positionMultiplier}x sizing, ${tierConfig.positionSizeMultiplier}x tier`,
     };
 
     // Step 7: Build and send on-chain momentum signal
@@ -2290,6 +2401,8 @@ export class SignalGenerator {
           uniqueBuyers: momentumData?.uniqueBuyers5m || 0,
           signalTrack: signalTrack,  // DUAL-TRACK: For split performance tracking
           kolReputation: kolReputationTier,  // DUAL-TRACK: KOL tier for EARLY_QUALITY
+          hourOfDayUtc: new Date().getUTCHours(),
+          holderGrowthRate: momentumData?.holderGrowthRate,
         }
       );
     } catch (error) {
@@ -2641,6 +2754,7 @@ export class SignalGenerator {
           top10Concentration: metrics.top10Concentration,
           buySellRatio: kolMomentumData.buySellRatio, // AUDIT FIX: Now tracked for KOL signals
           uniqueBuyers: kolMomentumData.uniqueBuyers,
+          hourOfDayUtc: new Date().getUTCHours(),
         }
       );
     } catch (error) {
@@ -2882,6 +2996,7 @@ export class SignalGenerator {
           top10Concentration: metrics.top10Concentration,
           buySellRatio: 0,
           uniqueBuyers: 0,
+          hourOfDayUtc: new Date().getUTCHours(),
         }
       );
     } catch (error) {
@@ -2915,13 +3030,26 @@ export class SignalGenerator {
     signalTrack: SignalTrack = SignalTrack.PROVEN_RUNNER,
     kolReputation?: KolReputationTier
   ): DiscoverySignal {
-    // Calculate suggested position size (50% of normal for discovery)
-    let positionSize = appConfig.trading.defaultPositionSizePercent * 0.5;
+    // PHASE 2B: Score-as-sizing for discovery signals
+    // Lower scores (counter-intuitively) have shown higher EV, but we size conservatively
+    const BASE_POSITION_SIZE = appConfig.trading.defaultPositionSizePercent * 0.5; // 50% of normal for discovery
+    let discoveryMultiplier = 1.0;
+
+    // Use composite score for sizing (inverted model — lower = historically better)
+    if (score.compositeScore >= 70) {
+      discoveryMultiplier = 0.5;  // High score = historically worse = smaller position
+    } else if (score.compositeScore >= 50) {
+      discoveryMultiplier = 0.75; // Medium score = standard position
+    } else {
+      discoveryMultiplier = 1.0;  // Low score = historically better = full position
+    }
 
     // Adjust based on moonshot grade
-    if (moonshotAssessment.grade === 'A') positionSize *= 1.25;
-    else if (moonshotAssessment.grade === 'B') positionSize *= 1.0;
-    else if (moonshotAssessment.grade === 'C') positionSize *= 0.75;
+    if (moonshotAssessment.grade === 'A') discoveryMultiplier *= 1.25;
+    else if (moonshotAssessment.grade === 'B') discoveryMultiplier *= 1.0;
+    else if (moonshotAssessment.grade === 'C') discoveryMultiplier *= 0.75;
+
+    let positionSize = BASE_POSITION_SIZE * discoveryMultiplier;
 
     // Apply score modifiers
     if (score.flags.includes('LOW_LIQUIDITY')) positionSize *= 0.5;

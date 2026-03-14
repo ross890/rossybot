@@ -25,7 +25,8 @@ export type ExitAction =
   | 'TAKE_PROFIT_2'
   | 'TRAILING_STOP'
   | 'TIME_LIMIT'
-  | 'BREAKEVEN_STOP';
+  | 'BREAKEVEN_STOP'
+  | 'EMERGENCY_STOP';
 
 export interface ExitDecision {
   action: ExitAction;
@@ -41,9 +42,9 @@ export type ScoreGrade = 'STRONG_BUY' | 'BUY' | 'WATCH';
 
 // Stop loss by score grade — higher conviction = more room
 const STOP_LOSS_BY_GRADE: Record<ScoreGrade, number> = {
-  STRONG_BUY: -0.30,  // Score >= 75: -30%
-  BUY: -0.25,         // Score 55-74: -25%
-  WATCH: -0.20,       // Score 30-54: -20%
+  STRONG_BUY: -0.25,  // Score >= 75: -25% (was -30%)
+  BUY: -0.20,         // Score 55-74: -20% (was -25%)
+  WATCH: -0.15,       // Score 30-54: -15% (was -20%)
 };
 
 // Take profit levels (as fraction of entry price increase)
@@ -59,7 +60,12 @@ const TRAILING_STOP_TIERS = [
   { minGain: 5.00, trail: 0.10 }, // +500%+: trail 10% below peak
   { minGain: 3.00, trail: 0.15 }, // +300%-500%: trail 15% below peak
   { minGain: 1.50, trail: 0.20 }, // +150%-300%: trail 20% below peak (default after TP2)
+  { minGain: 0.50, trail: 0.25 }, // +50%-150%: trail 25% below peak (post TP1)
+  { minGain: 0.30, trail: 0.30 }, // +30%-50%: trail 30% below peak (early protection)
 ];
+
+// Emergency hard stop - absolute maximum loss regardless of grade
+const EMERGENCY_STOP_PERCENT = -0.30;
 
 // Time limit
 const MAX_HOLD_HOURS = 48;
@@ -93,6 +99,18 @@ export function calculateExitAction(
   const priceChangeFromPeak = effectivePeak > 0
     ? (currentPrice - effectivePeak) / effectivePeak
     : 0;
+
+  // --- Priority 0: Emergency hard stop ---
+  // Absolute maximum loss regardless of grade
+  if (priceChangeFromEntry <= EMERGENCY_STOP_PERCENT) {
+    return {
+      action: 'EMERGENCY_STOP',
+      sellPercent: state.currentPositionPercent,
+      newStopPrice: entryPrice * (1 + EMERGENCY_STOP_PERCENT),
+      reason: `Emergency stop: ${(priceChangeFromEntry * 100).toFixed(1)}% loss exceeds -30% absolute limit`,
+      trailingStopActive: false,
+    };
+  }
 
   // --- Priority 1: Check trailing stop (after TP2) ---
   if (state.trailingStopActive && state.currentPositionPercent > 0) {
@@ -133,6 +151,24 @@ export function calculateExitAction(
         sellPercent: state.currentPositionPercent,
         newStopPrice: entryPrice,
         reason: 'Breakeven stop hit after TP1',
+        trailingStopActive: false,
+      };
+    }
+  }
+
+  // --- Priority 2.5: Early trailing stop (pre-TP1 protection) ---
+  // If price has risen 30%+ from entry but hasn't hit TP1 yet,
+  // activate a loose trailing stop to protect gains
+  if (!state.tp1Hit && priceChangeFromEntry >= 0.30) {
+    const earlyTrailPercent = 0.30; // 30% below peak
+    const earlyTrailStop = effectivePeak * (1 - earlyTrailPercent);
+
+    if (currentPrice <= earlyTrailStop && earlyTrailStop > entryPrice * (1 + STOP_LOSS_BY_GRADE[scoreGrade])) {
+      return {
+        action: 'TRAILING_STOP',
+        sellPercent: state.currentPositionPercent,
+        newStopPrice: earlyTrailStop,
+        reason: `Early trailing stop: price dropped 30% from peak $${effectivePeak.toFixed(6)} (pre-TP1 protection)`,
         trailingStopActive: false,
       };
     }
@@ -271,6 +307,7 @@ export function applyExitDecision(
     case 'BREAKEVEN_STOP':
     case 'TRAILING_STOP':
     case 'TIME_LIMIT':
+    case 'EMERGENCY_STOP':
       newState.currentPositionPercent = 0; // Fully closed
       break;
 
@@ -325,6 +362,7 @@ export const CANONICAL_EXIT_PARAMS = {
   MAX_HOLD_HOURS,
   STOP_LOSS_BY_GRADE,
   TRAILING_STOP_TIERS,
+  EMERGENCY_STOP_PERCENT,
 } as const;
 
 export default {

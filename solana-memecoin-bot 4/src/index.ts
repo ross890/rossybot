@@ -21,6 +21,11 @@ import { crossTokenRotationDetector } from './analysis/crossTokenRotationDetecto
 import { timeOptimizer } from './analysis/timeOptimizer.js';
 import { narrativeDetector } from './analysis/narrativeDetector.js';
 
+// Wallet engine
+import { walletEngine } from './wallets/walletEngine.js';
+import { gmgnDiscovery } from './wallets/gmgnDiscovery.js';
+import { walletGraduation } from './wallets/walletGraduation.js';
+
 // Nansen integration
 import { nansenClient } from './nansen/nansenClient.js';
 import { nansenWalletDiscovery } from './nansen/nansenWalletDiscovery.js';
@@ -258,12 +263,18 @@ async function main(): Promise<void> {
     logger.warn({ error }, 'Failed to initialize narrative detector');
   }
 
-  // Nansen integration — wallet intelligence
+  // ============ ALPHA WALLET ENGINE ============
+  // Wire wallet engine notifications to Telegram
+  walletEngine.setNotifyCallback(async (msg) => {
+    await telegramBot.sendRawMessage(msg);
+  });
+
+  // Nansen integration — wallet intelligence (PRIMARY discovery source)
   if (nansenClient.isConfigured()) {
     try {
-      // Nansen wallet discovery (every 6 hours)
+      // Nansen wallet discovery (every 6 hours) — PRIMARY source
       nansenWalletDiscovery.start();
-      logger.info('Nansen wallet discovery started (6h scan interval)');
+      logger.info('Nansen wallet discovery started (6h scan interval) — PRIMARY source');
 
       // Nansen wallet refresh (weekly on Monday)
       nansenWalletRefresh.setNotifyCallback(async (msg) => {
@@ -274,15 +285,55 @@ async function main(): Promise<void> {
 
       // Nansen alert receiver — wire up active wallet checker
       nansenAlertReceiver.setActiveWalletChecker(async (address) => {
-        const wallet = await import('./wallets/walletEngine.js').then(m => m.walletEngine.getWalletByAddress(address));
+        const wallet = await walletEngine.getWalletByAddress(address);
         return wallet?.status === 'ACTIVE';
       });
-      logger.info('Nansen alert receiver configured');
+
+      // Nansen alert receiver — wire discovery callback so webhook-received
+      // tokens feed into the signal generator pipeline via alphaWalletManager
+      nansenAlertReceiver.setDiscoveryCallback(async (data) => {
+        try {
+          const { alphaWalletManager } = await import('./modules/alpha/alpha-wallet-manager.js');
+          const injected = alphaWalletManager.injectDiscoveredToken(data.tokenAddress, {
+            walletAddress: data.metadata.walletAddress || 'unknown',
+            walletLabel: data.metadata.walletLabel || 'Nansen:SmartAlert',
+            solAmount: (data.metadata.transactionValue || 0) / 150, // rough USD->SOL estimate
+            txSignature: 'nansen-smart-alert',
+          });
+
+          if (injected) {
+            logger.info({
+              token: data.tokenAddress.slice(0, 8),
+              wallet: data.metadata.walletAddress?.slice(0, 8),
+              source: data.source,
+            }, 'Nansen alert: token injected into signal pipeline');
+          }
+        } catch (e) {
+          logger.debug({ e }, 'Nansen alert discovery callback error');
+        }
+      });
+      logger.info('Nansen alert receiver configured (active wallet checker + discovery callback)');
     } catch (error) {
       logger.warn({ error }, 'Failed to initialize Nansen integration');
     }
   } else {
     logger.info('Nansen: NANSEN_API_KEY not set, integration disabled');
+  }
+
+  // GMGN discovery — FALLBACK source (runs regardless of Nansen)
+  try {
+    gmgnDiscovery.start();
+    logger.info('GMGN wallet discovery started (6h scan interval) — FALLBACK source');
+  } catch (error) {
+    logger.warn({ error }, 'Failed to start GMGN discovery');
+  }
+
+  // Wallet graduation service — shadow-tracks candidates, graduates/purges
+  try {
+    walletGraduation.start();
+    logger.info('Wallet graduation service started');
+  } catch (error) {
+    logger.warn({ error }, 'Failed to start wallet graduation service');
   }
 
   // Mount Nansen routes on the Telegram bot's existing Express server
@@ -347,13 +398,8 @@ async function main(): Promise<void> {
     regimeDetector.stop();
 
     // Stop wallet engine modules
-    try {
-      const { gmgnDiscovery, walletGraduation } = await import('./wallets/index.js');
-      gmgnDiscovery.stop();
-      walletGraduation.stop();
-    } catch {
-      // Non-critical
-    }
+    gmgnDiscovery.stop();
+    walletGraduation.stop();
 
     // Stop Nansen modules
     try {

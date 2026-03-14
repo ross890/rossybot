@@ -10,6 +10,44 @@ import { momentumAnalyzer, MomentumMetrics, MomentumScore } from './momentum-ana
 import { bundleDetector, BundleAnalysisResult } from './bundle-detector.js';
 import { tokenSafetyChecker, TokenSafetyResult } from './safety/token-safety-checker.js';
 
+// ===========================================
+// SCORING MODEL AUDIT — 14 March 2026
+//
+// FINDING: The composite score is ANTI-PREDICTIVE. Q1 (lowest scores) = +237% EV, Q4 (highest) = -27% EV.
+//
+// ROOT CAUSE ANALYSIS:
+// 1. Momentum Score (5% weight): Measures buy pressure, volume velocity, trade quality, holder growth.
+//    - HIGH momentum = token has ALREADY pumped = buying the top
+//    - LOW momentum = token hasn't moved yet = room to run
+//    - Anti-predictive: wins avg 35, losses avg 39
+//
+// 2. Safety Score (30% weight): Contract safety, authority checks, scam detection.
+//    - Anti-predictive for micro-caps because "safe-looking" = "already established" = "limited upside"
+//    - Legitimate use: blocking honeypots and rugs (loss prevention)
+//    - Should be binary gate (pass/fail) not a continuous score
+//
+// 3. Bundle Safety (35% weight): Insider/bundle detection.
+//    - Inverted: higher bundle risk = BETTER performance
+//    - Hypothesis: bundled tokens have insider CONVICTION — they're holding, not dumping
+//    - Low bundle risk = "organic" but no insider conviction
+//
+// 4. Market Structure (25% weight): Liquidity, holder distribution, vol/mcap ratio.
+//    - High scores reward established tokens with many holders and high liquidity
+//    - But in micro-caps: high holders + high liquidity = ALREADY PUMPED = buying the top
+//    - Lower scores (early tokens with few holders) = more upside
+//
+// 5. Timing (5% weight): Token age scoring.
+//    - Binary-ish: tradeable window gets 60, edges get penalized
+//    - Minimal discriminatory power at 5% weight
+//
+// CONCLUSION: The scoring model rewards "safety" and "establishment" — characteristics that are
+// INVERSELY correlated with returns in micro-cap memecoins. The edge is in EARLY, LESS-ESTABLISHED
+// tokens with insider conviction.
+//
+// STATUS: Score-based filtering DISABLED (Phase 1B). Scores collected for data only.
+// Rebuild planned after 7 days of clean data collection.
+// ===========================================
+
 // AUDIT FIX: Dynamic threshold integration
 // The threshold optimizer learns optimal values - we should use them
 interface DynamicThresholds {
@@ -65,6 +103,15 @@ export interface OnChainScore {
   // Metadata
   tokenAddress: string;
   analyzedAt: Date;
+
+  // Phase 2C: Time-based features for future model rebuild
+  timeFeatures?: {
+    tokenAgeMinutes: number;
+    minutesSinceLastATH: number | null;
+    hourOfDayUTC: number;
+    holderGrowthRate: number | null;
+    buySellRatio15m: number | null;
+  };
 }
 
 // ============ SCORING WEIGHTS ============
@@ -239,6 +286,16 @@ export class OnChainScoringEngine {
       rationale,
       tokenAddress,
       analyzedAt: new Date(),
+    };
+
+    // Phase 2C: Collect time-based features for model rebuild
+    const now = new Date();
+    score.timeFeatures = {
+      tokenAgeMinutes: metrics.tokenAge,
+      minutesSinceLastATH: null, // Will be populated when ATH tracking is available
+      hourOfDayUTC: now.getUTCHours(),
+      holderGrowthRate: momentumMetrics?.holderGrowthRate ?? null,
+      buySellRatio15m: momentumMetrics?.buySellRatio ?? null,
     };
 
     logger.debug({

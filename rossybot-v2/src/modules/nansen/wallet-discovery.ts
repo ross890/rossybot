@@ -283,7 +283,7 @@ export class WalletDiscovery {
     const rows = await getMany<{ address: string }>(
       `SELECT address FROM alpha_wallets WHERE active = TRUE
        ORDER BY
-         CASE WHEN source = 'nansen_seed' THEN 0 ELSE 1 END ASC,
+         CASE WHEN source = 'NANSEN_SEED' THEN 0 ELSE 1 END ASC,
          tier ASC,
          nansen_roi_percent DESC`,
     );

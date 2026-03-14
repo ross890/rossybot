@@ -2,7 +2,6 @@
 // SOLANA MEMECOIN BOT - MAIN ENTRY POINT
 // ===========================================
 
-import express from 'express';
 import { appConfig } from './config/index.js';
 import { logger } from './utils/logger.js';
 import { pool, SCHEMA_SQL } from './utils/database.js';
@@ -286,32 +285,24 @@ async function main(): Promise<void> {
     logger.info('Nansen: NANSEN_API_KEY not set, integration disabled');
   }
 
-  // Start webhook server for Nansen alerts (and health check)
+  // Mount Nansen routes on the Telegram bot's existing Express server
+  // (Telegram module already binds to PORT — avoid EADDRINUSE)
   try {
-    const app = express();
-    app.use(express.json());
+    const expressApp = telegramBot.getExpressApp();
+    if (expressApp) {
+      if (nansenClient.isConfigured()) {
+        expressApp.post('/webhooks/nansen', nansenAlertReceiver.createRouteHandler());
+        logger.info('Nansen webhook endpoint registered: POST /webhooks/nansen');
+      }
 
-    app.get('/health', (_req, res) => {
-      res.json({ status: 'ok', uptime: process.uptime() });
-    });
-
-    // Nansen webhook endpoint
-    if (nansenClient.isConfigured()) {
-      app.post('/webhooks/nansen', nansenAlertReceiver.createRouteHandler());
-      logger.info('Nansen webhook endpoint registered: POST /webhooks/nansen');
+      expressApp.get('/nansen/credits', (_req: any, res: any) => {
+        res.json(nansenClient.isConfigured() ? nansenClient.getCreditStats() : { configured: false });
+      });
+    } else {
+      logger.debug('Nansen: No Express app available, webhook routes not mounted');
     }
-
-    // Nansen credit stats endpoint
-    app.get('/nansen/credits', (_req, res) => {
-      res.json(nansenClient.isConfigured() ? nansenClient.getCreditStats() : { configured: false });
-    });
-
-    const port = parseInt(process.env.PORT || '3000', 10);
-    app.listen(port, '0.0.0.0', () => {
-      logger.info({ port }, 'Webhook/health server listening');
-    });
   } catch (error) {
-    logger.warn({ error }, 'Failed to start webhook server (non-critical)');
+    logger.warn({ error }, 'Failed to mount Nansen webhook routes (non-critical)');
   }
 
   // Print comprehensive startup diagnostics

@@ -239,12 +239,15 @@ export class WalletGraduation {
         const decision = this.checkGraduation(candidate);
 
         switch (decision) {
-          case 'GRADUATE':
+          case 'GRADUATE': {
+            const initialWeight = this.calculateInitialWeight(candidate);
             await walletEngine.graduateWallet(
               candidate.id,
-              `Graduated: ${candidate.observedTrades} trades, ${(candidate.observedWinRate * 100).toFixed(1)}% WR, ${candidate.observedEv.toFixed(1)}% EV`
+              `Graduated: ${candidate.observedTrades} trades, ${(candidate.observedWinRate * 100).toFixed(1)}% WR, ${candidate.observedEv.toFixed(1)}% EV`,
+              initialWeight,
             );
             break;
+          }
 
           case 'PURGE':
             await walletEngine.purgeWallet(
@@ -276,7 +279,23 @@ export class WalletGraduation {
       return 'GRADUATE';
     }
 
-    // Has enough observed trades
+    // NANSEN FAST-TRACK PATH
+    // Nansen-sourced candidates with proven PnL history get reduced observation requirement
+    const isNansenSource = candidate.source === 'NANSEN_PNL_LEADERBOARD' || candidate.source === 'NANSEN_WINNER_SCAN';
+    if (isNansenSource && candidate.fastTrackEligible) {
+      if (candidate.observedTrades >= 5) { // reduced from MIN_OBSERVED_TRADES (10)
+        if (candidate.observedEv > -10) { // more lenient — allow slightly negative
+          // Nansen already proved this wallet. 5 observed trades is a sanity check.
+          return 'GRADUATE';
+        }
+        if (candidate.observedTrades >= 15 && candidate.observedEv <= -10) {
+          return 'PURGE'; // Nansen data was stale or wallet changed strategy
+        }
+      }
+      return 'KEEP_OBSERVING';
+    }
+
+    // STANDARD PATH (non-Nansen candidates: on-chain scanner, co-trader, GMGN, manual)
     if (candidate.observedTrades >= cfg.MIN_OBSERVED_TRADES) {
       if (candidate.observedEv > cfg.MIN_OBSERVED_EV &&
           candidate.observedWinRate >= cfg.MIN_OBSERVED_WIN_RATE &&
@@ -298,6 +317,26 @@ export class WalletGraduation {
     }
 
     return 'KEEP_OBSERVING';
+  }
+
+  /**
+   * Calculate initial weight for a graduating wallet based on Nansen data
+   * Nansen-sourced wallets get data-informed starting weights
+   */
+  calculateInitialWeight(candidate: EngineWallet): number {
+    const isNansenSource = candidate.source === 'NANSEN_PNL_LEADERBOARD' || candidate.source === 'NANSEN_WINNER_SCAN';
+    if (!isNansenSource) return 1.0; // default
+
+    const winRate = candidate.nansenWinRate || 0;
+    const pnl = candidate.nansenPnl30d || 0;
+
+    if (winRate >= 0.40 && pnl >= 2000) {
+      return 1.3; // strong Nansen track record
+    }
+    if (winRate >= 0.30 && pnl >= 500) {
+      return 1.1; // decent Nansen track record
+    }
+    return 1.0;
   }
 }
 

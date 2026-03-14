@@ -2,6 +2,7 @@
 // SOLANA MEMECOIN BOT - MAIN ENTRY POINT
 // ===========================================
 
+import express from 'express';
 import { appConfig } from './config/index.js';
 import { logger } from './utils/logger.js';
 import { pool, SCHEMA_SQL } from './utils/database.js';
@@ -20,6 +21,12 @@ import { regimeDetector } from './analysis/regimeDetector.js';
 import { crossTokenRotationDetector } from './analysis/crossTokenRotationDetector.js';
 import { timeOptimizer } from './analysis/timeOptimizer.js';
 import { narrativeDetector } from './analysis/narrativeDetector.js';
+
+// Nansen integration
+import { nansenClient } from './nansen/nansenClient.js';
+import { nansenWalletDiscovery } from './nansen/nansenWalletDiscovery.js';
+import { nansenAlertReceiver } from './nansen/nansenAlertReceiver.js';
+import { nansenWalletRefresh } from './nansen/nansenWalletRefresh.js';
 
 // ============ STARTUP ============
 
@@ -73,6 +80,8 @@ function printStartupDiagnostics(): void {
   logger.info(`   Solscan Pro: ${appConfig.solscanApiKey ? 'CONFIGURED (dev wallet monitoring)' : 'NOT SET - dev tracker limited'}`);
   logger.info(`   Telegram: ${appConfig.telegramBotToken ? 'CONFIGURED' : 'MISSING - alerts disabled'}`);
   logger.info('   Twitter/X: NOT CONNECTED (social metrics use on-chain proxy)');
+  logger.info(`   Nansen Pro: ${nansenClient.isConfigured() ? 'CONFIGURED (wallet intelligence + flow enrichment)' : 'NOT SET - wallet intelligence disabled'}`);
+
 
   // Strategy Configuration
   logger.info('');
@@ -121,6 +130,15 @@ function printStartupDiagnostics(): void {
   logger.info('   On-Chain Discovery: ENABLED (triggers on BIG_WIN/MASSIVE_WIN)');
   logger.info('   Co-Trader Discovery: ENABLED (triggers on alpha signals)');
   logger.info('   Performance Review: ENABLED (daily at 6 AM AEDT)');
+  logger.info(`   Nansen Integration: ${nansenClient.isConfigured() ? 'ENABLED' : 'DISABLED (no API key)'}`);
+  if (nansenClient.isConfigured()) {
+    logger.info('     - Wallet Discovery: 6h scan interval (Smart Money PnL leaderboard)');
+    logger.info('     - Fast-Track Graduation: ENABLED (5 trades for proven wallets)');
+    logger.info('     - Token Flow Enrichment: ENABLED (async scoring bonus)');
+    logger.info('     - Smart Alerts: ENABLED (webhook receiver)');
+    logger.info('     - Winner Scanner: ENABLED (on BIG_WIN/MASSIVE_WIN)');
+    logger.info('     - Weekly Refresh: ENABLED (Monday 6 AM AEDT)');
+  }
 
   logger.info('');
   logger.info(divider);
@@ -241,6 +259,61 @@ async function main(): Promise<void> {
     logger.warn({ error }, 'Failed to initialize narrative detector');
   }
 
+  // Nansen integration — wallet intelligence
+  if (nansenClient.isConfigured()) {
+    try {
+      // Nansen wallet discovery (every 6 hours)
+      nansenWalletDiscovery.start();
+      logger.info('Nansen wallet discovery started (6h scan interval)');
+
+      // Nansen wallet refresh (weekly on Monday)
+      nansenWalletRefresh.setNotifyCallback(async (msg) => {
+        await telegramBot.sendRawMessage(msg);
+      });
+      nansenWalletRefresh.start();
+      logger.info('Nansen wallet refresh scheduled (weekly Monday 6 AM AEDT)');
+
+      // Nansen alert receiver — wire up active wallet checker
+      nansenAlertReceiver.setActiveWalletChecker(async (address) => {
+        const wallet = await import('./wallets/walletEngine.js').then(m => m.walletEngine.getWalletByAddress(address));
+        return wallet?.status === 'ACTIVE';
+      });
+      logger.info('Nansen alert receiver configured');
+    } catch (error) {
+      logger.warn({ error }, 'Failed to initialize Nansen integration');
+    }
+  } else {
+    logger.info('Nansen: NANSEN_API_KEY not set, integration disabled');
+  }
+
+  // Start webhook server for Nansen alerts (and health check)
+  try {
+    const app = express();
+    app.use(express.json());
+
+    app.get('/health', (_req, res) => {
+      res.json({ status: 'ok', uptime: process.uptime() });
+    });
+
+    // Nansen webhook endpoint
+    if (nansenClient.isConfigured()) {
+      app.post('/webhooks/nansen', nansenAlertReceiver.createRouteHandler());
+      logger.info('Nansen webhook endpoint registered: POST /webhooks/nansen');
+    }
+
+    // Nansen credit stats endpoint
+    app.get('/nansen/credits', (_req, res) => {
+      res.json(nansenClient.isConfigured() ? nansenClient.getCreditStats() : { configured: false });
+    });
+
+    const port = parseInt(process.env.PORT || '3000', 10);
+    app.listen(port, '0.0.0.0', () => {
+      logger.info({ port }, 'Webhook/health server listening');
+    });
+  } catch (error) {
+    logger.warn({ error }, 'Failed to start webhook server (non-critical)');
+  }
+
   // Print comprehensive startup diagnostics
   printStartupDiagnostics();
 
@@ -287,6 +360,14 @@ async function main(): Promise<void> {
       const { gmgnDiscovery, walletGraduation } = await import('./wallets/index.js');
       gmgnDiscovery.stop();
       walletGraduation.stop();
+    } catch {
+      // Non-critical
+    }
+
+    // Stop Nansen modules
+    try {
+      nansenWalletDiscovery.stop();
+      nansenWalletRefresh.stop();
     } catch {
       // Non-critical
     }

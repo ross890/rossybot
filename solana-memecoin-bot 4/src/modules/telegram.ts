@@ -536,7 +536,7 @@ export class TelegramAlertBot {
       { command: 'stats', description: 'Signal performance dashboard' },
       { command: 'recent', description: 'Recent signals & outcomes' },
       { command: 'daily', description: 'Daily performance report' },
-      { command: 'tierperf', description: 'Win rate by signal tier' },
+      { command: 'performance', description: 'Compact performance report' },
       { command: 'score_analysis', description: 'Win rate by score brackets' },
       { command: 'bot_status', description: 'Comprehensive health check' },
       { command: 'diagnostics', description: 'Signal pipeline health check' },
@@ -546,26 +546,37 @@ export class TelegramAlertBot {
       { command: 'devscore', description: 'Dev wallet score analysis' },
       { command: 'rugcheck', description: 'Run RugCheck safety' },
       { command: 'trending', description: 'Trending ticker scan' },
+      { command: 'conviction', description: 'High-conviction tokens (2+ KOLs)' },
+      { command: 'leaderboard', description: 'KOL performance rankings' },
       { command: 'thresholds', description: 'View scoring thresholds' },
       { command: 'set_threshold', description: 'Set threshold: /set_threshold <name> <value>' },
       { command: 'optimize', description: 'Run threshold optimization' },
+      { command: 'reset_thresholds', description: 'Reset thresholds to defaults' },
 
-      // Wallet Tracking
+      // Alpha Wallet Tracking
       { command: 'addwallet', description: 'Track wallet: /addwallet <address>' },
       { command: 'wallets', description: 'List tracked wallets' },
       { command: 'removewallet', description: 'Remove tracked wallet' },
+
+      // Wallet Engine
+      { command: 'wallet_status', description: 'Alpha wallet engine status' },
+      { command: 'wallet_list', description: 'Active engine wallets' },
+      { command: 'wallet_candidates', description: 'Candidate wallets in observation' },
 
       // Dev Tracking
       { command: 'devs', description: 'List tracked pump.fun devs' },
       { command: 'adddev', description: 'Track dev: /adddev <wallet> [alias]' },
       { command: 'removedev', description: 'Remove tracked dev' },
       { command: 'devstats', description: 'Dev stats: /devstats <wallet>' },
+      { command: 'pumpfun', description: 'Tokens near bonding curve migration' },
 
       // System
       { command: 'v3checklist', description: 'V3 go-live milestone status' },
       { command: 'pause', description: 'Pause signal scanning' },
       { command: 'resume', description: 'Resume signal scanning' },
       { command: 'portfolio', description: 'Portfolio risk status' },
+      { command: 'positions', description: 'Open positions with PnL' },
+      { command: 'test', description: 'Send test signal to verify bot' },
       { command: 'help', description: 'Show all commands' },
     ];
 
@@ -621,7 +632,7 @@ export class TelegramAlertBot {
         '/stats - Performance dashboard\n' +
         '/recent - Recent signals & outcomes\n' +
         '/daily - Daily performance report\n' +
-        '/tierperf - Win rate by tier\n' +
+        '/performance - Compact analysis report\n' +
         '/score\\_analysis - Win rate by score bracket\n' +
         '/bot\\_status - Comprehensive health check\n' +
         '/diagnostics - Signal pipeline health\n\n' +
@@ -630,23 +641,32 @@ export class TelegramAlertBot {
         '/devscore <token> - Dev wallet score\n' +
         '/rugcheck <token> - RugCheck safety\n' +
         '/trending - Trending ticker scan\n' +
+        '/conviction - High-conviction tokens\n' +
+        '/leaderboard - KOL performance rankings\n' +
         '/thresholds - Scoring thresholds\n' +
         '/set\\_threshold <name> <val> - Adjust threshold\n' +
-        '/optimize - Run threshold optimization\n\n' +
+        '/optimize - Run threshold optimization\n' +
+        '/reset\\_thresholds - Reset to defaults\n\n' +
         '*Wallet Tracking:*\n' +
         '/addwallet <addr> - Track smart wallet\n' +
         '/wallets - List tracked wallets\n' +
-        '/removewallet <addr> - Remove wallet\n\n' +
+        '/removewallet <addr> - Remove wallet\n' +
+        '/wallet\\_status - Engine status overview\n' +
+        '/wallet\\_list - Active engine wallets\n' +
+        '/wallet\\_candidates - Candidates in observation\n\n' +
         '*Dev Tracking:*\n' +
         '/devs - List tracked pump.fun devs\n' +
         '/adddev <wallet> [alias] - Track dev\n' +
         '/removedev <wallet> - Remove dev\n' +
-        '/devstats <wallet> - Dev performance\n\n' +
+        '/devstats <wallet> - Dev performance\n' +
+        '/pumpfun - Tokens near migration\n\n' +
         '*System:*\n' +
         '/pause - Pause signal scanning\n' +
         '/resume - Resume signal scanning\n' +
         '/portfolio - Portfolio risk status\n' +
-        '/v3checklist - V3 go-live milestones\n\n' +
+        '/positions - Open positions with PnL\n' +
+        '/v3checklist - V3 go-live milestones\n' +
+        '/test - Send test signal\n\n' +
         '_Signals are auto-delivered. DYOR._',
         { parse_mode: 'Markdown' }
       );
@@ -950,47 +970,7 @@ export class TelegramAlertBot {
     });
 
 
-    // /tiers command - Show tier configuration
-    this.bot.onText(/\/tiers/, async (msg) => {
-      const chatId = msg.chat.id;
-      await this.bot!.sendMessage(chatId,
-        '*📈 Mature Token Strategy Tiers*\n\n' +
-        '*🚀 RISING Tier*\n' +
-        '• Market Cap: $500K - $8M\n' +
-        '• Min Holders: 500\n' +
-        '• Min Age: 3 days (72h)\n' +
-        '• Min Volume: $50K/24h\n' +
-        '• Stop Loss: 25% initial\n' +
-        '• Allocation: 25% of signals\n' +
-        '• Risk Level: 5 (highest)\n\n' +
-        '*🌱 EMERGING Tier*\n' +
-        '• Market Cap: $8M - $20M\n' +
-        '• Min Holders: 100\n' +
-        '• Min Age: 21 days\n' +
-        '• Min Volume: $300K/24h\n' +
-        '• Stop Loss: 20% initial\n' +
-        '• Allocation: 30% of signals\n' +
-        '• Risk Level: 4\n\n' +
-        '*🎓 GRADUATED Tier*\n' +
-        '• Market Cap: $20M - $50M\n' +
-        '• Min Holders: 100\n' +
-        '• Min Age: 21 days\n' +
-        '• Min Volume: $500K/24h\n' +
-        '• Stop Loss: 18% initial\n' +
-        '• Allocation: 30% of signals\n' +
-        '• Risk Level: 3\n\n' +
-        '*🏛️ ESTABLISHED Tier*\n' +
-        '• Market Cap: $50M - $150M\n' +
-        '• Min Holders: 100\n' +
-        '• Min Age: 21 days\n' +
-        '• Min Volume: $1M/24h\n' +
-        '• Stop Loss: 15% initial\n' +
-        '• Allocation: 15% of signals\n' +
-        '• Risk Level: 2 (lowest)\n\n' +
-        '_Seamless coverage from $500K to $150M_',
-        { parse_mode: 'Markdown' }
-      );
-    });
+    // /tiers command — REMOVED: Mature token strategy disabled (micro-cap focus only)
 
     // /test command - sends a dummy signal to verify bot is working
     this.bot.onText(/\/test/, async (msg) => {
@@ -2476,9 +2456,16 @@ export class TelegramAlertBot {
    */
   private formatBuySignal(signal: BuySignal, followUpContext?: FollowUpContext): string {
     const { kolActivity, score, tokenMetrics, socialMetrics, scamFilter, dexScreenerInfo, ctoAnalysis } = signal;
-    const wallet = kolActivity!.wallet;
-    const tx = kolActivity!.transaction;
-    const perf = kolActivity!.performance;
+
+    // Guard: kolActivity is required for buy signal formatting
+    if (!kolActivity) {
+      logger.error({ tokenAddress: signal.tokenAddress }, 'formatBuySignal called without kolActivity — falling back to discovery format');
+      return this.formatDiscoverySignal(signal as unknown as DiscoverySignal);
+    }
+
+    const wallet = kolActivity.wallet;
+    const tx = kolActivity.transaction;
+    const perf = kolActivity.performance;
 
     // Build the message with clear visual hierarchy
     let msg = `\n`;
@@ -3756,6 +3743,17 @@ export class TelegramAlertBot {
       return false;
     }
 
+    // RACE CONDITION PROTECTION: Synchronous check BEFORE any async operations
+    if (this.signalsInProgress.has(signal.tokenAddress)) {
+      logger.debug({
+        tokenAddress: signal.tokenAddress,
+      }, 'Discovery signal already in progress (race condition prevented)');
+      return false;
+    }
+
+    // Immediately mark as in-progress (synchronous)
+    this.signalsInProgress.add(signal.tokenAddress);
+
     try {
       const message = this.formatDiscoverySignal(signal);
 
@@ -3784,6 +3782,9 @@ export class TelegramAlertBot {
     } catch (error) {
       logger.error({ error, signal: signal.tokenAddress }, 'Failed to send discovery signal');
       return false;
+    } finally {
+      // Always remove from in-progress set when done
+      this.signalsInProgress.delete(signal.tokenAddress);
     }
   }
 

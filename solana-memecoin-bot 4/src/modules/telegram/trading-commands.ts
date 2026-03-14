@@ -32,34 +32,18 @@ export interface PendingConfirmation {
 
 // ============ COMMAND MENU ============
 
-export const BOT_COMMANDS: TelegramBot.BotCommand[] = [
-  // Signal & Performance
-  { command: 'status', description: 'Bot status & strategy info' },
-  { command: 'stats', description: 'Signal performance dashboard' },
-  { command: 'recent', description: 'Recent signals & outcomes' },
-  { command: 'tierperf', description: 'Win rate by signal tier' },
-
-  // Discovery & Analysis
-  { command: 'funnel', description: 'Token filtering funnel stats' },
-  { command: 'funnel_debug', description: 'Last 10 rejected tokens with scores' },
-  { command: 'sources', description: 'Discovery source health' },
-  { command: 'safety', description: 'Safety check: /safety <token>' },
-  { command: 'thresholds', description: 'View scoring thresholds' },
-  { command: 'set_threshold', description: 'Set threshold: /set_threshold <name> <value>' },
-  { command: 'score_analysis', description: 'Win rate by score brackets' },
-  { command: 'bot_status', description: 'Comprehensive health check' },
-
-  // Wallet Tracking
-  { command: 'addwallet', description: 'Track wallet: /addwallet <address>' },
-  { command: 'wallets', description: 'List tracked wallets' },
-  { command: 'removewallet', description: 'Remove tracked wallet' },
-
-  // System
-  { command: 'pause', description: 'Pause signal scanning' },
-  { command: 'resume', description: 'Resume signal scanning' },
+// Trading-only commands — these are registered as handlers when wallet key is present.
+// NOTE: The unified bot menu is managed in telegram.ts setupCommands().
+// Do NOT call setMyCommands here or it will overwrite the main menu.
+export const TRADING_COMMANDS: TelegramBot.BotCommand[] = [
+  { command: 'wallet', description: 'Bot wallet balance' },
+  { command: 'close', description: 'Close position: /close <ticker>' },
+  { command: 'close_all', description: 'Emergency close all positions' },
+  { command: 'settings', description: 'View trading settings' },
+  { command: 'history', description: 'Recent trade history' },
+  { command: 'blacklist', description: 'View/manage token blacklist' },
   { command: 'resume_trading', description: 'Override circuit breaker halt' },
-  { command: 'portfolio', description: 'Portfolio risk status' },
-  { command: 'help', description: 'Show all commands' },
+  { command: 'reset_thresholds', description: 'Reset thresholds to defaults' },
 ];
 
 // ============ TRADING COMMANDS CLASS ============
@@ -170,8 +154,8 @@ export class TradingCommands {
 
     // ============ WALLET COMMANDS ============
 
-    // /wallet
-    this.bot.onText(/\/wallet/, async (msg) => {
+    // /wallet (exact match only — avoid matching /wallets, /wallet_status, etc.)
+    this.bot.onText(/\/wallet$/, async (msg) => {
       await this.handleWallet(msg.chat.id);
     });
 
@@ -198,8 +182,8 @@ export class TradingCommands {
 
     // ============ SYSTEM COMMANDS ============
 
-    // /pause
-    this.bot.onText(/\/pause/, async (msg) => {
+    // /pause (exact match only)
+    this.bot.onText(/\/pause$/, async (msg) => {
       await this.handlePause(msg.chat.id);
     });
 

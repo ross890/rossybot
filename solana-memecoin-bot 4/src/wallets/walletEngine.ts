@@ -13,7 +13,7 @@ export interface EngineWallet {
   id: number;
   walletAddress: string;
   status: 'CANDIDATE' | 'ACTIVE' | 'PROBATION' | 'SUSPENDED' | 'PURGED';
-  source: 'GMGN_LEADERBOARD' | 'ONCHAIN_WINNER_SCAN' | 'CO_TRADER' | 'MANUAL';
+  source: 'GMGN_LEADERBOARD' | 'ONCHAIN_WINNER_SCAN' | 'CO_TRADER' | 'MANUAL' | 'NANSEN_PNL_LEADERBOARD' | 'NANSEN_WINNER_SCAN' | 'NANSEN_SMART_ALERT';
   weight: number;
   addedAt: Date;
   graduatedAt: Date | null;
@@ -41,6 +41,15 @@ export interface EngineWallet {
   signalKellyF: number;
   currentStreak: number;
   last30dEv: number;
+
+  // Nansen data (populated for Nansen-sourced wallets)
+  nansenLabel: string | null;
+  nansenPnl30d: number | null;
+  nansenWinRate: number | null;
+  nansenTokenCount: number | null;
+  nansenAvgBuySize: number | null;
+  nansenLastRefreshed: Date | null;
+  fastTrackEligible: boolean;
 
   updatedAt: Date;
 }
@@ -139,13 +148,13 @@ export class WalletEngine {
     return result;
   }
 
-  async graduateWallet(walletId: number, reason: string): Promise<boolean> {
+  async graduateWallet(walletId: number, reason: string, initialWeight: number = 1.0): Promise<boolean> {
     const wallet = await this.getWalletById(walletId);
     if (!wallet || wallet.status !== 'CANDIDATE') return false;
 
     await Database.updateEngineWalletStatus(walletId, 'ACTIVE', {
       graduated_at: new Date(),
-      weight: 1.0,
+      weight: initialWeight,
     });
 
     const shortAddr = `${wallet.walletAddress.slice(0, 6)}...${wallet.walletAddress.slice(-4)}`;
@@ -373,6 +382,14 @@ export class WalletEngine {
       signalKellyF: parseFloat(row.signal_kelly_f) || 0,
       currentStreak: row.current_streak || 0,
       last30dEv: parseFloat(row.last_30d_ev) || 0,
+      // Nansen data
+      nansenLabel: row.nansen_label || null,
+      nansenPnl30d: row.nansen_pnl_30d ? parseFloat(row.nansen_pnl_30d) : null,
+      nansenWinRate: row.nansen_win_rate ? parseFloat(row.nansen_win_rate) : null,
+      nansenTokenCount: row.nansen_token_count || null,
+      nansenAvgBuySize: row.nansen_avg_buy_size ? parseFloat(row.nansen_avg_buy_size) : null,
+      nansenLastRefreshed: row.nansen_last_refreshed || null,
+      fastTrackEligible: row.fast_track_eligible || false,
       updatedAt: row.updated_at,
     };
   }

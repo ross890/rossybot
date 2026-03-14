@@ -3221,6 +3221,22 @@ export class Database {
     );
     return result.rowCount || 0;
   }
+
+  // ============ NANSEN DATA ============
+
+  static async updateEngineWalletNansenData(id: number, data: Record<string, any>): Promise<void> {
+    const sets = ['updated_at = NOW()'];
+    const params: any[] = [id];
+    let idx = 2;
+
+    for (const [key, value] of Object.entries(data)) {
+      sets.push(`${key} = $${idx}`);
+      params.push(value);
+      idx++;
+    }
+
+    await pool.query(`UPDATE engine_wallets SET ${sets.join(', ')} WHERE id = $1`, params);
+  }
 }
 
 export default Database;

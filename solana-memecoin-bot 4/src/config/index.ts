@@ -61,6 +61,10 @@ const envSchema = z.object({
   DEV_SIGNAL_COOLDOWN_MS: z.coerce.number().default(300000),           // 5 minutes
   SOLSCAN_API_KEY: z.string().optional().default(''),
 
+  // Nansen — wallet intelligence (optional)
+  NANSEN_API_KEY: z.string().optional().default(''),
+  NANSEN_DAILY_CREDIT_BUDGET: z.coerce.number().default(400),
+
   // Screening (with defaults) - MICRO-CAP FOCUSED for quick-flip edge
   MIN_MARKET_CAP: z.coerce.number().default(30000),       // Lowered to $30K - catch tokens earlier
   MAX_MARKET_CAP: z.coerce.number().default(1000000),    // Hard cap $1M - no large caps, no edge above this

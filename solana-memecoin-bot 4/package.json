@@ -16,7 +16,8 @@
     "wallet:generate": "tsx scripts/generate-wallet.ts",
     "test:telegram": "tsx scripts/test-telegram.ts",
     "db:migrate:probability": "tsx scripts/migrate-probability.ts",
-    "db:migrate:pumpfun-devs": "tsx scripts/migrate-pumpfun-devs.ts"
+    "db:migrate:pumpfun-devs": "tsx scripts/migrate-pumpfun-devs.ts",
+    "db:migrate:nansen": "tsx scripts/migrate-nansen.ts"
   },
   "dependencies": {
     "@solana/web3.js": "^1.87.6",

@@ -96,19 +96,20 @@ export class WalletDiscovery {
 
       // Step 2: Get PnL leaderboard for top tokens
       const allCandidates: WalletCandidate[] = [];
-      const tokenAddresses = tokens.slice(0, 2).map((t) => t.token_address).filter(Boolean);
+      const tokenAddresses = tokens.slice(0, 5).map((t) => t.token_address).filter(Boolean);
       console.log(`Step 2: Checking PnL leaderboard for ${tokenAddresses.length} tokens`);
 
       for (const tokenAddr of tokenAddresses) {
         try {
           const leaders: PnlLeaderboardItem[] = await this.nansen.tokenPnlLeaderboard(tokenAddr, {
-            pnlUsdMin: 1000,
-            tradesMin: 10,
-            tradesMax: 100,
+            pnlUsdMin: 5000,
+            tradesMin: 3,
+            tradesMax: 50,
             holdingRatioMax: 0.3,
           });
 
-          console.log(`  Token ${tokenAddr.slice(0, 8)}: ${leaders.length} traders on leaderboard`);
+          const tokenSymbol = tokens.find((t) => t.token_address === tokenAddr)?.token_symbol || tokenAddr.slice(0, 8);
+          console.log(`  $${tokenSymbol}: ${leaders.length} traders on leaderboard`);
 
           for (const l of leaders) {
             const addr = l.trader_address;
@@ -120,13 +121,20 @@ export class WalletDiscovery {
             const roiPercent = l.roi_percent_total || 0;
             const holdingRatio = l.still_holding_balance_ratio || 0;
 
-            // Red flag filters
-            if (holdingRatio > 0.7) continue;
-            if (tradeCount < 5) continue;
-            if (tradeCount > 100) continue;
+            // Quality filters — we want REAL smart money
+            if (realizedPnl < 5000) continue;       // Min $5K realized profit
+            if (roiPercent < 50) continue;           // Min 50% ROI
+            if (holdingRatio > 0.5) continue;        // Took profits, not just holding bags
+            if (tradeCount < 3) continue;            // Not a one-off lucky trade
+            if (tradeCount > 50) continue;           // Not a bot
 
             // Score the wallet
             const score = this.scoreWallet(realizedPnl, unrealizedPnl, tradeCount, roiPercent, holdingRatio);
+
+            // Minimum quality threshold
+            if (score < 0.35) continue;
+
+            console.log(`    ✓ ${addr.slice(0, 8)} | PnL: $${(realizedPnl/1000).toFixed(1)}k | ROI: ${roiPercent.toFixed(0)}% | Trades: ${tradeCount} | Score: ${score.toFixed(2)}`);
 
             allCandidates.push({
               address: addr,
@@ -183,26 +191,27 @@ export class WalletDiscovery {
     roiPercent: number,
     holdingRatio: number,
   ): number {
-    // Normalize each factor to 0-1 range
-    const pnlScore = Math.min(realizedPnl / 10_000, 1) * 0.30;
+    // Realized PnL: $5K=0.25, $20K=0.5, $100K+=1.0 (log scale)
+    const pnlScore = Math.min(Math.log10(Math.max(realizedPnl, 1)) / 5, 1) * 0.30;
 
-    // Low unrealized vs realized = better
-    const unrealizedRatio = realizedPnl > 0 ? Math.abs(unrealizedPnl) / realizedPnl : 1;
-    const unrealizedScore = Math.max(1 - unrealizedRatio, 0) * 0.15;
+    // ROI: 50%=0.25, 200%=0.5, 1000%+=1.0
+    const roiScore = Math.min(roiPercent / 1000, 1) * 0.25;
 
-    // Trade frequency: 20-100 is ideal
-    const freqScore = (tradeCount >= 20 && tradeCount <= 100 ? 1 : tradeCount < 20 ? tradeCount / 20 : 100 / tradeCount) * 0.20;
+    // Realized vs unrealized: higher realized ratio = actually took profits
+    const realizedRatio = realizedPnl > 0
+      ? realizedPnl / (realizedPnl + Math.abs(unrealizedPnl))
+      : 0;
+    const profitTakingScore = realizedRatio * 0.20;
 
-    // ROI
-    const roiScore = Math.min(roiPercent / 500, 1) * 0.15;
+    // Holding ratio: lower = exited cleanly, not a bag holder
+    const holdScore = Math.max(1 - holdingRatio / 0.5, 0) * 0.15;
 
-    // Holding ratio: lower is better
-    const holdScore = Math.max(1 - holdingRatio / 0.3, 0) * 0.10;
+    // Trade count: 5-20 is deliberate trader, not a bot
+    const freqScore = (tradeCount >= 5 && tradeCount <= 20 ? 1 :
+      tradeCount < 5 ? tradeCount / 5 :
+      Math.max(1 - (tradeCount - 20) / 30, 0)) * 0.10;
 
-    // Multi-token consistency placeholder (would need cross-token data)
-    const consistencyScore = 0.05; // Base 50% — improved with actual data
-
-    return pnlScore + unrealizedScore + freqScore + roiScore + holdScore + consistencyScore;
+    return pnlScore + roiScore + profitTakingScore + holdScore + freqScore;
   }
 
   private async addWallet(candidate: WalletCandidate): Promise<boolean> {

@@ -140,8 +140,12 @@ export class WalletDiscovery {
             });
           }
         } catch (err: unknown) {
-          const msg = err instanceof Error ? err.message : String(err);
-          console.error(`Failed to get PnL leaderboard for ${tokenAddr.slice(0, 8)}: ${msg}`);
+          const axErr = err as { response?: { status?: number; data?: unknown }; message?: string };
+          if (axErr.response?.data) {
+            console.error(`Failed to get PnL leaderboard for ${tokenAddr.slice(0, 8)}: ${axErr.response.status} — ${JSON.stringify(axErr.response.data)}`);
+          } else {
+            console.error(`Failed to get PnL leaderboard for ${tokenAddr.slice(0, 8)}: ${axErr.message || err}`);
+          }
         }
       }
 

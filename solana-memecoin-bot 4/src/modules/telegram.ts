@@ -4346,9 +4346,11 @@ export class TelegramAlertBot {
       msg += `\n`;
     }
 
-    // Position sizing - simplified
+    // Position sizing with actual exit strategy levels
     msg += `💵 *Size:* ${signal.suggestedPositionSize || 0.1} SOL\n`;
-    msg += `🎯 TP: +100% · SL: -40%\n\n`;
+    // Use actual canonical exit params: TP1 +50%, TP2 +150%, SL based on score grade
+    const slPercent = totalScore >= 75 ? 30 : totalScore >= 55 ? 25 : 20;
+    msg += `🎯 TP1: +50% (sell 33%) · TP2: +150% (sell 33%) · SL: -${slPercent}%\n\n`;
 
     // Warnings - only show if present, cleaner format
     const riskWarnings = signal.riskWarnings || [];

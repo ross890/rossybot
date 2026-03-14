@@ -84,7 +84,7 @@ export class HeliusWebSocketManager extends EventEmitter {
       }
 
       const maskedUrl = config.helius.wsUrl.replace(/api-key=(.{4}).*/, 'api-key=$1***');
-      logger.info({ url: maskedUrl }, 'Connecting to Helius WebSocket');
+      console.log(`Connecting to Helius WebSocket: ${maskedUrl}`);
 
       this.ws = new WebSocket(config.helius.wsUrl);
 

@@ -165,6 +165,7 @@ export class HeliusWebSocketManager extends EventEmitter {
   }
 
   private onPong(): void {
+    this.lastMessageAt = Date.now(); // Pong proves connection is alive
     if (this.pongTimeout) {
       clearTimeout(this.pongTimeout);
       this.pongTimeout = null;

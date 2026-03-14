@@ -82,16 +82,26 @@ export interface OnChainScore {
 // adding no discrimination. Converted to a gate (pass/fail in signal-generator)
 // so its weight here is redistributed to factors with actual predictive power.
 //
-// v3 SCORING ALIGNMENT: Momentum REMOVED from composite score.
-// Correlation data: momentum = -0.04 (ANTI-PREDICTIVE at entry).
-// Momentum is still calculated and logged for analysis, but gets 0% weight.
-// Its 5% redistributed to marketStructure (holder count = strongest predictor).
+// PIPELINE FIX: Rebalanced weights after performance analysis.
+//
+// Problem: Previous weights (safety 30%, bundle 25%, market 40%, timing 5%)
+// produced scores where High (70+) had 23% WR and Low (<50) had 37% WR.
+// The scoring was ANTI-PREDICTIVE — highest scores performed worst.
+//
+// Root cause: 70% of weight (safety + market structure) rewarded "safe/established"
+// characteristics. But in micro-cap memecoins, "safe-looking" often means
+// "already pumped and about to dump" — the best plays have MODERATE risk.
+//
+// New approach: Reduce market structure weight (was rewarding already-established tokens),
+// keep safety as primary loss-prevention, increase bundle safety (actual rug prevention).
+// Reintroduce small momentum weight — while anti-predictive at extremes,
+// a small weight helps filter truly dead tokens.
 const WEIGHTS = {
-  momentum: 0.00,           // 0% - REMOVED: anti-predictive (-0.04 correlation)
-  safety: 0.30,             // 30% - loss prevention edge
-  bundleSafety: 0.25,       // 25% - insider detection critical
-  marketStructure: 0.40,    // 40% - PROMOTED: holder count (+0.37) is strongest predictor
-  timing: 0.05,             // 5% - minimal, timing handled by signal-generator routing
+  momentum: 0.05,           // 5% - reinstated: filters truly dead tokens (not a predictor, but a minimum-viability check)
+  safety: 0.30,             // 30% - loss prevention (unchanged, prevents honeypots/rugs)
+  bundleSafety: 0.35,       // 35% - PROMOTED: insider/bundle detection is strongest rug predictor
+  marketStructure: 0.25,    // 25% - DEMOTED from 40%: was rewarding "already pumped" tokens
+  timing: 0.05,             // 5% - minimal (unchanged)
 } as const;
 
 // ============ THRESHOLDS ============
@@ -338,13 +348,15 @@ export class OnChainScoringEngine {
     }
     // Below 50% of minimum liquidity = 0 points (too risky to trade)
 
-    // v3: Holder count (0-40 points) — CONTINUOUS LOG CURVE
-    // Removes cliff effects in the strongest predictor (+0.37 correlation).
-    // holderScore: 10→0, 20→6, 50→14, 100→20, 200→26, 500→34, 1000→40
+    // PIPELINE FIX: Holder count weight reduced from 40 to 30 points.
+    // While holder count has +0.37 correlation, the previous 40-point allocation
+    // was part of the problem — high holder counts = established tokens = buying tops.
+    // Keep the log curve shape but cap at 30 to reduce the "already established" bias.
+    // holderScore: 10→0, 20→5, 50→10, 100→15, 200→20, 500→25, 1000→30
     if (metrics.holderCount < 10) {
       score += 0;
     } else {
-      score += Math.min(40, Math.round(Math.log10(metrics.holderCount / 10) * 20));
+      score += Math.min(30, Math.round(Math.log10(metrics.holderCount / 10) * 15));
     }
 
     // v3: Holder distribution (0-15 points) — REDUCED from 25
@@ -375,7 +387,8 @@ export class OnChainScoringEngine {
     } else if (ratio >= 0.05) {
       score += 4;
     }
-    // Sub-component total: Liquidity(20) + Holders(40) + Distribution(15) + Vol/MCap(25) = 100
+    // Sub-component total: Liquidity(20) + Holders(30) + Distribution(15) + Vol/MCap(25) = 90
+    // Capped at 100, but 90 max from individual components leaves headroom for edge cases
 
     return Math.max(0, Math.min(100, score));
   }

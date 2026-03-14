@@ -76,12 +76,12 @@ export class WalletDiscovery {
       const tierCfg = getTierConfig(currentTier);
 
       console.log(`Step 1: Screening tokens (mcap $${tierCfg.mcapMin/1000}k-$${tierCfg.mcapMax/1000}k, liq >$${tierCfg.liquidityMin/1000}k)`);
-      const tokens = await this.nansen.tokenDiscoveryScreener({
+      const tokens = await this.nansen.tokenScreener({
         mcapMin: tierCfg.mcapMin,
         mcapMax: tierCfg.mcapMax,
         liquidityMin: tierCfg.liquidityMin,
         limit: currentTier === CapitalTier.MICRO || currentTier === CapitalTier.SMALL ? 10 : 20,
-      }) as Array<{ address?: string; tokenAddress?: string }>;
+      }) as Array<{ token_address?: string; address?: string; symbol?: string }>;
 
       if (!tokens || tokens.length === 0) {
         console.log('No trending tokens found in screener');
@@ -89,37 +89,41 @@ export class WalletDiscovery {
         return;
       }
       console.log(`Found ${tokens.length} trending tokens`);
+      for (const t of tokens.slice(0, 5)) {
+        console.log(`  - ${(t as Record<string, unknown>).symbol || (t as Record<string, unknown>).token_address || JSON.stringify(t).slice(0, 80)}`);
+      }
 
       // Step 2: Get PnL leaderboard for top tokens
       const allCandidates: WalletCandidate[] = [];
       const tokenAddresses = tokens.slice(0, 2).map(
-        (t) => t.address || t.tokenAddress || '',
+        (t) => t.token_address || t.address || '',
       ).filter(Boolean);
       console.log(`Step 2: Checking PnL leaderboard for ${tokenAddresses.length} tokens`);
 
       for (const tokenAddr of tokenAddresses) {
         try {
-          const leaders = await this.nansen.tokenPnlLeaderboard(tokenAddr) as Array<{
-            address?: string;
-            walletAddress?: string;
-            pnlUsdTotal?: number;
-            pnlUsdRealized?: number;
-            pnlUsdUnrealized?: number;
-            nofTrades?: number;
-            roiPercentTotal?: number;
-            holdingBalanceRatio?: number;
-            stillHoldingBalanceRatio?: number;
+          const leaders = await this.nansen.tokenPnlLeaderboard('solana', tokenAddr) as Array<{
+            trader_address?: string;
+            pnl_usd_realised?: number;
+            pnl_usd_unrealised?: number;
+            nof_trades?: number;
+            roi_percent_total?: number;
+            holding_amount?: number;
+            holding_usd?: number;
           }>;
 
+          console.log(`  Token ${tokenAddr.slice(0, 8)}: ${leaders.length} traders on leaderboard`);
+
           for (const l of leaders) {
-            const addr = l.address || l.walletAddress;
+            const addr = l.trader_address;
             if (!addr) continue;
 
-            const realizedPnl = l.pnlUsdRealized || l.pnlUsdTotal || 0;
-            const unrealizedPnl = l.pnlUsdUnrealized || 0;
-            const tradeCount = l.nofTrades || 0;
-            const roiPercent = l.roiPercentTotal || 0;
-            const holdingRatio = l.holdingBalanceRatio || l.stillHoldingBalanceRatio || 0;
+            const realizedPnl = l.pnl_usd_realised || 0;
+            const unrealizedPnl = l.pnl_usd_unrealised || 0;
+            const tradeCount = l.nof_trades || 0;
+            const roiPercent = l.roi_percent_total || 0;
+            // Estimate holding ratio from holding_usd vs realized PnL
+            const holdingRatio = realizedPnl > 0 ? (l.holding_usd || 0) / (realizedPnl + (l.holding_usd || 0)) : 0;
 
             // Red flag filters
             if (holdingRatio > 0.7) continue;

@@ -350,10 +350,23 @@ class RossyBotV2 {
 
   private async sendStartupDiagnostics(): Promise<void> {
     try {
-      // Get wallet info from DB
+      // Get wallet info from DB with performance stats
       const walletRows = await (await import('./db/database.js')).getMany<{
         address: string; label: string; tier: string; helius_subscribed: boolean;
-      }>(`SELECT address, label, tier, helius_subscribed FROM alpha_wallets WHERE active = TRUE ORDER BY tier ASC`);
+        source: string; nansen_roi_percent: number; nansen_pnl_usd: number;
+        our_total_trades: number; our_win_rate: number; our_avg_pnl_percent: number;
+        consecutive_losses: number;
+      }>(`SELECT address, label, tier, helius_subscribed, source,
+              COALESCE(nansen_roi_percent, 0) as nansen_roi_percent,
+              COALESCE(nansen_pnl_usd, 0) as nansen_pnl_usd,
+              COALESCE(our_total_trades, 0) as our_total_trades,
+              COALESCE(our_win_rate, 0) as our_win_rate,
+              COALESCE(our_avg_pnl_percent, 0) as our_avg_pnl_percent,
+              COALESCE(consecutive_losses, 0) as consecutive_losses
+         FROM alpha_wallets WHERE active = TRUE
+         ORDER BY
+           CASE WHEN source = 'NANSEN_SEED' THEN 0 ELSE 1 END ASC,
+           tier ASC, nansen_roi_percent DESC`);
 
       // Get signal count for today
       const today = new Date().toISOString().split('T')[0];
@@ -386,6 +399,13 @@ class RossyBotV2 {
           label: w.label,
           tier: w.tier,
           subscribed: this.walletAddresses.includes(w.address),
+          nansenRoi: Number(w.nansen_roi_percent) || 0,
+          nansenPnl: Number(w.nansen_pnl_usd) || 0,
+          ourTrades: Number(w.our_total_trades) || 0,
+          ourWinRate: Number(w.our_win_rate) || 0,
+          ourAvgPnl: Number(w.our_avg_pnl_percent) || 0,
+          consecutiveLosses: Number(w.consecutive_losses) || 0,
+          source: w.source,
         })),
         wsConnected: wsStatus.connected,
         wsFallbackActive: wsStatus.fallbackMode,

@@ -249,7 +249,11 @@ export class TelegramService {
     tier: string;
     maxPositions: number;
     openPositions: number;
-    wallets: Array<{ address: string; label: string; tier: string; subscribed: boolean }>;
+    wallets: Array<{
+      address: string; label: string; tier: string; subscribed: boolean;
+      nansenRoi: number; nansenPnl: number; ourTrades: number; ourWinRate: number;
+      ourAvgPnl: number; consecutiveLosses: number; source: string;
+    }>;
     wsConnected: boolean;
     wsFallbackActive: boolean;
     wsSubscribedCount: number;
@@ -273,9 +277,16 @@ export class TelegramService {
     discoveryTokens: number;
     discoveryWalletsAdded: number;
   }): Promise<void> {
-    const walletLines = data.wallets.map((w) =>
-      `│  ${w.subscribed ? '📡' : '⏸️'} [${w.tier}] ${w.label} (${w.address.slice(0, 6)}...${w.address.slice(-4)})`
-    ).join('\n');
+    const walletLines = data.wallets.map((w) => {
+      const status = w.subscribed ? '📡' : '⏸️';
+      const stats: string[] = [];
+      if (w.nansenRoi > 0) stats.push(`ROI ${w.nansenRoi.toFixed(0)}%`);
+      if (w.nansenPnl > 0) stats.push(`PnL $${this.formatNum(w.nansenPnl)}`);
+      if (w.ourTrades > 0) stats.push(`${w.ourTrades}t ${(w.ourWinRate * 100).toFixed(0)}%W`);
+      if (w.consecutiveLosses > 0) stats.push(`${w.consecutiveLosses}L`);
+      const statsStr = stats.length > 0 ? ` | ${stats.join(' · ')}` : '';
+      return `│  ${status} [${w.tier}] ${w.address.slice(0, 6)}...${w.address.slice(-4)}${statsStr}`;
+    }).join('\n');
 
     const msg = [
       `🤖 ROSSYBOT V2 — STARTUP DIAGNOSTICS`,

@@ -240,6 +240,9 @@ export class ShadowTracker {
 
     await this.updatePosition(pos);
 
+    // Update wallet performance stats for all contributing wallets
+    await this.updateWalletStats(pos);
+
     logger.info({
       id: pos.id.slice(0, 8),
       token: pos.token_symbol || pos.token_address.slice(0, 8),
@@ -254,6 +257,38 @@ export class ShadowTracker {
 
     // Remove from active tracking
     this.positions.delete(pos.id);
+  }
+
+  /** Update wallet performance stats based on position outcome */
+  private async updateWalletStats(pos: ShadowPosition): Promise<void> {
+    const isWin = pos.pnl_percent > 0;
+
+    for (const walletAddr of pos.signal_wallets) {
+      try {
+        await query(
+          `UPDATE alpha_wallets SET
+             our_total_trades = our_total_trades + 1,
+             our_win_rate = CASE
+               WHEN our_total_trades = 0 THEN ${isWin ? 1.0 : 0.0}
+               ELSE (our_win_rate * our_total_trades + ${isWin ? 1 : 0}) / (our_total_trades + 1)
+             END,
+             our_avg_pnl_percent = CASE
+               WHEN our_total_trades = 0 THEN $2
+               ELSE (our_avg_pnl_percent * our_total_trades + $2) / (our_total_trades + 1)
+             END,
+             our_avg_hold_time_mins = CASE
+               WHEN our_total_trades = 0 THEN $3
+               ELSE (our_avg_hold_time_mins * our_total_trades + $3) / (our_total_trades + 1)
+             END,
+             consecutive_losses = CASE WHEN $4 THEN consecutive_losses + 1 ELSE 0 END,
+             last_validated_at = NOW()
+           WHERE address = $1`,
+          [walletAddr, pos.pnl_percent, pos.hold_time_mins || 0, !isWin],
+        );
+      } catch (err) {
+        logger.error({ err, wallet: walletAddr.slice(0, 8) }, 'Failed to update wallet stats');
+      }
+    }
   }
 
   private async updatePosition(pos: ShadowPosition): Promise<void> {

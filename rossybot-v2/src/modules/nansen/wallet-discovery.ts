@@ -278,14 +278,26 @@ export class WalletDiscovery {
     }
   }
 
-  /** Get all active wallet addresses — seed wallets always first */
+  /** Get all active wallet addresses — ranked by composite performance score */
   async getActiveWallets(): Promise<string[]> {
     const rows = await getMany<{ address: string }>(
-      `SELECT address FROM alpha_wallets WHERE active = TRUE
-       ORDER BY
-         CASE WHEN source = 'NANSEN_SEED' THEN 0 ELSE 1 END ASC,
-         tier ASC,
-         nansen_roi_percent DESC`,
+      `SELECT address,
+         (
+           -- Seed wallets get base priority
+           CASE WHEN source = 'NANSEN_SEED' THEN 50 ELSE 0 END
+           -- Tier A wallets get priority
+           + CASE WHEN tier = 'A' THEN 30 ELSE 0 END
+           -- Nansen ROI (capped at 20 points)
+           + LEAST(COALESCE(nansen_roi_percent, 0) / 25, 20)
+           -- Our win rate contribution (up to 30 points, only if 3+ trades)
+           + CASE WHEN our_total_trades >= 3 THEN COALESCE(our_win_rate, 0) * 30 ELSE 0 END
+           -- Our avg PnL (up to 15 points)
+           + LEAST(GREATEST(COALESCE(our_avg_pnl_percent, 0) * 100, 0), 15)
+           -- Consecutive losses penalty
+           - COALESCE(consecutive_losses, 0) * 10
+         ) as score
+       FROM alpha_wallets WHERE active = TRUE
+       ORDER BY score DESC`,
     );
     return rows.map((r) => r.address);
   }

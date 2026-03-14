@@ -220,6 +220,28 @@ export class TelegramService {
     await this.send(`⚠️ ${data.walletLabel} bought $${data.tokenSymbol} — skipped: ${data.reason}`);
   }
 
+  /** Notify on every individual wallet trade detection */
+  async sendTradeDetected(data: {
+    action: 'BUY' | 'SELL';
+    walletAddress: string;
+    walletLabel: string;
+    tokenMint: string;
+    tokenSymbol: string;
+    amountUsd: number;
+    detectionLagMs: number;
+  }): Promise<void> {
+    const icon = data.action === 'BUY' ? '🔵' : '🔴';
+    const lag = (data.detectionLagMs / 1000).toFixed(1);
+    const msg = [
+      `${icon} ${data.action} detected`,
+      `├ Wallet: ${data.walletLabel} (${data.walletAddress.slice(0, 6)}...${data.walletAddress.slice(-4)})`,
+      `├ Token: $${data.tokenSymbol} (${data.tokenMint.slice(0, 8)}...)`,
+      `├ Amount: ~$${this.formatNum(data.amountUsd)}`,
+      `└ Lag: ${lag}s`,
+    ].join('\n');
+    await this.send(msg);
+  }
+
   async sendStartupDiagnostics(data: {
     version: string;
     shadowMode: boolean;

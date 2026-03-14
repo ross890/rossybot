@@ -83,7 +83,8 @@ export class HeliusWebSocketManager extends EventEmitter {
         this.ws = null;
       }
 
-      logger.info({ url: config.helius.wsUrl.replace(/api-key=.*/, 'api-key=***') }, 'Connecting to Helius WebSocket');
+      const maskedUrl = config.helius.wsUrl.replace(/api-key=(.{4}).*/, 'api-key=$1***');
+      logger.info({ url: maskedUrl }, 'Connecting to Helius WebSocket');
 
       this.ws = new WebSocket(config.helius.wsUrl);
 
@@ -158,8 +159,8 @@ export class HeliusWebSocketManager extends EventEmitter {
     this.emit('disconnected');
   }
 
-  private async onError(err: Error): Promise<void> {
-    logger.error({ err: err.message }, 'Helius WebSocket error');
+  private async onError(err: Error & { code?: string }): Promise<void> {
+    logger.error({ error: err.message, code: err.code, stack: err.stack?.split('\n')[1]?.trim() }, 'Helius WebSocket error');
     // onClose will be called after onError, which triggers reconnect
   }
 

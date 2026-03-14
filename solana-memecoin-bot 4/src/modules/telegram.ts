@@ -175,6 +175,14 @@ export class TelegramAlertBot {
   }
 
   /**
+   * Get the Express app instance for mounting additional routes (e.g. Nansen webhooks)
+   * Returns null if bot hasn't been initialized yet
+   */
+  getExpressApp(): ReturnType<typeof express> | null {
+    return this.app || null;
+  }
+
+  /**
    * Initialize the bot
    */
   async initialize(): Promise<void> {

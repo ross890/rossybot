@@ -19,9 +19,23 @@ export class TelegramService {
   private getNansenUsage: (() => Record<string, unknown>) | null = null;
 
   constructor() {
-    this.bot = new TelegramBot(config.telegram.botToken, { polling: true });
+    this.bot = new TelegramBot(config.telegram.botToken, {
+      polling: { autoStart: false },
+    });
     this.chatId = config.telegram.chatId;
+    this.bot.on('polling_error', (err) => {
+      logger.error({ err: err.message }, 'Telegram polling error');
+    });
     this.setupCommands();
+  }
+
+  async startPolling(): Promise<void> {
+    try {
+      await this.bot.startPolling();
+      logger.info('Telegram bot polling started');
+    } catch (err) {
+      logger.error({ err }, 'Failed to start Telegram polling — bot commands unavailable');
+    }
   }
 
   // --- Callback setters ---

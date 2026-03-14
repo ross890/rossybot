@@ -10,7 +10,7 @@ const envSchema = z.object({
   HELIUS_RPC_URL: z.string().optional(),
   HELIUS_WS_URL: z.string().optional(),
   NANSEN_API_KEY: z.string(),
-  WALLET_PRIVATE_KEY: z.string(),
+  WALLET_PRIVATE_KEY: z.string().optional().default(''),
   TELEGRAM_BOT_TOKEN: z.string(),
   TELEGRAM_CHAT_ID: z.string(),
   JUPITER_API_URL: z.string().default('https://quote-api.jup.ag/v6'),

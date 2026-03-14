@@ -27,9 +27,16 @@ class RossyBotV2 {
   private dailySummaryInterval: ReturnType<typeof setInterval> | null = null;
 
   constructor() {
-    // Derive public key from private key
-    const keypair = Keypair.fromSecretKey(bs58.decode(config.wallet.privateKey));
-    const publicKey = keypair.publicKey.toBase58();
+    // Derive public key from private key (optional in shadow mode)
+    let publicKey: string;
+    if (config.wallet.privateKey) {
+      const keypair = Keypair.fromSecretKey(bs58.decode(config.wallet.privateKey));
+      publicKey = keypair.publicKey.toBase58();
+    } else {
+      // Shadow mode — use a dummy key for balance checks (will read 0 SOL = MICRO tier)
+      publicKey = '11111111111111111111111111111111';
+      console.log('No WALLET_PRIVATE_KEY set — running in shadow-only mode (MICRO tier, 0 SOL)');
+    }
 
     // Initialize all modules
     this.capitalManager = new CapitalManager(publicKey);
@@ -92,10 +99,13 @@ class RossyBotV2 {
     // 9. Start Nansen wallet discovery
     this.walletDiscovery.start();
 
-    // 10. Schedule daily summary at UTC midnight
+    // 10. Start Telegram bot polling
+    await this.telegram.startPolling();
+
+    // 11. Schedule daily summary at UTC midnight
     this.scheduleDailySummary();
 
-    // 11. Send startup message
+    // 12. Send startup message
     await this.telegram.sendWebSocketAlert('restored', {
       wallets: this.walletAddresses.length,
       downtime: '0s (fresh start)',
@@ -332,15 +342,33 @@ class RossyBotV2 {
 
 // --- Main ---
 
-const bot = new RossyBotV2();
+async function main() {
+  console.log('RossyBot V2 — initializing...');
 
-process.on('SIGINT', async () => { await bot.shutdown(); process.exit(0); });
-process.on('SIGTERM', async () => { await bot.shutdown(); process.exit(0); });
-process.on('unhandledRejection', (err) => {
-  logger.error({ err }, 'Unhandled rejection');
-});
+  let bot: RossyBotV2;
+  try {
+    bot = new RossyBotV2();
+    console.log('RossyBot V2 — constructor OK');
+  } catch (err) {
+    console.error('FATAL: Failed to construct RossyBotV2:', err);
+    process.exit(1);
+  }
 
-bot.start().catch((err) => {
-  logger.error({ err }, 'Failed to start RossyBot V2');
-  process.exit(1);
-});
+  process.on('SIGINT', async () => { await bot.shutdown(); process.exit(0); });
+  process.on('SIGTERM', async () => { await bot.shutdown(); process.exit(0); });
+  process.on('unhandledRejection', (err) => {
+    console.error('Unhandled rejection:', err);
+  });
+  process.on('uncaughtException', (err) => {
+    console.error('Uncaught exception:', err);
+  });
+
+  try {
+    await bot.start();
+  } catch (err) {
+    console.error('FATAL: Failed to start RossyBot V2:', err);
+    process.exit(1);
+  }
+}
+
+main();

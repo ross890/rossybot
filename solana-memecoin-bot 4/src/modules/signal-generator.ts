@@ -2275,9 +2275,19 @@ export class SignalGenerator {
     // Step 7.5: Candlestick structure gate
     // Block signals with strongly bearish chart structure — these are likely
     // dumping or distributing and would be bad entries even with good on-chain metrics.
-    // Only blocks in production mode; learning mode logs but allows through.
+    //
+    // FIX: Severe bearish patterns (score <= -30, or THREE BLACK CROWS + DOWN trend)
+    // are now hard-blocked even in learning mode. These are distribution patterns
+    // that consistently lose money — no amount of training data justifies the losses.
+    // Moderate bearish (score -20 to -30) still allowed through in learning mode.
     if (candleAnalysis && candleAnalysis.score <= -20) {
-      if (!isLearningMode) {
+      const hasSevereBearishPatterns = candleAnalysis.patterns.some(
+        (p: any) => p.name === 'THREE_BLACK_CROWS' || p.name === 'STRONG_BEARISH'
+      );
+      const isSevereBearish = candleAnalysis.score <= -30 ||
+        (hasSevereBearishPatterns && candleAnalysis.trendDirection === 'DOWN');
+
+      if (isSevereBearish || !isLearningMode) {
         logger.info({
           tokenAddress: shortAddr,
           ticker: metrics.ticker,
@@ -2285,6 +2295,7 @@ export class SignalGenerator {
           patterns: candleAnalysis.patterns.map(p => p.name),
           trend: candleAnalysis.trendDirection,
           trendStrength: candleAnalysis.trendStrength,
+          hardBlock: isSevereBearish,
         }, 'EVAL: BLOCKED - Strongly bearish candlestick structure');
         return SignalGenerator.EVAL_RESULTS.DISCOVERY_FAILED;
       } else {
@@ -2293,10 +2304,75 @@ export class SignalGenerator {
           ticker: metrics.ticker,
           candleScore: candleAnalysis.score,
           patterns: candleAnalysis.patterns.map(p => p.name),
-          note: 'Learning mode — bearish candle gate bypassed for data collection',
+          note: 'Learning mode — moderate bearish candle allowed for data collection',
         }, 'EVAL: Bearish candle structure (allowed in learning mode)');
         // Add warning so it shows in the Telegram message
-        onChainSignal.riskWarnings.push(`BEARISH_CHART: Candle score ${candleAnalysis.score}`);
+        onChainSignal.riskWarnings.push(`BEARISHCHART: Candle score ${candleAnalysis.score}`);
+      }
+    }
+
+    // Step 7.6: Compound risk gate — block signals with multiple simultaneous red flags
+    // Tokens with low liq + dev holding + bearish chart are near-certain losses.
+    // This catches signals that pass individual gates but fail when risks compound.
+    {
+      const warnings = onChainSignal.riskWarnings || [];
+      const hasLowLiq = metrics.liquidityPool < 20000;
+      const hasDevHolding = warnings.some((w: string) => w.toLowerCase().includes('dev hold'));
+      const hasBearishChart = candleAnalysis && candleAnalysis.trendDirection === 'DOWN' && candleAnalysis.trendStrength > 15;
+      const hasHighConcentration = metrics.top10Concentration > 40;
+      const hasLpNotLocked = warnings.some((w: string) => w.includes('LPNOTLOCKED'));
+
+      // Count compound risk factors
+      let compoundRiskCount = 0;
+      if (hasLowLiq) compoundRiskCount++;
+      if (hasDevHolding) compoundRiskCount++;
+      if (hasBearishChart) compoundRiskCount++;
+      if (hasHighConcentration) compoundRiskCount++;
+      if (hasLpNotLocked) compoundRiskCount++;
+
+      if (compoundRiskCount >= 3) {
+        logger.info({
+          tokenAddress: shortAddr,
+          ticker: metrics.ticker,
+          compoundRiskCount,
+          risks: {
+            lowLiq: hasLowLiq,
+            devHolding: hasDevHolding,
+            bearishChart: hasBearishChart,
+            highConcentration: hasHighConcentration,
+            lpNotLocked: hasLpNotLocked,
+          },
+        }, 'EVAL: BLOCKED - Compound risk gate (3+ simultaneous red flags)');
+        return SignalGenerator.EVAL_RESULTS.DISCOVERY_FAILED;
+      }
+    }
+
+    // Step 7.7: Downgrade recommendation for bearish chart patterns
+    // The on-chain score recommendation is computed without candlestick data.
+    // If chart shows bearish structure, downgrade the recommendation so the
+    // Telegram message doesn't show STRONG_BUY on a dumping token.
+    if (candleAnalysis && onChainScore) {
+      const isBearishChart = candleAnalysis.dominantSignal === 'BEARISH' ||
+        candleAnalysis.trendDirection === 'DOWN';
+
+      if (isBearishChart) {
+        const origRec = onChainScore.recommendation;
+        if (onChainScore.recommendation === 'STRONG_BUY') {
+          onChainScore.recommendation = 'WATCH';
+        } else if (onChainScore.recommendation === 'BUY') {
+          onChainScore.recommendation = 'WATCH';
+        }
+        if (origRec !== onChainScore.recommendation) {
+          logger.info({
+            tokenAddress: shortAddr,
+            ticker: metrics.ticker,
+            originalRec: origRec,
+            downgradedTo: onChainScore.recommendation,
+            candleScore: candleAnalysis.score,
+            trend: candleAnalysis.trendDirection,
+            dominant: candleAnalysis.dominantSignal,
+          }, 'EVAL: Recommendation downgraded due to bearish chart structure');
+        }
       }
     }
 
@@ -2309,7 +2385,7 @@ export class SignalGenerator {
     const seriousWarnings = (onChainSignal.riskWarnings || []).filter((w: string) =>
       !w.includes('ON-CHAIN SIGNAL') && !w.includes('No KOL')
     );
-    const MAX_SERIOUS_WARNINGS = isLearningMode ? 5 : 3;
+    const MAX_SERIOUS_WARNINGS = isLearningMode ? 4 : 3;
 
     if (seriousWarnings.length >= MAX_SERIOUS_WARNINGS) {
       logger.debug({

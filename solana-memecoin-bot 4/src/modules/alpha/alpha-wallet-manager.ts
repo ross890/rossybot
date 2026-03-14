@@ -5,7 +5,7 @@
 
 import { Database } from '../../utils/database.js';
 import { logger } from '../../utils/logger.js';
-import { heliusClient } from '../onchain.js';
+import { heliusClient, getTokenMetrics } from '../onchain.js';
 import { appConfig } from '../../config/index.js';
 import {
   AlphaWalletStatus,
@@ -18,10 +18,13 @@ import {
 
 // Performance thresholds
 export const THRESHOLDS = {
-  // Probation: < 10 trades, learning mode
-  PROBATION_TRADES: 10,
+  // PIPELINE FIX: Lowered from 10 to 5.
+  // Old system required 10 completed round-trips, which never happened because
+  // sell detection was broken. Now uses pick-performance (did the token pump?)
+  // so trades complete naturally via price checks, not sell detection.
+  PROBATION_TRADES: 5,
 
-  // Win rate thresholds
+  // Win rate thresholds (now based on pick-performance, not round-trips)
   TRUSTED_WIN_RATE: 0.50,     // 50%+ to become TRUSTED
   ACTIVE_WIN_RATE: 0.40,      // 40%+ to stay ACTIVE
   SUSPEND_WIN_RATE: 0.35,     // Below 35% = suspend
@@ -30,7 +33,7 @@ export const THRESHOLDS = {
   // A wallet hitting big winners (e.g. 3500% avg ROI) shouldn't be demoted
   ROI_OVERRIDE_ACTIVE: 500,      // 500%+ avg ROI = keep ACTIVE minimum
   ROI_OVERRIDE_TRUSTED: 1500,    // 1500%+ avg ROI = TRUSTED regardless of win rate
-  ROI_OVERRIDE_MIN_TRADES: 5,    // Need at least 5 trades for ROI override to apply
+  ROI_OVERRIDE_MIN_TRADES: 3,    // Lowered from 5 to 3 for pick-performance
 
   // Signal weights by status
   PROBATION_WEIGHT: 0.30,
@@ -47,6 +50,15 @@ export const THRESHOLDS = {
 
   // Win threshold (same as KOL system)
   WIN_THRESHOLD_ROI: 100,        // 100% ROI = 2x = win
+
+  // PIPELINE FIX: Pick-performance thresholds.
+  // Instead of requiring detected sell round-trips, we check if the token's
+  // peak price after buy was profitable. This works even when sell detection
+  // is broken. A "pick win" = the token pumped 2x+ after the wallet bought it.
+  PICK_PERFORMANCE_MIN_BUYS: 5,          // Need 5+ buy trades to evaluate picks
+  PICK_WIN_THRESHOLD_PERCENT: 100,       // 100% = 2x pump after buy = win
+  PICK_GOOD_THRESHOLD_PERCENT: 50,       // 50%+ pump = decent pick
+  PICK_EVALUATION_MAX_AGE_HOURS: 48,     // Only evaluate buys within last 48h (tokens die fast)
 };
 
 // Solana address regex pattern
@@ -922,6 +934,84 @@ export class AlphaWalletManager {
   }
 
   /**
+   * PIPELINE FIX: Evaluate wallet picks by checking current price vs. buy price.
+   * Instead of requiring detected sell round-trips (which are broken),
+   * we check: "did the tokens this wallet bought go up?"
+   * A wallet that picks tokens that pump 2x+ is demonstrating real alpha,
+   * regardless of whether our sell detection works.
+   */
+  private async evaluatePickPerformance(
+    wallet: AlphaWallet,
+    trades: AlphaWalletTrade[]
+  ): Promise<{ pickWinRate: number; pickAvgGain: number; evaluatedPicks: number; pickWins: number }> {
+    const buyTrades = trades.filter(t => t.tradeType === 'BUY');
+    if (buyTrades.length === 0) {
+      return { pickWinRate: 0, pickAvgGain: 0, evaluatedPicks: 0, pickWins: 0 };
+    }
+
+    let evaluatedPicks = 0;
+    let pickWins = 0;
+    let totalGain = 0;
+
+    // Check current price for each token the wallet bought
+    // Batch to avoid hammering APIs — check up to 15 most recent buys
+    const recentBuys = buyTrades
+      .sort((a, b) => new Date(b.timestamp).getTime() - new Date(a.timestamp).getTime())
+      .slice(0, 15);
+
+    // Deduplicate by token address (only evaluate each token once, using earliest buy)
+    const tokenBuys = new Map<string, AlphaWalletTrade>();
+    for (const buy of recentBuys) {
+      if (!tokenBuys.has(buy.tokenAddress) ||
+          new Date(buy.timestamp).getTime() < new Date(tokenBuys.get(buy.tokenAddress)!.timestamp).getTime()) {
+        tokenBuys.set(buy.tokenAddress, buy);
+      }
+    }
+
+    for (const [tokenAddress, buy] of tokenBuys) {
+      // Skip very recent buys — need time to see if the pick works
+      const buyAge = Date.now() - new Date(buy.timestamp).getTime();
+      if (buyAge < 30 * 60 * 1000) continue; // Skip buys < 30 min old
+
+      // Skip buys that are too old — token is likely dead
+      if (buyAge > THRESHOLDS.PICK_EVALUATION_MAX_AGE_HOURS * 60 * 60 * 1000) continue;
+
+      try {
+        const metrics = await getTokenMetrics(tokenAddress);
+        if (!metrics || !metrics.price || buy.priceAtTrade <= 0) continue;
+
+        const currentPrice = metrics.price;
+        const gainPercent = ((currentPrice - buy.priceAtTrade) / buy.priceAtTrade) * 100;
+
+        evaluatedPicks++;
+        totalGain += gainPercent;
+
+        if (gainPercent >= THRESHOLDS.PICK_WIN_THRESHOLD_PERCENT) {
+          pickWins++;
+        }
+
+        logger.debug({
+          wallet: wallet.address.slice(0, 8),
+          token: tokenAddress.slice(0, 8),
+          buyPrice: buy.priceAtTrade.toExponential(2),
+          currentPrice: currentPrice.toExponential(2),
+          gainPercent: gainPercent.toFixed(1),
+          isPickWin: gainPercent >= THRESHOLDS.PICK_WIN_THRESHOLD_PERCENT,
+        }, 'Alpha wallet pick evaluation');
+      } catch {
+        // Token might be dead/delisted — count as loss
+        evaluatedPicks++;
+        totalGain -= 100; // Assume -100% for dead tokens
+      }
+    }
+
+    const pickWinRate = evaluatedPicks > 0 ? pickWins / evaluatedPicks : 0;
+    const pickAvgGain = evaluatedPicks > 0 ? totalGain / evaluatedPicks : 0;
+
+    return { pickWinRate, pickAvgGain, evaluatedPicks, pickWins };
+  }
+
+  /**
    * Evaluate a single wallet and update its status
    */
   async evaluateWallet(wallet: AlphaWallet): Promise<AlphaWalletEvaluation | null> {
@@ -933,19 +1023,85 @@ export class AlphaWalletManager {
 
     // Calculate performance metrics
     // totalRawTrades = all detected trades (buys + sells)
-    // completedTrades = round-trips with ROI (buy matched with sell)
+    // completedTrades = round-trips with ROI (buy matched with sell via FIFO)
     const totalRawTrades = trades.length;
     const completedTrades = trades.filter(t => t.roi !== null);
-    const totalTrades = completedTrades.length;
-    const wins = completedTrades.filter(t => t.isWin).length;
-    const losses = totalTrades - wins;
-    const winRate = totalTrades > 0 ? wins / totalTrades : 0;
-    const avgRoi = totalTrades > 0
-      ? completedTrades.reduce((sum, t) => sum + (t.roi || 0), 0) / totalTrades
+    const roundTripCount = completedTrades.length;
+    const roundTripWins = completedTrades.filter(t => t.isWin).length;
+    const roundTripLosses = roundTripCount - roundTripWins;
+    const roundTripWinRate = roundTripCount > 0 ? roundTripWins / roundTripCount : 0;
+    const roundTripAvgRoi = roundTripCount > 0
+      ? completedTrades.reduce((sum, t) => sum + (t.roi || 0), 0) / roundTripCount
       : 0;
 
+    // PIPELINE FIX: Evaluate pick-performance (did the tokens this wallet bought pump?)
+    // This works even when sell detection is broken.
+    const pickPerf = await this.evaluatePickPerformance(wallet, trades);
+
+    // Use the BETTER of round-trip vs pick-performance metrics.
+    // If sell detection works: round-trip data is more accurate.
+    // If sell detection is broken: pick-performance provides a fallback.
+    const hasEnoughRoundTrips = roundTripCount >= THRESHOLDS.PROBATION_TRADES;
+    const hasEnoughPicks = pickPerf.evaluatedPicks >= THRESHOLDS.PICK_PERFORMANCE_MIN_BUYS;
+
+    let totalTrades: number;
+    let wins: number;
+    let losses: number;
+    let winRate: number;
+    let avgRoi: number;
+
+    if (hasEnoughRoundTrips && hasEnoughPicks) {
+      // Both available — use whichever shows better performance
+      // (round-trips are more accurate, but picks catch what round-trips miss)
+      if (roundTripWinRate >= pickPerf.pickWinRate) {
+        totalTrades = roundTripCount;
+        wins = roundTripWins;
+        losses = roundTripLosses;
+        winRate = roundTripWinRate;
+        avgRoi = roundTripAvgRoi;
+      } else {
+        totalTrades = pickPerf.evaluatedPicks;
+        wins = pickPerf.pickWins;
+        losses = pickPerf.evaluatedPicks - pickPerf.pickWins;
+        winRate = pickPerf.pickWinRate;
+        avgRoi = pickPerf.pickAvgGain;
+      }
+    } else if (hasEnoughPicks) {
+      // Only pick-performance available (sell detection broken) — use it
+      totalTrades = pickPerf.evaluatedPicks;
+      wins = pickPerf.pickWins;
+      losses = pickPerf.evaluatedPicks - pickPerf.pickWins;
+      winRate = pickPerf.pickWinRate;
+      avgRoi = pickPerf.pickAvgGain;
+    } else if (hasEnoughRoundTrips) {
+      // Only round-trips available — use them
+      totalTrades = roundTripCount;
+      wins = roundTripWins;
+      losses = roundTripLosses;
+      winRate = roundTripWinRate;
+      avgRoi = roundTripAvgRoi;
+    } else {
+      // Neither has enough data — use raw buy count for probation check
+      totalTrades = Math.max(roundTripCount, pickPerf.evaluatedPicks);
+      wins = Math.max(roundTripWins, pickPerf.pickWins);
+      losses = totalTrades - wins;
+      winRate = totalTrades > 0 ? wins / totalTrades : 0;
+      avgRoi = pickPerf.pickAvgGain || roundTripAvgRoi;
+    }
+
+    logger.debug({
+      wallet: wallet.address.slice(0, 8),
+      rawTrades: totalRawTrades,
+      roundTrips: roundTripCount,
+      roundTripWR: (roundTripWinRate * 100).toFixed(0),
+      picks: pickPerf.evaluatedPicks,
+      pickWR: (pickPerf.pickWinRate * 100).toFixed(0),
+      pickAvgGain: pickPerf.pickAvgGain.toFixed(0),
+      usingMetric: hasEnoughPicks ? (hasEnoughRoundTrips ? 'BEST_OF_BOTH' : 'PICKS') :
+                   (hasEnoughRoundTrips ? 'ROUND_TRIPS' : 'INSUFFICIENT'),
+    }, 'Alpha wallet evaluation metrics');
+
     // Update performance metrics in DB
-    // Store totalRawTrades so the display shows actual activity even before round-trips complete
     await Database.updateAlphaWalletPerformance(
       wallet.id,
       totalRawTrades,
@@ -962,56 +1118,55 @@ export class AlphaWalletManager {
     let recommendation: 'KEEP' | 'WARN' | 'SUSPEND' | 'REMOVE';
     let reason: string;
 
-    // Status transition logic (win rate based)
-    // PIPELINE FIX: Use raw trade count as fallback for probation evaluation.
-    // Previously, wallets that only buy and never sell had completedTrades=0,
-    // so they PERMANENTLY stayed on PROBATION while spamming garbage signals.
-    // A wallet with 10+ raw trades and 0 completed round-trips is a "buy-only"
-    // bot or a wallet that never takes profits — either way, not alpha.
-    const isBuyOnlyBot = totalRawTrades >= THRESHOLDS.PROBATION_TRADES && totalTrades === 0;
-    if (isBuyOnlyBot) {
-      // Wallet has made many trades but never completed a round-trip (buy+sell)
-      // This is either a spray-and-pray bot or a wallet that never exits
-      newStatus = AlphaWalletStatus.SUSPENDED;
-      newWeight = THRESHOLDS.SUSPENDED_WEIGHT;
-      recommendation = 'SUSPEND';
-      reason = `Buy-only pattern: ${totalRawTrades} raw trades but 0 completed round-trips — no demonstrated edge`;
-    } else if (totalTrades < THRESHOLDS.PROBATION_TRADES) {
-      // Still in probation - not enough completed trades
+    // PIPELINE FIX: Simplified status transition logic.
+    // Uses pick-performance OR round-trips (whichever has data).
+    // No more "buy-only bot" detection needed since pick-performance
+    // naturally evaluates buy-only wallets via price checks.
+    const buyTrades = trades.filter(t => t.tradeType === 'BUY');
+    const hasEnoughData = totalTrades >= THRESHOLDS.PROBATION_TRADES;
+
+    if (!hasEnoughData && buyTrades.length < THRESHOLDS.PICK_PERFORMANCE_MIN_BUYS) {
+      // Not enough data to evaluate — stay on probation
       newStatus = AlphaWalletStatus.PROBATION;
       newWeight = THRESHOLDS.PROBATION_WEIGHT;
       recommendation = 'KEEP';
-      reason = `Probation: ${totalTrades}/${THRESHOLDS.PROBATION_TRADES} trades completed (${totalRawTrades} raw)`;
+      reason = `Probation: ${buyTrades.length}/${THRESHOLDS.PICK_PERFORMANCE_MIN_BUYS} buys (${totalTrades} evaluated)`;
+    } else if (!hasEnoughData) {
+      // Have buys but picks are too recent to evaluate — stay probation
+      newStatus = AlphaWalletStatus.PROBATION;
+      newWeight = THRESHOLDS.PROBATION_WEIGHT;
+      recommendation = 'KEEP';
+      reason = `Probation: ${totalTrades} evaluated, waiting for more picks to mature`;
     } else if (winRate >= THRESHOLDS.TRUSTED_WIN_RATE) {
       // Excellent performance - TRUSTED
       newStatus = AlphaWalletStatus.TRUSTED;
       newWeight = THRESHOLDS.TRUSTED_WEIGHT;
       recommendation = 'KEEP';
-      reason = `Win rate ${(winRate * 100).toFixed(1)}% exceeds trusted threshold`;
+      reason = `Pick win rate ${(winRate * 100).toFixed(1)}% exceeds trusted threshold (${totalTrades} picks)`;
     } else if (winRate >= THRESHOLDS.ACTIVE_WIN_RATE) {
       // Good performance - ACTIVE
       newStatus = AlphaWalletStatus.ACTIVE;
       newWeight = THRESHOLDS.ACTIVE_WEIGHT;
       recommendation = 'KEEP';
-      reason = `Win rate ${(winRate * 100).toFixed(1)}% meets active threshold`;
+      reason = `Pick win rate ${(winRate * 100).toFixed(1)}% meets active threshold (${totalTrades} picks)`;
     } else if (winRate >= THRESHOLDS.SUSPEND_WIN_RATE) {
       // Marginal performance - warn but keep active
       newStatus = AlphaWalletStatus.ACTIVE;
       newWeight = THRESHOLDS.ACTIVE_WEIGHT * 0.75; // Reduced weight
       recommendation = 'WARN';
-      reason = `Win rate ${(winRate * 100).toFixed(1)}% approaching suspension threshold`;
+      reason = `Pick win rate ${(winRate * 100).toFixed(1)}% approaching suspension (${totalTrades} picks)`;
     } else {
       // Poor performance - suspend or remove
       if (wallet.suspensionCount >= THRESHOLDS.MAX_SUSPENSIONS) {
         newStatus = AlphaWalletStatus.REMOVED;
         newWeight = 0;
         recommendation = 'REMOVE';
-        reason = `Win rate ${(winRate * 100).toFixed(1)}% below threshold after ${wallet.suspensionCount} suspensions`;
+        reason = `Pick win rate ${(winRate * 100).toFixed(1)}% on ${totalTrades} picks after ${wallet.suspensionCount} suspensions`;
       } else {
         newStatus = AlphaWalletStatus.SUSPENDED;
         newWeight = THRESHOLDS.SUSPENDED_WEIGHT;
         recommendation = 'SUSPEND';
-        reason = `Win rate ${(winRate * 100).toFixed(1)}% below ${(THRESHOLDS.SUSPEND_WIN_RATE * 100).toFixed(0)}% threshold`;
+        reason = `Pick win rate ${(winRate * 100).toFixed(1)}% on ${totalTrades} picks below ${(THRESHOLDS.SUSPEND_WIN_RATE * 100).toFixed(0)}% threshold`;
       }
     }
 
@@ -1023,13 +1178,13 @@ export class AlphaWalletManager {
         newStatus = AlphaWalletStatus.TRUSTED;
         newWeight = THRESHOLDS.TRUSTED_WEIGHT;
         recommendation = 'KEEP';
-        reason = `ROI override: ${avgRoi.toFixed(0)}% avg ROI (win rate ${(winRate * 100).toFixed(1)}% below threshold but highly profitable)`;
+        reason = `ROI override: ${avgRoi.toFixed(0)}% avg gain (win rate ${(winRate * 100).toFixed(1)}% but highly profitable picks)`;
       } else if (avgRoi >= THRESHOLDS.ROI_OVERRIDE_ACTIVE &&
                  (newStatus === AlphaWalletStatus.SUSPENDED || newStatus === AlphaWalletStatus.REMOVED)) {
         newStatus = AlphaWalletStatus.ACTIVE;
         newWeight = THRESHOLDS.ACTIVE_WEIGHT;
         recommendation = 'KEEP';
-        reason = `ROI override: ${avgRoi.toFixed(0)}% avg ROI (win rate ${(winRate * 100).toFixed(1)}% below threshold but profitable)`;
+        reason = `ROI override: ${avgRoi.toFixed(0)}% avg gain (win rate ${(winRate * 100).toFixed(1)}% but profitable picks)`;
       }
     }
 

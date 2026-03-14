@@ -453,6 +453,118 @@ export class AlphaWalletManager {
         logger.warn({ error, address: wallet.address }, 'Error monitoring wallet trades');
       }
     }
+
+    // Also monitor cluster destination wallets for sells
+    // This creates cross-wallet round-trips: source buys → transfers → dest sells
+    await this.monitorClusterDestinations();
+  }
+
+  /**
+   * Monitor cluster destination wallets for sells.
+   * When a destination wallet sells a token that the source wallet bought
+   * and transferred, create a cross-wallet round-trip for the source wallet.
+   */
+  private async monitorClusterDestinations(): Promise<void> {
+    try {
+      const clusterDests = await Database.getMonitoredClusterDestinations();
+      if (clusterDests.length === 0) return;
+
+      // Group by destination address (one dest can have multiple sources)
+      const destGroups = new Map<string, typeof clusterDests>();
+      for (const cd of clusterDests) {
+        const existing = destGroups.get(cd.destination_address) || [];
+        existing.push(cd);
+        destGroups.set(cd.destination_address, existing);
+      }
+
+      for (const [destAddress, sources] of destGroups) {
+        try {
+          // Fetch swaps from the destination wallet
+          const swaps = await heliusClient.getEnhancedTransactions(destAddress, 10);
+
+          for (const tx of swaps) {
+            try {
+              // Check if this is a SELL from the destination
+              const tokenTransfers = tx.tokenTransfers || [];
+              const nativeTransfers = tx.nativeTransfers || [];
+
+              const tokenOut = tokenTransfers.filter(
+                (t: any) => t.fromUserAccount === destAddress &&
+                  t.mint !== AlphaWalletManager.WSOL_MINT &&
+                  t.tokenAmount > 0
+              );
+
+              let solIn = 0;
+              for (const nt of nativeTransfers) {
+                if (nt.toUserAccount === destAddress) solIn += (nt.amount || 0) / 1e9;
+              }
+              const wsolIn = tokenTransfers.filter(
+                (t: any) => t.toUserAccount === destAddress && t.mint === AlphaWalletManager.WSOL_MINT
+              );
+              for (const w of wsolIn) solIn += (w.tokenAmount || 0);
+
+              if (tokenOut.length === 0 || solIn < 0.01) continue;
+
+              const tokenAddress = tokenOut[0].mint;
+              const solAmount = solIn;
+              const timestamp = new Date(tx.timestamp * 1000);
+
+              // Check if any source wallet has an open buy for this token
+              for (const source of sources) {
+                const openBuys = await Database.getOpenBuyTrades(
+                  source.alpha_wallet_id,
+                  tokenAddress
+                );
+
+                if (openBuys.length === 0) continue;
+
+                // Match FIFO — oldest unmatched buy
+                const entryTrade = openBuys[0];
+                const entryValue = entryTrade.solAmount;
+                const exitValue = solAmount;
+                const roi = ((exitValue - entryValue) / entryValue) * 100;
+                const isWin = roi >= THRESHOLDS.WIN_THRESHOLD_ROI;
+                const holdTimeHours = (timestamp.getTime() - new Date(entryTrade.timestamp).getTime()) / (1000 * 60 * 60);
+
+                // Record the cross-wallet sell as a trade on the SOURCE wallet
+                await Database.recordAlphaWalletTrade({
+                  walletId: source.alpha_wallet_id,
+                  walletAddress: source.source_address,
+                  tokenAddress,
+                  tradeType: 'SELL',
+                  solAmount,
+                  tokenAmount: tokenOut[0].tokenAmount || 0,
+                  priceAtTrade: solAmount / (tokenOut[0].tokenAmount || 1),
+                  txSignature: tx.signature,
+                  timestamp,
+                  entryTradeId: entryTrade.id,
+                  roi,
+                  isWin,
+                  holdTimeHours,
+                });
+
+                logger.info({
+                  source: source.source_address.slice(0, 8),
+                  dest: destAddress.slice(0, 8),
+                  token: tokenAddress.slice(0, 8),
+                  roi: roi.toFixed(1),
+                  isWin,
+                  holdHours: holdTimeHours.toFixed(1),
+                }, 'Cross-wallet round-trip completed — sell detected on cluster destination');
+
+                break; // Only match one source per sell
+              }
+            } catch (error) {
+              logger.debug({ error }, 'Error processing cluster dest transaction');
+            }
+          }
+        } catch (error) {
+          logger.debug({ error, dest: destAddress.slice(0, 8) }, 'Error monitoring cluster destination');
+        }
+      }
+    } catch (error) {
+      logger.debug({ error }, 'Error in cluster destination monitoring');
+    }
   }
 
   /**
@@ -476,22 +588,174 @@ export class AlphaWalletManager {
           logger.debug({ error, signature: tx.signature }, 'Error parsing enhanced transaction');
         }
       }
-      return;
-    }
-
-    // Fallback: raw RPC with WSOL-aware parsing
-    const txs = await heliusClient.getRecentTransactions(wallet.address, 20);
-    for (const tx of txs) {
-      try {
-        const txDetails = await heliusClient.getTransaction(tx.signature);
-        if (!txDetails) continue;
-        const trade = this.parseSwapTransaction(txDetails, wallet);
-        if (!trade) continue;
-        await this.recordTrade(wallet, trade);
-      } catch (error) {
-        logger.debug({ error, signature: tx.signature }, 'Error parsing transaction');
+    } else {
+      // Fallback: raw RPC with WSOL-aware parsing
+      const txs = await heliusClient.getRecentTransactions(wallet.address, 20);
+      for (const tx of txs) {
+        try {
+          const txDetails = await heliusClient.getTransaction(tx.signature);
+          if (!txDetails) continue;
+          const trade = this.parseSwapTransaction(txDetails, wallet);
+          if (!trade) continue;
+          await this.recordTrade(wallet, trade);
+        } catch (error) {
+          logger.debug({ error, signature: tx.signature }, 'Error parsing transaction');
+        }
       }
     }
+
+    // TRANSFER INTELLIGENCE: Also check for outbound token transfers
+    // This catches tokens being moved to other wallets (multi-wallet setups,
+    // cold storage, CEX deposits) so we can track the full trade lifecycle
+    await this.monitorWalletTransfers(wallet);
+  }
+
+  /**
+   * Monitor outbound token transfers for an alpha wallet.
+   * Records transfer destinations and builds wallet clusters.
+   */
+  private async monitorWalletTransfers(wallet: AlphaWallet): Promise<void> {
+    try {
+      const transfers = await heliusClient.getTokenTransfers(wallet.address, 20);
+
+      for (const tx of transfers) {
+        try {
+          const parsed = this.parseOutboundTransfer(tx, wallet);
+          if (!parsed) continue;
+
+          // Record the transfer
+          const transferId = await Database.recordAlphaWalletTransfer({
+            walletId: wallet.id,
+            walletAddress: wallet.address,
+            tokenAddress: parsed.tokenAddress,
+            destinationAddress: parsed.destinationAddress,
+            tokenAmount: parsed.tokenAmount,
+            txSignature: parsed.txSignature,
+            timestamp: parsed.timestamp,
+            sourceBuyTradeId: parsed.sourceBuyTradeId,
+          });
+
+          if (!transferId) continue; // Duplicate tx, already recorded
+
+          // Update wallet cluster tracking
+          const cluster = await Database.upsertWalletCluster(
+            wallet.address,
+            parsed.destinationAddress
+          );
+
+          // Auto-monitor destination after 3+ transfers from same source
+          if (cluster.transferCount >= 3 && !cluster.isNew) {
+            await Database.setClusterMonitored(
+              wallet.address,
+              parsed.destinationAddress,
+              true
+            );
+
+            logger.info({
+              source: wallet.address.slice(0, 8),
+              dest: parsed.destinationAddress.slice(0, 8),
+              transfers: cluster.transferCount,
+              token: parsed.tokenAddress.slice(0, 8),
+            }, 'Wallet cluster detected — destination auto-monitored for sells');
+
+            // Notify about cluster discovery
+            await this.notifyClusterDiscovery(wallet, parsed.destinationAddress, cluster.transferCount);
+          }
+
+          logger.debug({
+            source: wallet.address.slice(0, 8),
+            dest: parsed.destinationAddress.slice(0, 8),
+            token: parsed.tokenAddress.slice(0, 8),
+            amount: parsed.tokenAmount.toFixed(2),
+            clusterCount: cluster.transferCount,
+          }, 'Alpha wallet transfer recorded');
+        } catch (error) {
+          logger.debug({ error, signature: tx.signature }, 'Error parsing transfer');
+        }
+      }
+    } catch (error) {
+      logger.debug({ error, address: wallet.address.slice(0, 8) }, 'Error monitoring wallet transfers');
+    }
+  }
+
+  /**
+   * Parse a Helius Enhanced Transaction to extract outbound token transfers.
+   * Only captures transfers where tokens LEAVE the wallet (not swaps — those
+   * are handled by parseEnhancedTransaction).
+   */
+  private parseOutboundTransfer(
+    tx: any,
+    wallet: AlphaWallet
+  ): {
+    tokenAddress: string;
+    destinationAddress: string;
+    tokenAmount: number;
+    txSignature: string;
+    timestamp: Date;
+    sourceBuyTradeId?: string;
+  } | null {
+    try {
+      const tokenTransfers = tx.tokenTransfers || [];
+      const nativeTransfers = tx.nativeTransfers || [];
+
+      // Find outbound token transfers (excluding WSOL)
+      const outbound = tokenTransfers.filter(
+        (t: any) => t.fromUserAccount === wallet.address &&
+          t.mint !== AlphaWalletManager.WSOL_MINT &&
+          t.tokenAmount > 0
+      );
+
+      if (outbound.length === 0) return null;
+
+      // Check if this is a swap (SOL flowing back in) — if so, skip
+      // Swaps are already handled by the swap monitoring path
+      let solIn = 0;
+      for (const nt of nativeTransfers) {
+        if (nt.toUserAccount === wallet.address) solIn += (nt.amount || 0) / 1e9;
+      }
+      const wsolIn = tokenTransfers.filter(
+        (t: any) => t.toUserAccount === wallet.address && t.mint === AlphaWalletManager.WSOL_MINT
+      );
+      for (const w of wsolIn) solIn += (w.tokenAmount || 0);
+
+      // If significant SOL came in, this is a swap not a transfer
+      if (solIn > 0.01) return null;
+
+      // Use the first outbound transfer
+      const transfer = outbound[0];
+
+      return {
+        tokenAddress: transfer.mint,
+        destinationAddress: transfer.toUserAccount,
+        tokenAmount: transfer.tokenAmount || 0,
+        txSignature: tx.signature,
+        timestamp: new Date(tx.timestamp * 1000),
+      };
+    } catch (error) {
+      logger.debug({ error }, 'Error parsing outbound transfer');
+      return null;
+    }
+  }
+
+  /**
+   * Notify about a newly discovered wallet cluster
+   */
+  private async notifyClusterDiscovery(
+    sourceWallet: AlphaWallet,
+    destinationAddress: string,
+    transferCount: number
+  ): Promise<void> {
+    const shortSource = `${sourceWallet.address.slice(0, 8)}...${sourceWallet.address.slice(-6)}`;
+    const shortDest = `${destinationAddress.slice(0, 8)}...${destinationAddress.slice(-6)}`;
+
+    let message = `*Wallet Cluster Detected*\n\n`;
+    message += `Source: \`${shortSource}\`\n`;
+    if (sourceWallet.label) message += `Label: ${sourceWallet.label}\n`;
+    message += `Destination: \`${shortDest}\`\n`;
+    message += `Transfers: ${transferCount}\n\n`;
+    message += `_Destination wallet is now being monitored for sells to track cross-wallet round-trips_`;
+
+    await this.notify(message);
   }
 
   // Wrapped SOL mint address

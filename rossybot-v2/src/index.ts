@@ -108,11 +108,8 @@ class RossyBotV2 {
     // 11. Schedule daily summary at UTC midnight
     this.scheduleDailySummary();
 
-    // 12. Send startup message
-    await this.telegram.sendWebSocketAlert('restored', {
-      wallets: this.walletAddresses.length,
-      downtime: '0s (fresh start)',
-    });
+    // 12. Send full startup diagnostics to Telegram
+    await this.sendStartupDiagnostics();
 
     logger.info('=== ROSSYBOT V2 — Running ===');
   }
@@ -326,6 +323,73 @@ class RossyBotV2 {
       });
     } catch (err) {
       logger.error({ err }, 'Failed to send daily summary');
+    }
+  }
+
+  private async sendStartupDiagnostics(): Promise<void> {
+    try {
+      // Get wallet info from DB
+      const walletRows = await (await import('./db/database.js')).getMany<{
+        address: string; label: string; tier: string; helius_subscribed: boolean;
+      }>(`SELECT address, label, tier, helius_subscribed FROM alpha_wallets WHERE active = TRUE ORDER BY tier ASC`);
+
+      // Get signal count for today
+      const today = new Date().toISOString().split('T')[0];
+      const signalRow = await (await import('./db/database.js')).getOne<{ count: string }>(
+        `SELECT COUNT(*) as count FROM signal_events WHERE first_detected_at >= $1`, [today],
+      );
+
+      // Get total trades
+      const tradeRow = await (await import('./db/database.js')).getOne<{ count: string }>(
+        `SELECT COUNT(*) as count FROM shadow_positions`,
+      );
+
+      // Get latest discovery stats
+      const discoveryRow = await (await import('./db/database.js')).getOne<{
+        tokens_screened: number; wallets_added: number;
+      }>(`SELECT tokens_screened, wallets_added FROM wallet_discovery_log ORDER BY run_at DESC LIMIT 1`);
+
+      const tierCfg = this.capitalManager.tierConfig;
+      const wsStatus = this.wsManager.getStatus();
+
+      await this.telegram.sendStartupDiagnostics({
+        version: 'v2.0.0',
+        shadowMode: config.shadowMode,
+        capitalSol: this.capitalManager.capital,
+        tier: this.capitalManager.tier,
+        maxPositions: tierCfg.maxPositions,
+        openPositions: this.shadowTracker.getOpenCount(),
+        wallets: walletRows.map((w) => ({
+          address: w.address,
+          label: w.label,
+          tier: w.tier,
+          subscribed: this.walletAddresses.includes(w.address),
+        })),
+        wsConnected: wsStatus.connected,
+        wsFallbackActive: wsStatus.fallbackMode,
+        wsSubscribedCount: wsStatus.subscribedWallets,
+        nansenApiKey: !!config.nansen.apiKey,
+        nansenUsage: this.nansen.usage,
+        heliusApiKey: !!config.helius.apiKey,
+        telegramOk: true,
+        dbConnected: true,
+        tierConfig: {
+          profitTarget: tierCfg.profitTarget,
+          stopLoss: tierCfg.stopLoss,
+          walletConfluence: tierCfg.walletConfluenceRequired,
+          confluenceWindow: tierCfg.confluenceWindow,
+          hardTime: tierCfg.hardTimeHours,
+          mcapRange: `$${(tierCfg.mcapMin/1000).toFixed(0)}k–$${(tierCfg.mcapMax/1000000).toFixed(0)}M`,
+          liquidityMin: tierCfg.liquidityMin,
+          partialExits: tierCfg.partialExitsEnabled,
+        },
+        signalsToday: parseInt(signalRow?.count || '0'),
+        tradesAllTime: parseInt(tradeRow?.count || '0'),
+        discoveryTokens: discoveryRow?.tokens_screened || 0,
+        discoveryWalletsAdded: discoveryRow?.wallets_added || 0,
+      });
+    } catch (err) {
+      console.error('Failed to send startup diagnostics:', err);
     }
   }
 

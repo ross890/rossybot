@@ -220,6 +220,94 @@ export class TelegramService {
     await this.send(`⚠️ ${data.walletLabel} bought $${data.tokenSymbol} — skipped: ${data.reason}`);
   }
 
+  async sendStartupDiagnostics(data: {
+    version: string;
+    shadowMode: boolean;
+    capitalSol: number;
+    tier: string;
+    maxPositions: number;
+    openPositions: number;
+    wallets: Array<{ address: string; label: string; tier: string; subscribed: boolean }>;
+    wsConnected: boolean;
+    wsFallbackActive: boolean;
+    wsSubscribedCount: number;
+    nansenApiKey: boolean;
+    nansenUsage: { callsLastMinute: number; maxPerMinute: number };
+    heliusApiKey: boolean;
+    telegramOk: boolean;
+    dbConnected: boolean;
+    tierConfig: {
+      profitTarget: number;
+      stopLoss: number;
+      walletConfluence: number;
+      confluenceWindow: number;
+      hardTime: number;
+      mcapRange: string;
+      liquidityMin: number;
+      partialExits: boolean;
+    };
+    signalsToday: number;
+    tradesAllTime: number;
+    discoveryTokens: number;
+    discoveryWalletsAdded: number;
+  }): Promise<void> {
+    const walletLines = data.wallets.map((w) =>
+      `│  ${w.subscribed ? '📡' : '⏸️'} [${w.tier}] ${w.label} (${w.address.slice(0, 6)}...${w.address.slice(-4)})`
+    ).join('\n');
+
+    const msg = [
+      `🤖 ROSSYBOT V2 — STARTUP DIAGNOSTICS`,
+      ``,
+      `┌─ SYSTEM`,
+      `│ Version: ${data.version}`,
+      `│ Mode: ${data.shadowMode ? '👻 SHADOW (no real trades)' : '💰 LIVE'}`,
+      `│ Database: ${data.dbConnected ? '✅ Connected' : '❌ Down'}`,
+      `│ Telegram: ${data.telegramOk ? '✅ Connected' : '❌ Down'}`,
+      `│`,
+      `├─ CAPITAL`,
+      `│ Balance: ${data.capitalSol.toFixed(4)} SOL`,
+      `│ Tier: ${data.tier}`,
+      `│ Max positions: ${data.maxPositions}`,
+      `│ Open positions: ${data.openPositions}`,
+      `│`,
+      `├─ HELIUS (Real-time)`,
+      `│ API key: ${data.heliusApiKey ? '✅ Set' : '❌ Missing'}`,
+      `│ WebSocket: ${data.wsConnected ? '✅ Connected' : '❌ Disconnected'}`,
+      `│ Fallback mode: ${data.wsFallbackActive ? '⚠️ ACTIVE (RPC polling)' : '✅ Off'}`,
+      `│ Subscribed wallets: ${data.wsSubscribedCount}`,
+      `│`,
+      `├─ NANSEN (Intelligence)`,
+      `│ API key: ${data.nansenApiKey ? '✅ Set' : '❌ Missing'}`,
+      `│ Rate: ${data.nansenUsage.callsLastMinute}/${data.nansenUsage.maxPerMinute} calls/min`,
+      `│ Discovery schedule: every 4h`,
+      `│ Last run: ${data.discoveryTokens} tokens screened, ${data.discoveryWalletsAdded} wallets added`,
+      `│`,
+      `├─ WALLETS MONITORED (${data.wallets.length})`,
+      walletLines,
+      `│`,
+      `├─ ENTRY RULES [${data.tier}]`,
+      `│ Confluence: ${data.tierConfig.walletConfluence} wallets within ${data.tierConfig.confluenceWindow}min`,
+      `│ MCap range: ${data.tierConfig.mcapRange}`,
+      `│ Min liquidity: $${this.formatNum(data.tierConfig.liquidityMin)}`,
+      `│ Validation: RugCheck + DexScreener (<30s)`,
+      `│`,
+      `├─ EXIT RULES [${data.tier}]`,
+      `│ Profit target: +${(data.tierConfig.profitTarget * 100).toFixed(0)}%`,
+      `│ Stop loss: ${(data.tierConfig.stopLoss * 100).toFixed(0)}%`,
+      `│ Hard time: ${data.tierConfig.hardTime}h`,
+      `│ Partial exits: ${data.tierConfig.partialExits ? 'YES' : 'NO (fee-destructive at this tier)'}`,
+      `│ Alpha exit: sell on wallet sell >30%`,
+      `│`,
+      `├─ STATS`,
+      `│ Signals today: ${data.signalsToday}`,
+      `│ All-time trades: ${data.tradesAllTime}`,
+      `│`,
+      `└─ STATUS: ✅ RUNNING`,
+    ].join('\n');
+
+    await this.send(msg);
+  }
+
   // --- Command handlers ---
 
   private setupCommands(): void {

@@ -36,7 +36,7 @@ export const config = {
     wsUrl: env.HELIUS_WS_URL || `wss://mainnet.helius-rpc.com/?api-key=${env.HELIUS_API_KEY}`,
     pingIntervalMs: 30_000,
     pongTimeoutMs: 10_000,
-    staleTimeoutMs: 120_000, // 2 minutes
+    staleTimeoutMs: 1_800_000, // 30 minutes — wallets may not trade for hours
     maxReconnectAttempts: 5,
     reconnectDelays: [1000, 2000, 5000, 10000, 30000],
     fallbackPollIntervalMs: 15_000,

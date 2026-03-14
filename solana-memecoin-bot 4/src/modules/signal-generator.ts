@@ -883,11 +883,15 @@ export class SignalGenerator {
         cycleTimeMs,
       }).catch(err => logger.debug({ err }, 'Failed to log scan cycle metrics'));
     } catch (error) {
-      // Capture error in diagnostics
-      this._diagnostics.lastError = error instanceof Error ? error.message : String(error);
+      // Capture error in diagnostics — ALWAYS set timestamp so /diagnostics shows data
+      const errorMsg = error instanceof Error ? error.message : String(error);
+      this._diagnostics.timestamp = new Date();
+      this._diagnostics.isRunning = this.isRunning;
+      this._diagnostics.lastError = errorMsg;
       this._diagnostics.lastErrorTime = new Date();
+      this._diagnostics.consecutiveEmptyCycles++;
       this.recordCycleSnapshot(this._diagnostics, true);
-      logger.error({ error }, 'Error in scan cycle');
+      logger.error({ error: errorMsg, stack: error instanceof Error ? error.stack : undefined }, 'Error in scan cycle');
       await performanceLogger.logError('SYSTEM', 'Scan cycle error', error).catch(() => {});
     }
   }

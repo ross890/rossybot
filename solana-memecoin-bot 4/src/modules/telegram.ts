@@ -1065,6 +1065,15 @@ export class TelegramAlertBot {
 
         if (!diag || diag.timestamp.getTime() === 0) {
           lines.push('⚠️ No scan cycle data yet — generator may not have started');
+          // Still show error info if available
+          if (diag?.lastError) {
+            const errAge = diag.lastErrorTime
+              ? Math.round((Date.now() - diag.lastErrorTime.getTime()) / 60000)
+              : 0;
+            lines.push('');
+            lines.push(`🚨 *Last Error:* ${errAge}m ago`);
+            lines.push(`  \`${diag.lastError.slice(0, 200)}\``);
+          }
         } else {
           const age = Math.round((Date.now() - diag.timestamp.getTime()) / 1000);
           const ageStr = age < 60 ? `${age}s ago` : age < 3600 ? `${Math.round(age / 60)}m ago` : `${Math.round(age / 3600)}h ago`;

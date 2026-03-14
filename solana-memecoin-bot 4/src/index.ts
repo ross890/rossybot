@@ -182,6 +182,7 @@ async function main(): Promise<void> {
 
   // Wire diagnostics getter so /diagnostics command can access signal generator state
   telegramBot.setDiagnosticsGetter(() => signalGenerator.getDiagnostics());
+  telegramBot.setRollingStatsGetter((windowMs: number) => signalGenerator.getRollingStats(windowMs));
 
   // V3 Checklist Automation — milestone tracking every 6 hours
   try {

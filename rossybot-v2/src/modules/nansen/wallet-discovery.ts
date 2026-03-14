@@ -2,17 +2,15 @@ import { logger } from '../../utils/logger.js';
 import { query, getMany } from '../../db/database.js';
 import { config, SEED_WALLETS, getTierConfig, getTierForCapital } from '../../config/index.js';
 import { CapitalTier, WalletSource, WalletTier } from '../../types/index.js';
-import { NansenClient, type TokenScreenerItem, type PnlLeaderboardItem } from './client.js';
+import { NansenClient, type SmartMoneyDexTrade } from './client.js';
 
 interface WalletCandidate {
   address: string;
-  realizedPnl: number;
-  unrealizedPnl: number;
+  label: string;
   tradeCount: number;
-  roiPercent: number;
-  holdingRatio: number;
+  totalVolumeUsd: number;
+  tokensTraded: number;
   score: number;
-  sourceToken: string;
 }
 
 export class WalletDiscovery {
@@ -49,21 +47,16 @@ export class WalletDiscovery {
     return eligible.map((w) => w.address);
   }
 
-  /** Remove discovered wallets that don't meet quality bar */
+  /** Remove all previously discovered wallets (clean slate for new discovery method) */
   async purgeWeakWallets(): Promise<number> {
     const result = await query(
       `DELETE FROM alpha_wallets
        WHERE source != 'NANSEN_SEED'
-         AND (
-           COALESCE(nansen_realized_pnl, 0) < 5000
-           OR COALESCE(nansen_roi_percent, 0) < 50
-           OR COALESCE(nansen_holding_ratio, 1) > 0.5
-         )
        RETURNING address`,
     );
     const count = result.rowCount || 0;
     if (count > 0) {
-      console.log(`🗑️ Purged ${count} low-quality wallets that don't meet new criteria`);
+      console.log(`🗑️ Purged ${count} old discovered wallets — will repopulate from smart money dex-trades`);
     }
     return count;
   }
@@ -84,99 +77,93 @@ export class WalletDiscovery {
     }
   }
 
-  /** Run a full discovery cycle */
+  /** Run a full discovery cycle using Nansen Smart Money DEX Trades */
   async runDiscovery(): Promise<void> {
     const start = Date.now();
     console.log('🔍 Starting wallet discovery cycle...');
 
     try {
-      // Step 1: Get trending tokens from screener
-      const currentTier = CapitalTier.MICRO; // TODO: get from capital manager
-      const tierCfg = getTierConfig(currentTier);
+      // Step 1: Pull smart money DEX trades on Solana (3 pages for coverage)
+      console.log('Step 1: Fetching smart money DEX trades (Solana, last 24h)...');
+      const allTrades: SmartMoneyDexTrade[] = [];
 
-      console.log(`Step 1: Screening tokens (mcap $${tierCfg.mcapMin/1000}k-$${tierCfg.mcapMax/1000}k, liq >$${tierCfg.liquidityMin/1000}k)`);
-      const tokens: TokenScreenerItem[] = await this.nansen.tokenScreener({
-        mcapMin: tierCfg.mcapMin,
-        mcapMax: tierCfg.mcapMax,
-        liquidityMin: tierCfg.liquidityMin,
-        minTraders: 20,
-        limit: currentTier === CapitalTier.MICRO || currentTier === CapitalTier.SMALL ? 10 : 20,
-      });
-
-      if (!tokens || tokens.length === 0) {
-        console.log('No trending tokens found in screener');
-        await this.logDiscovery(0, 0, 0, 0, Date.now() - start);
-        return;
-      }
-      console.log(`Found ${tokens.length} trending tokens`);
-      for (const t of tokens.slice(0, 5)) {
-        console.log(`  - ${t.token_symbol} (${t.token_address.slice(0, 8)}...) | MCap: $${(t.market_cap_usd/1000).toFixed(0)}k | Netflow: $${(t.netflow/1000).toFixed(0)}k`);
-      }
-
-      // Step 2: Get PnL leaderboard for top tokens
-      const allCandidates: WalletCandidate[] = [];
-      const tokenAddresses = tokens.slice(0, 5).map((t) => t.token_address).filter(Boolean);
-      console.log(`Step 2: Checking PnL leaderboard for ${tokenAddresses.length} tokens`);
-
-      for (const tokenAddr of tokenAddresses) {
+      for (let page = 1; page <= 3; page++) {
         try {
-          const leaders: PnlLeaderboardItem[] = await this.nansen.tokenPnlLeaderboard(tokenAddr, {
-            pnlUsdMin: 5000,
-            tradesMin: 3,
-            tradesMax: 50,
-            holdingRatioMax: 0.3,
+          const trades = await this.nansen.smartMoneyDexTrades({
+            tradeValueMin: 500,
+            labels: ['Smart Trader', '30D Smart Trader', '90D Smart Trader', '180D Smart Trader'],
+            limit: 100,
+            page,
           });
-
-          const tokenSymbol = tokens.find((t) => t.token_address === tokenAddr)?.token_symbol || tokenAddr.slice(0, 8);
-          console.log(`  $${tokenSymbol}: ${leaders.length} traders on leaderboard`);
-
-          for (const l of leaders) {
-            const addr = l.trader_address;
-            if (!addr) continue;
-
-            const realizedPnl = l.pnl_usd_realised || 0;
-            const unrealizedPnl = l.pnl_usd_unrealised || 0;
-            const tradeCount = l.nof_trades || 0;
-            const roiPercent = l.roi_percent_total || 0;
-            const holdingRatio = l.still_holding_balance_ratio || 0;
-
-            // Quality filters — we want REAL smart money
-            if (realizedPnl < 5000) continue;       // Min $5K realized profit
-            if (roiPercent < 50) continue;           // Min 50% ROI
-            if (holdingRatio > 0.5) continue;        // Took profits, not just holding bags
-            if (tradeCount < 3) continue;            // Not a one-off lucky trade
-            if (tradeCount > 50) continue;           // Not a bot
-
-            // Score the wallet
-            const score = this.scoreWallet(realizedPnl, unrealizedPnl, tradeCount, roiPercent, holdingRatio);
-
-            // Minimum quality threshold
-            if (score < 0.35) continue;
-
-            console.log(`    ✓ ${addr.slice(0, 8)} | PnL: $${(realizedPnl/1000).toFixed(1)}k | ROI: ${roiPercent.toFixed(0)}% | Trades: ${tradeCount} | Score: ${score.toFixed(2)}`);
-
-            allCandidates.push({
-              address: addr,
-              realizedPnl,
-              unrealizedPnl,
-              tradeCount,
-              roiPercent,
-              holdingRatio,
-              score,
-              sourceToken: tokenAddr,
-            });
-          }
+          allTrades.push(...trades);
+          if (trades.length < 100) break; // No more pages
         } catch (err: unknown) {
           const axErr = err as { response?: { status?: number; data?: unknown }; message?: string };
-          if (axErr.response?.data) {
-            console.error(`Failed to get PnL leaderboard for ${tokenAddr.slice(0, 8)}: ${axErr.response.status} — ${JSON.stringify(axErr.response.data)}`);
-          } else {
-            console.error(`Failed to get PnL leaderboard for ${tokenAddr.slice(0, 8)}: ${axErr.message || err}`);
-          }
+          console.error(`Failed to fetch dex-trades page ${page}: ${axErr.response?.status || axErr.message || err}`);
+          break;
         }
       }
 
-      // Step 3: Rank and add top candidates
+      if (allTrades.length === 0) {
+        console.log('No smart money trades found');
+        await this.logDiscovery(0, 0, 0, 0, Date.now() - start);
+        return;
+      }
+      console.log(`Found ${allTrades.length} smart money trades`);
+
+      // Step 2: Aggregate by trader — count trades, volume, unique tokens
+      const traderMap = new Map<string, {
+        label: string;
+        trades: number;
+        totalVolume: number;
+        tokens: Set<string>;
+      }>();
+
+      for (const t of allTrades) {
+        const addr = t.trader_address;
+        if (!addr) continue;
+
+        const existing = traderMap.get(addr) || {
+          label: t.trader_address_label || addr.slice(0, 8),
+          trades: 0,
+          totalVolume: 0,
+          tokens: new Set<string>(),
+        };
+
+        existing.trades++;
+        existing.totalVolume += t.trade_value_usd || 0;
+        if (t.token_bought_symbol) existing.tokens.add(t.token_bought_symbol);
+        traderMap.set(addr, existing);
+      }
+
+      console.log(`Step 2: ${traderMap.size} unique traders identified`);
+
+      // Step 3: Filter — 5+ trades AND 5+ unique tokens traded
+      const allCandidates: WalletCandidate[] = [];
+
+      for (const [addr, data] of traderMap) {
+        if (data.trades < 5) continue;
+        if (data.tokens.size < 5) continue;
+
+        // Score: trade activity + volume + diversity
+        const tradeScore = Math.min(data.trades / 20, 1) * 0.35;
+        const volumeScore = Math.min(Math.log10(Math.max(data.totalVolume, 1)) / 6, 1) * 0.35;
+        const diversityScore = Math.min(data.tokens.size / 10, 1) * 0.30;
+        const score = tradeScore + volumeScore + diversityScore;
+
+        console.log(`  ✓ ${data.label} (${addr.slice(0, 8)}) | ${data.trades} trades | $${(data.totalVolume/1000).toFixed(1)}k vol | ${data.tokens.size} tokens | Score: ${score.toFixed(2)}`);
+
+        allCandidates.push({
+          address: addr,
+          label: data.label,
+          tradeCount: data.trades,
+          totalVolumeUsd: data.totalVolume,
+          tokensTraded: data.tokens.size,
+          score,
+        });
+      }
+
+      // Step 4: Rank and add top candidates
       allCandidates.sort((a, b) => b.score - a.score);
       const topCandidates = allCandidates.slice(0, 10);
 
@@ -186,13 +173,13 @@ export class WalletDiscovery {
         if (isNew) walletsAdded++;
       }
 
-      // Step 4: Validate/demote existing wallets
+      // Step 5: Validate/demote existing wallets
       const walletsRemoved = await this.validateExistingWallets();
 
       const duration = Date.now() - start;
-      await this.logDiscovery(tokenAddresses.length, allCandidates.length, walletsAdded, walletsRemoved, duration);
+      await this.logDiscovery(allTrades.length, allCandidates.length, walletsAdded, walletsRemoved, duration);
 
-      console.log(`✅ Discovery complete: ${tokenAddresses.length} tokens screened, ${allCandidates.length} candidates evaluated, ${walletsAdded} wallets added, ${walletsRemoved} removed (${duration}ms)`);
+      console.log(`✅ Discovery complete: ${allTrades.length} trades analyzed, ${allCandidates.length} qualified traders, ${walletsAdded} wallets added, ${walletsRemoved} removed (${duration}ms)`);
     } catch (err: unknown) {
       const axiosErr = err as { response?: { status?: number; data?: unknown }; message?: string };
       if (axiosErr.response) {
@@ -203,56 +190,23 @@ export class WalletDiscovery {
     }
   }
 
-  private scoreWallet(
-    realizedPnl: number,
-    unrealizedPnl: number,
-    tradeCount: number,
-    roiPercent: number,
-    holdingRatio: number,
-  ): number {
-    // Realized PnL: $5K=0.25, $20K=0.5, $100K+=1.0 (log scale)
-    const pnlScore = Math.min(Math.log10(Math.max(realizedPnl, 1)) / 5, 1) * 0.30;
-
-    // ROI: 50%=0.25, 200%=0.5, 1000%+=1.0
-    const roiScore = Math.min(roiPercent / 1000, 1) * 0.25;
-
-    // Realized vs unrealized: higher realized ratio = actually took profits
-    const realizedRatio = realizedPnl > 0
-      ? realizedPnl / (realizedPnl + Math.abs(unrealizedPnl))
-      : 0;
-    const profitTakingScore = realizedRatio * 0.20;
-
-    // Holding ratio: lower = exited cleanly, not a bag holder
-    const holdScore = Math.max(1 - holdingRatio / 0.5, 0) * 0.15;
-
-    // Trade count: 5-20 is deliberate trader, not a bot
-    const freqScore = (tradeCount >= 5 && tradeCount <= 20 ? 1 :
-      tradeCount < 5 ? tradeCount / 5 :
-      Math.max(1 - (tradeCount - 20) / 30, 0)) * 0.10;
-
-    return pnlScore + roiScore + profitTakingScore + holdScore + freqScore;
-  }
-
   private async addWallet(candidate: WalletCandidate): Promise<boolean> {
     try {
       const result = await query(
-        `INSERT INTO alpha_wallets (address, label, source, nansen_pnl_usd, nansen_roi_percent, nansen_holding_ratio, nansen_trade_count, nansen_realized_pnl, nansen_unrealized_pnl, tier, active, helius_subscribed)
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, TRUE, FALSE)
+        `INSERT INTO alpha_wallets (address, label, source, nansen_trade_count, nansen_pnl_usd, tier, active, helius_subscribed)
+         VALUES ($1, $2, $3, $4, $5, $6, TRUE, FALSE)
          ON CONFLICT (address) DO UPDATE SET
-           nansen_pnl_usd = $4, nansen_roi_percent = $5, nansen_holding_ratio = $6,
-           nansen_trade_count = $7, nansen_realized_pnl = $8, nansen_unrealized_pnl = $9,
+           label = $2,
+           nansen_trade_count = $4,
+           nansen_pnl_usd = $5,
            last_validated_at = NOW()
          RETURNING (xmax = 0) AS is_new`,
         [
           candidate.address,
-          `nansen_discovered_${candidate.address.slice(0, 6)}`,
+          candidate.label,
           WalletSource.NANSEN_DISCOVERY,
-          candidate.realizedPnl,
-          candidate.roiPercent,
-          candidate.holdingRatio,
           candidate.tradeCount,
-          candidate.realizedPnl,
-          candidate.unrealizedPnl,
+          candidate.totalVolumeUsd,
           WalletTier.B,
         ],
       );

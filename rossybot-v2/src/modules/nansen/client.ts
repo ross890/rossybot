@@ -58,6 +58,23 @@ export interface FlowIntelligenceItem {
   fresh_wallets_wallet_count: number;
 }
 
+export interface SmartMoneyDexTrade {
+  chain: string;
+  transaction_hash: string;
+  block_timestamp: string;
+  trader_address: string;
+  trader_address_label: string | null;
+  token_bought_address: string;
+  token_bought_symbol: string;
+  token_bought_amount: number;
+  token_bought_age_days: number;
+  token_bought_market_cap: number;
+  token_sold_address: string;
+  token_sold_symbol: string;
+  token_sold_amount: number;
+  trade_value_usd: number;
+}
+
 export interface SmartMoneyNetflowItem {
   token_address: string;
   token_symbol: string;
@@ -208,6 +225,55 @@ export class NansenClient {
       const data = resp.data?.data;
       return Array.isArray(data) ? data[0] || null : data || null;
     }) as Promise<FlowIntelligenceItem | null>;
+  }
+
+  /**
+   * POST /smart-money/dex-trades
+   * Get real-time DEX trading activity from Nansen-tagged smart traders.
+   * Returns individual wallet addresses with trader labels.
+   * Data is last 24h — call multiple pages for volume.
+   * 5 credits per call.
+   */
+  async smartMoneyDexTrades(params?: {
+    tradeValueMin?: number;
+    mcapMin?: number;
+    mcapMax?: number;
+    tokenAgeMax?: number;
+    labels?: string[];
+    limit?: number;
+    page?: number;
+  }): Promise<SmartMoneyDexTrade[]> {
+    return this.rateLimiter.execute('smart-money/dex-trades', async () => {
+      const filters: Record<string, unknown> = {};
+
+      if (params?.tradeValueMin) {
+        filters.trade_value_usd = { min: params.tradeValueMin };
+      }
+      if (params?.mcapMin || params?.mcapMax) {
+        filters.token_bought_market_cap = {};
+        if (params?.mcapMin) (filters.token_bought_market_cap as Record<string, number>).min = params.mcapMin;
+        if (params?.mcapMax) (filters.token_bought_market_cap as Record<string, number>).max = params.mcapMax;
+      }
+      if (params?.tokenAgeMax) {
+        filters.token_bought_age_days = { max: params.tokenAgeMax };
+      }
+      if (params?.labels) {
+        filters.include_smart_money_labels = params.labels;
+      }
+
+      const body: Record<string, unknown> = {
+        chains: ['solana'],
+        filters,
+        pagination: {
+          page: params?.page || 1,
+          per_page: params?.limit || 100,
+        },
+        order_by: [{ field: 'trade_value_usd', direction: 'DESC' }],
+      };
+
+      const resp = await this.api.post('/smart-money/dex-trades', body);
+      return (resp.data?.data || []) as SmartMoneyDexTrade[];
+    }) as Promise<SmartMoneyDexTrade[]>;
   }
 
   /**

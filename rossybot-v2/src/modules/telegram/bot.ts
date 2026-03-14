@@ -24,7 +24,7 @@ export class TelegramService {
     });
     this.chatId = config.telegram.chatId;
     this.bot.on('polling_error', (err) => {
-      logger.error({ err: err.message }, 'Telegram polling error');
+      console.error(`Telegram polling error: ${err.message}`);
     });
     this.setupCommands();
   }

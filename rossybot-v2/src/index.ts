@@ -92,10 +92,13 @@ class RossyBotV2 {
     // 9. Start Nansen wallet discovery
     this.walletDiscovery.start();
 
-    // 10. Schedule daily summary at UTC midnight
+    // 10. Start Telegram bot polling
+    await this.telegram.startPolling();
+
+    // 11. Schedule daily summary at UTC midnight
     this.scheduleDailySummary();
 
-    // 11. Send startup message
+    // 12. Send startup message
     await this.telegram.sendWebSocketAlert('restored', {
       wallets: this.walletAddresses.length,
       downtime: '0s (fresh start)',
@@ -332,15 +335,33 @@ class RossyBotV2 {
 
 // --- Main ---
 
-const bot = new RossyBotV2();
+async function main() {
+  console.log('RossyBot V2 — initializing...');
 
-process.on('SIGINT', async () => { await bot.shutdown(); process.exit(0); });
-process.on('SIGTERM', async () => { await bot.shutdown(); process.exit(0); });
-process.on('unhandledRejection', (err) => {
-  logger.error({ err }, 'Unhandled rejection');
-});
+  let bot: RossyBotV2;
+  try {
+    bot = new RossyBotV2();
+    console.log('RossyBot V2 — constructor OK');
+  } catch (err) {
+    console.error('FATAL: Failed to construct RossyBotV2:', err);
+    process.exit(1);
+  }
 
-bot.start().catch((err) => {
-  logger.error({ err }, 'Failed to start RossyBot V2');
-  process.exit(1);
-});
+  process.on('SIGINT', async () => { await bot.shutdown(); process.exit(0); });
+  process.on('SIGTERM', async () => { await bot.shutdown(); process.exit(0); });
+  process.on('unhandledRejection', (err) => {
+    console.error('Unhandled rejection:', err);
+  });
+  process.on('uncaughtException', (err) => {
+    console.error('Uncaught exception:', err);
+  });
+
+  try {
+    await bot.start();
+  } catch (err) {
+    console.error('FATAL: Failed to start RossyBot V2:', err);
+    process.exit(1);
+  }
+}
+
+main();

@@ -68,13 +68,14 @@ export class WalletDiscovery {
   /** Run a full discovery cycle */
   async runDiscovery(): Promise<void> {
     const start = Date.now();
-    logger.info('Starting wallet discovery cycle');
+    console.log('🔍 Starting wallet discovery cycle...');
 
     try {
       // Step 1: Get trending tokens from screener
       const currentTier = CapitalTier.MICRO; // TODO: get from capital manager
       const tierCfg = getTierConfig(currentTier);
 
+      console.log(`Step 1: Screening tokens (mcap $${tierCfg.mcapMin/1000}k-$${tierCfg.mcapMax/1000}k, liq >$${tierCfg.liquidityMin/1000}k)`);
       const tokens = await this.nansen.tokenDiscoveryScreener({
         mcapMin: tierCfg.mcapMin,
         mcapMax: tierCfg.mcapMax,
@@ -83,16 +84,18 @@ export class WalletDiscovery {
       }) as Array<{ address?: string; tokenAddress?: string }>;
 
       if (!tokens || tokens.length === 0) {
-        logger.info('No trending tokens found in screener');
+        console.log('No trending tokens found in screener');
         await this.logDiscovery(0, 0, 0, 0, Date.now() - start);
         return;
       }
+      console.log(`Found ${tokens.length} trending tokens`);
 
       // Step 2: Get PnL leaderboard for top tokens
       const allCandidates: WalletCandidate[] = [];
       const tokenAddresses = tokens.slice(0, 2).map(
         (t) => t.address || t.tokenAddress || '',
       ).filter(Boolean);
+      console.log(`Step 2: Checking PnL leaderboard for ${tokenAddresses.length} tokens`);
 
       for (const tokenAddr of tokenAddresses) {
         try {
@@ -137,8 +140,9 @@ export class WalletDiscovery {
               sourceToken: tokenAddr,
             });
           }
-        } catch (err) {
-          logger.error({ err, token: tokenAddr }, 'Failed to get PnL leaderboard');
+        } catch (err: unknown) {
+          const msg = err instanceof Error ? err.message : String(err);
+          console.error(`Failed to get PnL leaderboard for ${tokenAddr.slice(0, 8)}: ${msg}`);
         }
       }
 
@@ -158,15 +162,9 @@ export class WalletDiscovery {
       const duration = Date.now() - start;
       await this.logDiscovery(tokenAddresses.length, allCandidates.length, walletsAdded, walletsRemoved, duration);
 
-      logger.info({
-        tokensScreened: tokenAddresses.length,
-        candidatesEvaluated: allCandidates.length,
-        walletsAdded,
-        walletsRemoved,
-        durationMs: duration,
-      }, 'Wallet discovery cycle complete');
+      console.log(`✅ Discovery complete: ${tokenAddresses.length} tokens screened, ${allCandidates.length} candidates evaluated, ${walletsAdded} wallets added, ${walletsRemoved} removed (${duration}ms)`);
     } catch (err) {
-      logger.error({ err }, 'Wallet discovery cycle failed');
+      console.error('❌ Wallet discovery cycle failed:', err);
     }
   }
 

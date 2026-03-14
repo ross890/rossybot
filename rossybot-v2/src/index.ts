@@ -96,8 +96,11 @@ class RossyBotV2 {
     // 8. Start shadow position price monitoring
     this.shadowTracker.start();
 
-    // 9. Start Nansen wallet discovery
+    // 9. Start Nansen wallet discovery (scheduled every 4h + immediate first run)
     this.walletDiscovery.start();
+    this.walletDiscovery.runDiscovery().catch((err) =>
+      console.error('Initial discovery failed:', err),
+    );
 
     // 10. Start Telegram bot polling
     await this.telegram.startPolling();

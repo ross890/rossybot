@@ -49,6 +49,25 @@ export class WalletDiscovery {
     return eligible.map((w) => w.address);
   }
 
+  /** Remove discovered wallets that don't meet quality bar */
+  async purgeWeakWallets(): Promise<number> {
+    const result = await query(
+      `DELETE FROM alpha_wallets
+       WHERE source != 'NANSEN_SEED'
+         AND (
+           COALESCE(nansen_realized_pnl, 0) < 5000
+           OR COALESCE(nansen_roi_percent, 0) < 50
+           OR COALESCE(nansen_holding_ratio, 1) > 0.5
+         )
+       RETURNING address`,
+    );
+    const count = result.rowCount || 0;
+    if (count > 0) {
+      console.log(`🗑️ Purged ${count} low-quality wallets that don't meet new criteria`);
+    }
+    return count;
+  }
+
   /** Start periodic discovery */
   start(): void {
     this.discoveryInterval = setInterval(

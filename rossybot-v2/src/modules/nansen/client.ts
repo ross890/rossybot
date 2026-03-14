@@ -114,7 +114,9 @@ export class NansenClient {
       };
 
       // Build filters — only include fields that have values
-      const filters: Record<string, unknown> = {};
+      const filters: Record<string, unknown> = {
+        sectors: ['Memecoins'],
+      };
       if (params.mcapMin !== undefined || params.mcapMax !== undefined) {
         filters.market_cap_usd = {};
         if (params.mcapMin !== undefined) (filters.market_cap_usd as Record<string, number>).min = params.mcapMin;
@@ -126,9 +128,7 @@ export class NansenClient {
       if (params.minTraders !== undefined) {
         filters.nof_traders = { min: params.minTraders };
       }
-      if (Object.keys(filters).length > 0) {
-        body.filters = filters;
-      }
+      body.filters = filters;
 
       const resp = await this.api.post('/token-screener', body);
       return (resp.data?.data || []) as TokenScreenerItem[];
@@ -151,9 +151,17 @@ export class NansenClient {
     },
   ): Promise<PnlLeaderboardItem[]> {
     return this.rateLimiter.execute('tgm/pnl-leaderboard', async () => {
+      // Date range is required — use last 30 days
+      const now = new Date();
+      const thirtyDaysAgo = new Date(now.getTime() - 30 * 24 * 60 * 60 * 1000);
+
       const body: Record<string, unknown> = {
         chain: 'solana',
         token_address: tokenAddress,
+        date: {
+          from: thirtyDaysAgo.toISOString(),
+          to: now.toISOString(),
+        },
         pagination: {
           page: 1,
           per_page: params?.limit || 25,

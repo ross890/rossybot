@@ -359,16 +359,21 @@ export class OnChainScoringEngine {
       score += Math.min(30, Math.round(Math.log10(metrics.holderCount / 10) * 15));
     }
 
-    // v3: Holder distribution (0-15 points) — REDUCED from 25
-    // Less predictive in micro-caps where concentration is naturally high.
+    // v4: Holder distribution (0-15 points) — granular scaling
+    // Tokens with 60%+ top 10 concentration are highly risky (insider-dominated).
+    // Previous scoring gave 7 points to anything under 80%, letting 68% tokens pass easily.
     if (metrics.top10Concentration <= THRESHOLDS.IDEAL_TOP10_CONCENTRATION) {
       score += 15;
     } else if (metrics.top10Concentration <= 50) {
       score += 12;
-    } else if (metrics.top10Concentration <= THRESHOLDS.MAX_TOP10_CONCENTRATION) {
+    } else if (metrics.top10Concentration <= 60) {
       score += 7;
+    } else if (metrics.top10Concentration <= 70) {
+      score += 3;  // Was 7 — 60-70% is heavily concentrated, near-zero value
+    } else if (metrics.top10Concentration <= THRESHOLDS.MAX_TOP10_CONCENTRATION) {
+      score += 0;  // 70-80%: no points, extremely concentrated
     } else {
-      score += 0;
+      score -= 5;  // >80%: active penalty
     }
 
     // v3: Volume/MCap ratio (0-25 points) — EXTENDED from 15

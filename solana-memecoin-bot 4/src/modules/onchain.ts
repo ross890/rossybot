@@ -257,7 +257,9 @@ class HeliusClient {
     this.cacheStats.misses++;
 
     // Create the request promise
+    // FIX: Paginate to get accurate holder count, not just first 100
     const requestPromise = this.executeWithRateLimit(async () => {
+      // First page — get initial accounts
       const response = await this.client.post('', {
         jsonrpc: '2.0',
         id: 'holders-request',
@@ -265,15 +267,41 @@ class HeliusClient {
         params: {
           mint: mintAddress,
           page: 1,
-          limit: 100,
+          limit: 1000,  // Max page size to reduce API calls
         },
       });
 
-      const accounts = response.data.result?.token_accounts || [];
-      const totalSupply = accounts.reduce((sum: number, acc: any) => sum + (acc.amount || 0), 0);
+      const firstPageAccounts = response.data.result?.token_accounts || [];
+      let allAccounts = [...firstPageAccounts];
+
+      // If we got a full page, there may be more — paginate up to 5 pages
+      // to get a more accurate total count
+      if (firstPageAccounts.length >= 1000) {
+        for (let page = 2; page <= 5; page++) {
+          try {
+            const nextResponse = await this.client.post('', {
+              jsonrpc: '2.0',
+              id: `holders-request-p${page}`,
+              method: 'getTokenAccounts',
+              params: {
+                mint: mintAddress,
+                page,
+                limit: 1000,
+              },
+            });
+            const nextAccounts = nextResponse.data.result?.token_accounts || [];
+            allAccounts = allAccounts.concat(nextAccounts);
+            if (nextAccounts.length < 1000) break; // Last page
+          } catch {
+            break; // Stop pagination on error
+          }
+        }
+      }
+
+      const totalSupply = allAccounts.reduce((sum: number, acc: any) => sum + (acc.amount || 0), 0);
 
       // Sort by amount and get top 10
-      const sorted = accounts.sort((a: any, b: any) => (b.amount || 0) - (a.amount || 0));
+      const sorted = allAccounts.sort((a: any, b: any) => (b.amount || 0) - (a.amount || 0));
       const top10 = sorted.slice(0, 10).map((acc: any) => ({
         address: acc.owner,
         amount: acc.amount || 0,
@@ -281,7 +309,7 @@ class HeliusClient {
       }));
 
       return {
-        total: accounts.length,
+        total: allAccounts.length,
         topHolders: top10,
       };
     });

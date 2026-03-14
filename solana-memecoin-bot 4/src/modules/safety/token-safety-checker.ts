@@ -270,13 +270,24 @@ export class TokenSafetyChecker {
 
     try {
       const mintPubkey = new PublicKey(tokenMint);
-      const signatures = await this.connection.getSignaturesForAddress(mintPubkey, { limit: 1 }, 'confirmed');
+      // FIX: Fetch signatures in reverse order to get the OLDEST (first) transaction.
+      // Previously used { limit: 1 } which returns the MOST RECENT signature,
+      // causing tokens hours/days old to be flagged as VERY_NEW_TOKEN.
+      // The 'before' parameter with no value + fetching multiple lets us paginate
+      // backwards. We use a larger batch and take the last entry.
+      const signatures = await this.connection.getSignaturesForAddress(
+        mintPubkey,
+        { limit: 1000 },  // Fetch up to 1000 to find the earliest
+        'confirmed'
+      );
 
       if (signatures.length === 0) {
         return 0;
       }
 
-      const firstTxTime = signatures[signatures.length - 1].blockTime;
+      // Signatures are returned newest-first, so the LAST entry is the oldest
+      const oldestSignature = signatures[signatures.length - 1];
+      const firstTxTime = oldestSignature.blockTime;
       if (!firstTxTime) {
         return 0;
       }

@@ -341,6 +341,14 @@ export class WalletPerformanceManager {
       signalKellyF: parseFloat(row.signal_kelly_f) || 0,
       currentStreak: row.current_streak || 0,
       last30dEv: parseFloat(row.last_30d_ev) || 0,
+      // Nansen data
+      nansenLabel: row.nansen_label || null,
+      nansenPnl30d: row.nansen_pnl_30d ? parseFloat(row.nansen_pnl_30d) : null,
+      nansenWinRate: row.nansen_win_rate ? parseFloat(row.nansen_win_rate) : null,
+      nansenTokenCount: row.nansen_token_count || null,
+      nansenAvgBuySize: row.nansen_avg_buy_size ? parseFloat(row.nansen_avg_buy_size) : null,
+      nansenLastRefreshed: row.nansen_last_refreshed || null,
+      fastTrackEligible: row.fast_track_eligible || false,
       updatedAt: row.updated_at,
     };
   }

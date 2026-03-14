@@ -124,6 +124,20 @@ class RossyBotV2 {
         const tierCfg = getTierConfig(this.capitalManager.tier);
 
         for (const signal of signals) {
+          // Send Telegram alert for every detected trade (pipeline visibility)
+          const walletRow = await (await import('./db/database.js')).getOne<{ label: string }>(
+            `SELECT label FROM alpha_wallets WHERE address = $1`, [signal.walletAddress],
+          );
+          await this.telegram.sendTradeDetected({
+            action: signal.type === SignalType.BUY ? 'BUY' : 'SELL',
+            walletAddress: signal.walletAddress,
+            walletLabel: walletRow?.label || signal.walletAddress.slice(0, 8),
+            tokenMint: signal.tokenMint,
+            tokenSymbol: signal.tokenMint.slice(0, 6), // Mint only — no symbol lookup yet
+            amountUsd: Math.abs(signal.solDelta) * 170, // Rough SOL→USD estimate
+            detectionLagMs: signal.detectionLagMs,
+          });
+
           if (signal.type === SignalType.BUY) {
             await this.entryEngine.processBuySignal(signal, tierCfg);
           } else if (signal.type === SignalType.SELL) {

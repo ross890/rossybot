@@ -278,10 +278,14 @@ export class WalletDiscovery {
     }
   }
 
-  /** Get all active wallet addresses */
+  /** Get all active wallet addresses — seed wallets always first */
   async getActiveWallets(): Promise<string[]> {
     const rows = await getMany<{ address: string }>(
-      `SELECT address FROM alpha_wallets WHERE active = TRUE ORDER BY tier ASC, nansen_roi_percent DESC`,
+      `SELECT address FROM alpha_wallets WHERE active = TRUE
+       ORDER BY
+         CASE WHEN source = 'nansen_seed' THEN 0 ELSE 1 END ASC,
+         tier ASC,
+         nansen_roi_percent DESC`,
     );
     return rows.map((r) => r.address);
   }

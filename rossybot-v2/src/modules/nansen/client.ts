@@ -40,9 +40,10 @@ export class NansenClient {
         },
         filters: {
           market_cap_usd: { min: params.mcapMin, max: params.mcapMax },
-          liquidity_usd: { min: params.liquidityMin },
+          liquidity: { min: params.liquidityMin },
+          nof_traders: { min: 20 },
         },
-        order_by: [{ field: 'buy_volume', direction: 'DESC' }],
+        order_by: [{ field: 'netflow', direction: 'DESC' }],
       });
       return resp.data?.data || [];
     }) as Promise<unknown[]>;

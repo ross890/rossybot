@@ -167,8 +167,13 @@ export class WalletDiscovery {
       await this.logDiscovery(tokenAddresses.length, allCandidates.length, walletsAdded, walletsRemoved, duration);
 
       console.log(`✅ Discovery complete: ${tokenAddresses.length} tokens screened, ${allCandidates.length} candidates evaluated, ${walletsAdded} wallets added, ${walletsRemoved} removed (${duration}ms)`);
-    } catch (err) {
-      console.error('❌ Wallet discovery cycle failed:', err);
+    } catch (err: unknown) {
+      const axiosErr = err as { response?: { status?: number; data?: unknown }; message?: string };
+      if (axiosErr.response) {
+        console.error(`❌ Wallet discovery failed: ${axiosErr.response.status} — ${JSON.stringify(axiosErr.response.data)}`);
+      } else {
+        console.error(`❌ Wallet discovery failed: ${axiosErr.message || err}`);
+      }
     }
   }
 

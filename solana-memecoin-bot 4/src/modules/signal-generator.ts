@@ -972,17 +972,73 @@ export class SignalGenerator {
     }
 
     // ALPHA FAST-TRACK: Skip tier/screening/scam gates — go directly to alpha signal path
+    // PIPELINE FIX: Added minimum token sanity checks.
+    // Previously had ZERO quality gates — even ghost pump.fun launches with
+    // 1 holder and $10K mcap would generate signals if any tracked wallet bought them.
+    // Smart money buying IS a signal, but the TOKEN must show minimum viability.
     if (isAlphaSource) {
+      // MINIMUM VIABILITY CHECKS — these are very lenient but prevent pure garbage
+      const ALPHA_MIN_HOLDERS = 5;       // At least some real buyers exist
+      const ALPHA_MIN_MCAP = 15_000;     // $15K — below this is a ghost token
+      const ALPHA_MIN_VOLUME = 500;      // Some actual trading activity
+
+      if (metrics.holderCount < ALPHA_MIN_HOLDERS ||
+          metrics.marketCap < ALPHA_MIN_MCAP ||
+          metrics.volume24h < ALPHA_MIN_VOLUME) {
+        logger.info({
+          tokenAddress: shortAddr,
+          ticker: metrics.ticker,
+          mcap: metrics.marketCap,
+          holders: metrics.holderCount,
+          volume: metrics.volume24h,
+          reason: `Alpha fast-track blocked: holders=${metrics.holderCount}/<${ALPHA_MIN_HOLDERS}, mcap=${metrics.marketCap}/<${ALPHA_MIN_MCAP}, vol=${metrics.volume24h}/<${ALPHA_MIN_VOLUME}`,
+        }, 'EVAL: ALPHA BLOCKED — token below minimum viability');
+        return SignalGenerator.EVAL_RESULTS.SCREENING_FAILED;
+      }
+
+      // Check wallet performance — don't signal from wallets with proven negative edge
+      const alphaInfo = alphaWalletManager.getDiscoveredTokenInfo(tokenAddress);
+      if (alphaInfo) {
+        const wallet = await alphaWalletManager.getWalletByAddress(alphaInfo.walletAddress);
+        if (wallet) {
+          // Block signals from wallets with 0% win rate on 10+ total trades
+          // These wallets have demonstrated they have NO edge
+          const totalTrades = wallet.totalTrades ?? 0;
+          const winRate = wallet.winRate ?? 0;
+          const status = wallet.status;
+          if (totalTrades >= 10 && winRate === 0) {
+            logger.info({
+              tokenAddress: shortAddr,
+              ticker: metrics.ticker,
+              walletAddress: alphaInfo.walletAddress.slice(0, 8),
+              totalTrades,
+              winRate,
+              status,
+            }, 'EVAL: ALPHA BLOCKED — wallet has 0% win rate on 10+ trades, no demonstrated edge');
+            return SignalGenerator.EVAL_RESULTS.SAFETY_BLOCKED;
+          }
+
+          // Block SUSPENDED and REMOVED wallets from generating signals
+          if (status === 'SUSPENDED' || status === 'REMOVED') {
+            logger.info({
+              tokenAddress: shortAddr,
+              walletAddress: alphaInfo.walletAddress.slice(0, 8),
+              status,
+            }, 'EVAL: ALPHA BLOCKED — wallet suspended/removed');
+            return SignalGenerator.EVAL_RESULTS.SAFETY_BLOCKED;
+          }
+        }
+      }
+
       logger.info({
         tokenAddress: shortAddr,
         ticker: metrics.ticker,
         mcap: metrics.marketCap,
         holders: metrics.holderCount,
         liq: metrics.liquidityPool,
-      }, 'EVAL: ALPHA FAST-TRACK — bypassing screening gates for alpha wallet buy');
+      }, 'EVAL: ALPHA FAST-TRACK — passed minimum viability, bypassing screening gates');
 
       // Get alpha wallet activity info from the discovery buffer
-      const alphaInfo = alphaWalletManager.getDiscoveredTokenInfo(tokenAddress);
       if (alphaInfo) {
         // Build minimal alpha activity for signal generation
         const wallet = await alphaWalletManager.getWalletByAddress(alphaInfo.walletAddress);

@@ -963,12 +963,25 @@ export class AlphaWalletManager {
     let reason: string;
 
     // Status transition logic (win rate based)
-    if (totalTrades < THRESHOLDS.PROBATION_TRADES) {
-      // Still in probation - not enough trades
+    // PIPELINE FIX: Use raw trade count as fallback for probation evaluation.
+    // Previously, wallets that only buy and never sell had completedTrades=0,
+    // so they PERMANENTLY stayed on PROBATION while spamming garbage signals.
+    // A wallet with 10+ raw trades and 0 completed round-trips is a "buy-only"
+    // bot or a wallet that never takes profits — either way, not alpha.
+    const isBuyOnlyBot = totalRawTrades >= THRESHOLDS.PROBATION_TRADES && totalTrades === 0;
+    if (isBuyOnlyBot) {
+      // Wallet has made many trades but never completed a round-trip (buy+sell)
+      // This is either a spray-and-pray bot or a wallet that never exits
+      newStatus = AlphaWalletStatus.SUSPENDED;
+      newWeight = THRESHOLDS.SUSPENDED_WEIGHT;
+      recommendation = 'SUSPEND';
+      reason = `Buy-only pattern: ${totalRawTrades} raw trades but 0 completed round-trips — no demonstrated edge`;
+    } else if (totalTrades < THRESHOLDS.PROBATION_TRADES) {
+      // Still in probation - not enough completed trades
       newStatus = AlphaWalletStatus.PROBATION;
       newWeight = THRESHOLDS.PROBATION_WEIGHT;
       recommendation = 'KEEP';
-      reason = `Probation: ${totalTrades}/${THRESHOLDS.PROBATION_TRADES} trades completed`;
+      reason = `Probation: ${totalTrades}/${THRESHOLDS.PROBATION_TRADES} trades completed (${totalRawTrades} raw)`;
     } else if (winRate >= THRESHOLDS.TRUSTED_WIN_RATE) {
       // Excellent performance - TRUSTED
       newStatus = AlphaWalletStatus.TRUSTED;

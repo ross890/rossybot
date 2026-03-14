@@ -1,5 +1,7 @@
+import axios from 'axios';
 import { logger } from '../../utils/logger.js';
 import { query, getMany, getOne } from '../../db/database.js';
+import { config } from '../../config/index.js';
 import { CapitalTier, SignalType, ValidationResult, SignalAction, DetectionSource, type ParsedSignal, type TierConfig } from '../../types/index.js';
 import { validateToken } from '../validation/gate.js';
 
@@ -13,10 +15,16 @@ export class EntryEngine {
   private pendingBuys: Map<string, PendingBuy> = new Map();
   private processedTokens: Set<string> = new Set(); // Dedup: don't re-enter same token
   private onSignalValid: ((signal: ValidatedSignal) => Promise<void>) | null = null;
+  private allTrackedWallets: Set<string> = new Set(); // All wallets in DB (subscribed + unsubscribed)
 
   constructor() {
     // Clean up expired pending buys every 60 seconds
     setInterval(() => this.cleanupExpired(), 60_000);
+  }
+
+  /** Update the full set of tracked wallets (including unsubscribed ones) */
+  updateAllTrackedWallets(wallets: string[]): void {
+    this.allTrackedWallets = new Set(wallets);
   }
 
   setSignalCallback(cb: (signal: ValidatedSignal) => Promise<void>): void {
@@ -58,6 +66,17 @@ export class EntryEngine {
       walletCount: pending.wallets.size,
       required: tierCfg.walletConfluenceRequired,
     }, 'Buy signal accumulated');
+
+    // Check on-chain confluence from unsubscribed tracked wallets
+    if (pending.wallets.size < tierCfg.walletConfluenceRequired) {
+      const onChainHolders = await this.checkUnsubscribedWalletHolders(mint, pending);
+      if (onChainHolders.length > 0) {
+        logger.info({
+          token: mint.slice(0, 8),
+          onChainWallets: onChainHolders.map((w) => w.slice(0, 8)),
+        }, 'On-chain confluence found from unsubscribed wallets');
+      }
+    }
 
     // Check confluence requirement
     const confluenceOk = this.checkConfluence(pending, tierCfg);
@@ -115,6 +134,69 @@ export class EntryEngine {
         detectedAt: new Date(pending.firstDetectedAt),
       });
     }
+  }
+
+  /**
+   * Check if any unsubscribed tracked wallets hold the token.
+   * Uses Helius RPC getTokenAccounts to check holdings without needing WebSocket.
+   * Returns wallet addresses that hold the token and adds them as synthetic signals.
+   */
+  private async checkUnsubscribedWalletHolders(
+    tokenMint: string,
+    pending: PendingBuy,
+  ): Promise<string[]> {
+    const unsubscribed = Array.from(this.allTrackedWallets)
+      .filter((w) => !pending.wallets.has(w));
+
+    if (unsubscribed.length === 0) return [];
+
+    const holders: string[] = [];
+
+    // Batch check: for each unsubscribed wallet, check if they hold this token
+    // Use getTokenAccountsByOwner RPC — 1 call per wallet but lightweight
+    const checkPromises = unsubscribed.slice(0, 12).map(async (wallet) => {
+      try {
+        const resp = await axios.post(config.helius.rpcUrl, {
+          jsonrpc: '2.0',
+          id: 1,
+          method: 'getTokenAccountsByOwner',
+          params: [
+            wallet,
+            { mint: tokenMint },
+            { encoding: 'jsonParsed' },
+          ],
+        }, { timeout: 5000 });
+
+        const accounts = resp.data?.result?.value || [];
+        if (accounts.length > 0) {
+          const amount = accounts[0]?.account?.data?.parsed?.info?.tokenAmount?.uiAmount || 0;
+          if (amount > 0) {
+            holders.push(wallet);
+            // Add as synthetic signal (detected via on-chain check, not WebSocket)
+            pending.wallets.set(wallet, {
+              signal: {
+                walletAddress: wallet,
+                txSignature: 'on-chain-check',
+                blockTime: Math.floor(Date.now() / 1000),
+                type: SignalType.BUY,
+                tokenMint,
+                tokenAmount: amount,
+                solDelta: 0,
+                detectedAt: new Date(),
+                detectionLagMs: 0,
+                detectionSource: DetectionSource.HELIUS_RPC_FALLBACK,
+              },
+              detectedAt: Date.now(),
+            });
+          }
+        }
+      } catch {
+        // Silent — RPC check is best-effort
+      }
+    });
+
+    await Promise.all(checkPromises);
+    return holders;
   }
 
   private checkConfluence(pending: PendingBuy, tierCfg: TierConfig): boolean {

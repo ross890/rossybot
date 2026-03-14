@@ -74,15 +74,18 @@ class RossyBotV2 {
 
     // 3. Seed wallets and load from DB
     await this.walletDiscovery.seedWallets(tier);
-    this.walletAddresses = await this.walletDiscovery.getActiveWallets();
+    const allActiveWallets = await this.walletDiscovery.getActiveWallets();
 
-    // Limit to tier's wallet count
-    this.walletAddresses = this.walletAddresses.slice(0, tierCfg.walletsMonitored);
-    logger.info({ wallets: this.walletAddresses.length }, 'Active wallets loaded');
+    // Helius WS monitors top N wallets (tier-limited)
+    this.walletAddresses = allActiveWallets.slice(0, tierCfg.walletsMonitored);
+    logger.info({ subscribed: this.walletAddresses.length, total: allActiveWallets.length }, 'Active wallets loaded');
 
-    // 4. Update parsers
+    // 4. Update parsers (subscribed wallets for WS detection)
     this.txParser.updateWallets(this.walletAddresses);
     this.fallbackPoller.updateWallets(this.walletAddresses);
+
+    // Give entry engine ALL tracked wallets for on-chain confluence checks
+    this.entryEngine.updateAllTrackedWallets(allActiveWallets);
 
     // 5. Load open shadow positions
     await this.shadowTracker.loadOpenPositions();
@@ -236,9 +239,14 @@ class RossyBotV2 {
 
     // --- Wallet Discovery → Helius subscription ---
     this.walletDiscovery.setNewWalletCallback(async (address: string) => {
+      // Always add to entry engine's tracked list for on-chain confluence
+      this.entryEngine.updateAllTrackedWallets(
+        await this.walletDiscovery.getActiveWallets(),
+      );
+
       const tierCfg = getTierConfig(this.capitalManager.tier);
       if (this.walletAddresses.length >= tierCfg.walletsMonitored) {
-        logger.info({ address: address.slice(0, 8) }, 'New wallet discovered but at wallet limit — skipping subscribe');
+        logger.info({ address: address.slice(0, 8) }, 'New wallet added for on-chain confluence (WS slots full)');
         return;
       }
       this.walletAddresses.push(address);

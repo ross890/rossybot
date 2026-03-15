@@ -21,11 +21,12 @@ export class HeliusWebSocketManager extends EventEmitter {
   private staleCheckInterval: ReturnType<typeof setInterval> | null = null;
   private pongTimeout: ReturnType<typeof setTimeout> | null = null;
   private lastMessageAt: number = Date.now();
-  private subscriptionId: number | null = null;
+  private activeSubscriptionIds: number[] = [];
   private isConnecting = false;
   private isFallbackMode = false;
   private intentionalClose = false;
   private rpcJsonId = 1;
+  private rebuildTimer: ReturnType<typeof setTimeout> | null = null;
 
   get connected(): boolean {
     return this.ws?.readyState === WebSocket.OPEN;
@@ -47,18 +48,26 @@ export class HeliusWebSocketManager extends EventEmitter {
   async addWallet(address: string): Promise<void> {
     this.subscribedWallets.add(address);
     if (this.connected) {
-      await this.rebuildSubscription();
+      this.scheduleRebuild();
     }
-    logger.info({ address, total: this.subscribedWallets.size }, 'Wallet added to Helius WS');
+    logger.info({ address: address.slice(0, 8), total: this.subscribedWallets.size }, 'Wallet added to Helius WS');
   }
 
   removeWallet(address: string): void {
     this.subscribedWallets.delete(address);
-    logger.info({ address, total: this.subscribedWallets.size }, 'Wallet removed from Helius WS');
-    // Resubscribe with updated list on next reconnect or force it now
+    logger.info({ address: address.slice(0, 8), total: this.subscribedWallets.size }, 'Wallet removed from Helius WS');
     if (this.connected) {
-      this.rebuildSubscription();
+      this.scheduleRebuild();
     }
+  }
+
+  /** Debounce subscription rebuilds so rapid add/remove calls batch into one */
+  private scheduleRebuild(): void {
+    if (this.rebuildTimer) clearTimeout(this.rebuildTimer);
+    this.rebuildTimer = setTimeout(() => {
+      this.rebuildTimer = null;
+      this.rebuildSubscription();
+    }, 2_000);
   }
 
   async shutdown(): Promise<void> {
@@ -132,8 +141,10 @@ export class HeliusWebSocketManager extends EventEmitter {
 
       // Handle subscription confirmation
       if (msg.result !== undefined && msg.id !== undefined) {
-        this.subscriptionId = msg.result;
-        logger.info({ subscriptionId: this.subscriptionId }, 'Helius subscription confirmed');
+        if (typeof msg.result === 'number') {
+          this.activeSubscriptionIds.push(msg.result);
+        }
+        logger.info({ subscriptionId: msg.result, activeCount: this.activeSubscriptionIds.length }, 'Helius subscription confirmed');
         return;
       }
 
@@ -149,6 +160,7 @@ export class HeliusWebSocketManager extends EventEmitter {
   private async onClose(code: number, reason: string): Promise<void> {
     console.error(`Helius WebSocket closed: code=${code} reason=${reason}`);
     this.clearTimers();
+    this.activeSubscriptionIds = []; // Old subscriptions die with the connection
 
     await this.logHealth(WsHealthEvent.DISCONNECTED, { code, reason });
 
@@ -202,16 +214,19 @@ export class HeliusWebSocketManager extends EventEmitter {
   }
 
   private async rebuildSubscription(): Promise<void> {
-    // Unsubscribe from current, then resubscribe
-    if (this.subscriptionId !== null && this.connected) {
-      const unsub = {
-        jsonrpc: '2.0',
-        id: this.rpcJsonId++,
-        method: 'transactionUnsubscribe',
-        params: [this.subscriptionId],
-      };
-      this.ws!.send(JSON.stringify(unsub));
-      this.subscriptionId = null;
+    // Unsubscribe from ALL active subscriptions to prevent stacking
+    if (this.connected && this.activeSubscriptionIds.length > 0) {
+      for (const subId of this.activeSubscriptionIds) {
+        const unsub = {
+          jsonrpc: '2.0',
+          id: this.rpcJsonId++,
+          method: 'transactionUnsubscribe',
+          params: [subId],
+        };
+        this.ws!.send(JSON.stringify(unsub));
+      }
+      logger.info({ unsubscribed: this.activeSubscriptionIds.length }, 'Unsubscribed all active subscriptions');
+      this.activeSubscriptionIds = [];
     }
     await this.sendSubscription();
   }
@@ -250,6 +265,7 @@ export class HeliusWebSocketManager extends EventEmitter {
     if (this.pingInterval) { clearInterval(this.pingInterval); this.pingInterval = null; }
     if (this.staleCheckInterval) { clearInterval(this.staleCheckInterval); this.staleCheckInterval = null; }
     if (this.pongTimeout) { clearTimeout(this.pongTimeout); this.pongTimeout = null; }
+    if (this.rebuildTimer) { clearTimeout(this.rebuildTimer); this.rebuildTimer = null; }
   }
 
   // --- Reconnection ---

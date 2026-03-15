@@ -2,7 +2,7 @@ import { logger } from '../../utils/logger.js';
 import { query, getMany } from '../../db/database.js';
 import { config, SEED_WALLETS, getTierConfig, getTierForCapital } from '../../config/index.js';
 import { CapitalTier, WalletSource, WalletTier } from '../../types/index.js';
-import { NansenClient, type SmartMoneyDexTrade, type PnlLeaderboardItem } from './client.js';
+import { NansenClient } from './client.js';
 
 interface WalletCandidate {
   address: string;
@@ -80,37 +80,22 @@ export class WalletDiscovery {
     }
   }
 
-  /** Run a full discovery cycle using BOTH Nansen pipelines */
+  /** Run a discovery cycle: find top profitable traders from trending tokens */
   async runDiscovery(): Promise<void> {
     const start = Date.now();
     logger.info('Starting wallet discovery cycle...');
 
-    let totalWalletsAdded = 0;
-    let totalTokensScreened = 0;
-    let totalCandidates = 0;
-
     try {
-      // --- Pipeline 1: Smart Money DEX Trades (direct wallet discovery) ---
-      const dexWallets = await this.discoverFromDexTrades();
-      totalWalletsAdded += dexWallets.added;
-      totalCandidates += dexWallets.candidates;
-
-      // --- Pipeline 2: Token Screener → PnL Leaderboard (find profitable traders) ---
-      const leaderboardWallets = await this.discoverFromLeaderboard();
-      totalWalletsAdded += leaderboardWallets.added;
-      totalTokensScreened += leaderboardWallets.tokensScreened;
-      totalCandidates += leaderboardWallets.candidates;
-
-      // --- Validate/demote existing wallets ---
+      const result = await this.discoverTopTraders();
       const walletsRemoved = await this.validateExistingWallets();
 
       const duration = Date.now() - start;
-      await this.logDiscovery(totalTokensScreened, totalCandidates, totalWalletsAdded, walletsRemoved, duration);
+      await this.logDiscovery(result.tokensScreened, result.candidates, result.added, walletsRemoved, duration);
 
       logger.info({
-        tokensScreened: totalTokensScreened,
-        candidates: totalCandidates,
-        added: totalWalletsAdded,
+        tokensScreened: result.tokensScreened,
+        candidates: result.candidates,
+        added: result.added,
         removed: walletsRemoved,
         durationMs: duration,
       }, 'Discovery cycle complete');
@@ -124,84 +109,12 @@ export class WalletDiscovery {
     }
   }
 
-  /** Pipeline 1: Discover wallets from smart money DEX trades */
-  private async discoverFromDexTrades(): Promise<{ added: number; candidates: number }> {
-    logger.info('Pipeline 1: Fetching smart money DEX trades...');
-    const allTrades: SmartMoneyDexTrade[] = [];
-    for (let page = 1; page <= 5; page++) {
-      try {
-        const trades = await this.nansen.smartMoneyDexTrades({
-          labels: ['Smart Trader', '30D Smart Trader', '90D Smart Trader', '180D Smart Trader', 'Fund'],
-          limit: 100,
-          page,
-        });
-        allTrades.push(...trades);
-        if (trades.length < 100) break;
-      } catch (err: unknown) {
-        const axErr = err as { response?: { status?: number }; message?: string };
-        const status = axErr.response?.status;
-        if (status === 403 || status === 429) {
-          logger.warn({ page, trades: allTrades.length }, `Nansen dex-trades blocked (${status}) — using ${allTrades.length} trades collected`);
-        } else {
-          logger.warn({ page, status, err: axErr.message }, 'Failed to fetch dex-trades page');
-        }
-        break;
-      }
-    }
-
-    if (allTrades.length === 0) {
-      logger.info('No smart money trades found — skipping pipeline 1');
-      return { added: 0, candidates: 0 };
-    }
-
-    // Aggregate by trader
-    const traderMap = new Map<string, {
-      label: string;
-      trades: number;
-      totalVolume: number;
-      tokens: Set<string>;
-    }>();
-
-    for (const t of allTrades) {
-      const addr = t.trader_address;
-      if (!addr) continue;
-      const existing = traderMap.get(addr) || {
-        label: t.trader_address_label || addr.slice(0, 8),
-        trades: 0, totalVolume: 0, tokens: new Set<string>(),
-      };
-      existing.trades++;
-      existing.totalVolume += t.trade_value_usd || 0;
-      if (t.token_bought_symbol) existing.tokens.add(t.token_bought_symbol);
-      traderMap.set(addr, existing);
-    }
-
-    const candidates: WalletCandidate[] = [];
-    for (const [addr, data] of traderMap) {
-      if (data.trades < 1) continue;
-      const tradeScore = Math.min(data.trades / 20, 1) * 0.35;
-      const volumeScore = Math.min(Math.log10(Math.max(data.totalVolume, 1)) / 6, 1) * 0.35;
-      const diversityScore = Math.min(data.tokens.size / 10, 1) * 0.30;
-      candidates.push({
-        address: addr, label: data.label,
-        tradeCount: data.trades, totalVolumeUsd: data.totalVolume,
-        tokensTraded: data.tokens.size, score: tradeScore + volumeScore + diversityScore,
-      });
-    }
-
-    candidates.sort((a, b) => b.score - a.score);
-    let added = 0;
-    for (const c of candidates) {
-      if (await this.addWallet(c)) added++;
-    }
-
-    logger.info({ trades: allTrades.length, traders: traderMap.size, added }, 'Pipeline 1 (dex-trades) complete');
-    return { added, candidates: candidates.length };
-  }
-
-  /** Pipeline 2: Token Screener → PnL Leaderboard (find profitable traders per token) */
-  private async discoverFromLeaderboard(): Promise<{ added: number; candidates: number; tokensScreened: number }> {
-    logger.info('Pipeline 2: Token screener → PnL leaderboard...');
-
+  /**
+   * Single pipeline: screen trending tokens → get PnL leaderboard for each →
+   * find the most profitable traders across multiple tokens and watch them.
+   * Uses ~9 API calls per cycle (1 screener + 8 leaderboard).
+   */
+  private async discoverTopTraders(): Promise<{ added: number; candidates: number; tokensScreened: number }> {
     // Step 1: Find trending Solana memecoins via token screener
     let tokens: { address: string; symbol: string }[] = [];
     try {
@@ -224,10 +137,18 @@ export class WalletDiscovery {
       return { added: 0, candidates: 0, tokensScreened: 0 };
     }
 
-    // Step 2: For each token, pull PnL leaderboard to find top profitable traders
-    // Limit to top 15 tokens to stay within rate limits (15 calls + 1 screener = 16 per cycle)
-    const tokensToProcess = tokens.slice(0, 15);
-    const walletScores = new Map<string, { label: string; totalPnl: number; totalTrades: number; tokensFound: number }>();
+    // Step 2: For the top 8 tokens, pull 30-day PnL leaderboard to find top profitable traders
+    // 8 tokens keeps us well within rate limits (1 screener + 8 leaderboard = 9 calls/cycle)
+    const tokensToProcess = tokens.slice(0, 8);
+    const walletScores = new Map<string, {
+      label: string;
+      totalPnl: number;
+      totalTrades: number;
+      tokensFound: number;
+      bestRoi: number;
+    }>();
+    let tokensProcessed = 0;
+
     for (const token of tokensToProcess) {
       try {
         const leaders = await this.nansen.tokenPnlLeaderboard(token.address, {
@@ -236,18 +157,18 @@ export class WalletDiscovery {
           limit: 25,
         });
 
+        tokensProcessed++;
         for (const leader of leaders) {
-          if (!leader.trader_address) continue;
-          // Skip if PnL is negative
-          if (leader.pnl_usd_total <= 0) continue;
+          if (!leader.trader_address || leader.pnl_usd_total <= 0) continue;
 
           const existing = walletScores.get(leader.trader_address) || {
             label: leader.trader_address_label || leader.trader_address.slice(0, 8),
-            totalPnl: 0, totalTrades: 0, tokensFound: 0,
+            totalPnl: 0, totalTrades: 0, tokensFound: 0, bestRoi: 0,
           };
           existing.totalPnl += leader.pnl_usd_total;
           existing.totalTrades += leader.nof_trades;
           existing.tokensFound++;
+          existing.bestRoi = Math.max(existing.bestRoi, leader.roi_percent_total || 0);
           walletScores.set(leader.trader_address, existing);
         }
       } catch (err: unknown) {
@@ -255,8 +176,8 @@ export class WalletDiscovery {
         const status = axErr.response?.status;
         if (status === 403 || status === 429) {
           logger.warn(
-            { tokensProcessed: tokensToProcess.indexOf(token) + 1, total: tokensToProcess.length, traders: walletScores.size },
-            `Nansen leaderboard blocked (${status}) — using ${walletScores.size} traders collected`,
+            { tokensProcessed, total: tokensToProcess.length, traders: walletScores.size },
+            `Nansen leaderboard blocked (${status}) — using ${walletScores.size} traders from ${tokensProcessed} tokens`,
           );
           break;
         }
@@ -264,17 +185,22 @@ export class WalletDiscovery {
       }
     }
 
-    // Step 3: Convert to candidates and add
+    if (walletScores.size === 0) {
+      logger.info('No profitable traders found');
+      return { added: 0, candidates: 0, tokensScreened: tokensProcessed };
+    }
+
+    // Step 3: Score and rank — prioritize multi-token profitable traders
     const candidates: WalletCandidate[] = [];
     for (const [addr, data] of walletScores) {
-      // Score: PnL weight + trade activity + multi-token presence
+      // PnL weight (40%) + trade activity (30%) + multi-token presence (30%)
       const pnlScore = Math.min(Math.log10(Math.max(data.totalPnl, 1)) / 5, 1) * 0.40;
       const tradeScore = Math.min(data.totalTrades / 20, 1) * 0.30;
       const diversityScore = Math.min(data.tokensFound / 5, 1) * 0.30;
 
       candidates.push({
         address: addr,
-        label: `${data.label} | PnL $${(data.totalPnl / 1000).toFixed(0)}K`,
+        label: `${data.label} | PnL $${data.totalPnl >= 1000 ? (data.totalPnl / 1000).toFixed(0) + 'K' : data.totalPnl.toFixed(0)}`,
         tradeCount: data.totalTrades,
         totalVolumeUsd: data.totalPnl,
         tokensTraded: data.tokensFound,
@@ -288,8 +214,12 @@ export class WalletDiscovery {
       if (await this.addWallet(c)) added++;
     }
 
-    logger.info({ tokensScreened: tokens.length, traders: walletScores.size, added }, 'Pipeline 2 (leaderboard) complete');
-    return { added, candidates: candidates.length, tokensScreened: tokens.length };
+    logger.info({
+      tokensScreened: tokensProcessed,
+      tradersFound: walletScores.size,
+      added,
+    }, 'Discovery complete — top PnL traders identified');
+    return { added, candidates: candidates.length, tokensScreened: tokensProcessed };
   }
 
   private async addWallet(candidate: WalletCandidate): Promise<boolean> {

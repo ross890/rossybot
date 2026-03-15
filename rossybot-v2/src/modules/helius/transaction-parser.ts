@@ -1,5 +1,7 @@
+import axios from 'axios';
 import { logger } from '../../utils/logger.js';
 import { query } from '../../db/database.js';
+import { config } from '../../config/index.js';
 import { SignalType, DetectionSource, type ParsedSignal } from '../../types/index.js';
 
 // SOL mint constant — used to filter out pure SOL transfers
@@ -72,9 +74,14 @@ export class TransactionParser {
       const signature = result.signature || tx.transaction?.signatures?.[0];
       if (!signature) return signals;
 
-      const blockTime = typeof tx.blockTime === 'number' ? tx.blockTime : Math.floor(now.getTime() / 1000);
-      const blockDate = new Date(blockTime * 1000);
-      const detectionLagMs = tx.blockTime ? Math.max(0, now.getTime() - blockDate.getTime()) : 0;
+      // Helius transactionNotification doesn't include blockTime — fetch via getBlockTime(slot)
+      let blockTime: number;
+      if (typeof tx.blockTime === 'number') {
+        blockTime = tx.blockTime;
+      } else {
+        blockTime = await this.fetchBlockTime(result.slot) ?? Math.floor(now.getTime() / 1000);
+      }
+      const detectionLagMs = Math.max(0, now.getTime() - blockTime * 1000);
 
       // Step 1: Identify the wallet (first signer)
       const accountKeys = tx.transaction?.message?.accountKeys || [];
@@ -171,6 +178,37 @@ export class TransactionParser {
     } catch {
       return 0;
     }
+  }
+
+  /** Fetch block time for a slot via Helius RPC (cached per slot) */
+  private blockTimeCache = new Map<number, number>();
+
+  private async fetchBlockTime(slot: number): Promise<number | null> {
+    const cached = this.blockTimeCache.get(slot);
+    if (cached) return cached;
+
+    try {
+      const resp = await axios.post(config.helius.rpcUrl, {
+        jsonrpc: '2.0',
+        id: 1,
+        method: 'getBlockTime',
+        params: [slot],
+      }, { timeout: 3000 });
+
+      const result = resp.data?.result;
+      if (typeof result === 'number') {
+        this.blockTimeCache.set(slot, result);
+        // Keep cache small — evict old entries
+        if (this.blockTimeCache.size > 100) {
+          const firstKey = this.blockTimeCache.keys().next().value;
+          if (firstKey !== undefined) this.blockTimeCache.delete(firstKey);
+        }
+        return result;
+      }
+    } catch {
+      // Silent — fall back to Date.now()
+    }
+    return null;
   }
 
   private buildBalanceMap(balances: TokenBalanceEntry[]): Map<string, number> {

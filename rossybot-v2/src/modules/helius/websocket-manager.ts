@@ -27,6 +27,8 @@ export class HeliusWebSocketManager extends EventEmitter {
   private intentionalClose = false;
   private rpcJsonId = 1;
   private rebuildTimer: ReturnType<typeof setTimeout> | null = null;
+  private messageCount = 0;
+  private txNotificationCount = 0;
 
   get connected(): boolean {
     return this.ws?.readyState === WebSocket.OPEN;
@@ -135,6 +137,7 @@ export class HeliusWebSocketManager extends EventEmitter {
 
   private onMessage(data: WebSocket.Data): void {
     this.lastMessageAt = Date.now();
+    this.messageCount++;
 
     try {
       const msg = JSON.parse(data.toString());
@@ -150,6 +153,11 @@ export class HeliusWebSocketManager extends EventEmitter {
 
       // Handle transaction notification
       if (msg.method === 'transactionNotification' && msg.params?.result) {
+        this.txNotificationCount++;
+        if (this.txNotificationCount <= 5 || this.txNotificationCount % 10 === 0) {
+          const sig = msg.params.result?.signature || msg.params.result?.transaction?.transaction?.signatures?.[0] || '?';
+          console.log(`📡 WS TX #${this.txNotificationCount} | sig: ${typeof sig === 'string' ? sig.slice(0, 12) : '?'}... | total msgs: ${this.messageCount}`);
+        }
         this.emit('transaction', msg.params.result);
       }
     } catch (err) {
@@ -316,6 +324,8 @@ export class HeliusWebSocketManager extends EventEmitter {
     subscribedWallets: number;
     reconnectAttempt: number;
     lastMessageAgoMs: number;
+    totalMessages: number;
+    txNotifications: number;
   } {
     return {
       connected: this.connected,
@@ -323,6 +333,8 @@ export class HeliusWebSocketManager extends EventEmitter {
       subscribedWallets: this.subscribedWallets.size,
       reconnectAttempt: this.reconnectAttempt,
       lastMessageAgoMs: Date.now() - this.lastMessageAt,
+      totalMessages: this.messageCount,
+      txNotifications: this.txNotificationCount,
     };
   }
 }

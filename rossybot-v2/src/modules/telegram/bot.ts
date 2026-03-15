@@ -53,6 +53,7 @@ export class TelegramService {
 
   async sendEntryAlert(data: {
     tokenSymbol: string;
+    tokenMint: string;
     tier: string;
     wallets: string[];
     walletCount: number;
@@ -71,6 +72,7 @@ export class TelegramService {
     hardTime: number;
   }): Promise<void> {
     const walletLabels = data.wallets.map((w) => w.slice(0, 8)).join(' + ');
+    const dexLink = `https://dexscreener.com/solana/${data.tokenMint}`;
     const msg = [
       `🟢 ENTRY: $${data.tokenSymbol} [${data.tier}] (SHADOW)`,
       `├ Wallets: ${walletLabels} (${data.walletCount}/${data.totalMonitored} via Helius ✅)`,
@@ -79,7 +81,8 @@ export class TelegramService {
       `├ MCap: $${this.formatNum(data.mcap)} | Liq: $${this.formatNum(data.liquidity)} | Age: ${data.ageDays.toFixed(0)}d`,
       `├ Safety: ✅ | Helius lag: ${(data.detectionLagMs / 1000).toFixed(1)}s`,
       `├ Execution lag: ${this.formatLag(data.executionLagSecs)}`,
-      `└ Exit: TP +${(data.profitTarget * 100).toFixed(0)}%, SL ${(data.stopLoss * 100).toFixed(0)}%, alpha exit, ${data.hardTime}h max`,
+      `├ Exit: TP +${(data.profitTarget * 100).toFixed(0)}%, SL ${(data.stopLoss * 100).toFixed(0)}%, alpha exit, ${data.hardTime}h max`,
+      `└ ${dexLink}`,
     ].join('\n');
 
     await this.send(msg);
@@ -232,12 +235,14 @@ export class TelegramService {
   }): Promise<void> {
     const icon = data.action === 'BUY' ? '🔵' : '🔴';
     const lag = (data.detectionLagMs / 1000).toFixed(1);
+    const dexLink = `https://dexscreener.com/solana/${data.tokenMint}`;
     const msg = [
       `${icon} ${data.action} detected`,
       `├ Wallet: ${data.walletLabel} (${data.walletAddress.slice(0, 6)}...${data.walletAddress.slice(-4)})`,
       `├ Token: $${data.tokenSymbol} (${data.tokenMint.slice(0, 8)}...)`,
       `├ Amount: ~$${this.formatNum(data.amountUsd)}`,
-      `└ Lag: ${lag}s`,
+      `├ Lag: ${lag}s`,
+      `└ ${dexLink}`,
     ].join('\n');
     await this.send(msg);
   }
@@ -460,6 +465,8 @@ export class TelegramService {
         `├ WebSocket: ${(ws.connected as boolean) ? '✅ Connected' : '❌ Disconnected'}`,
         `├ Fallback: ${(ws.fallbackMode as boolean) ? '⚠️ ACTIVE' : '✅ Off'}`,
         `├ Subscribed: ${ws.subscribedWallets || 0} wallets`,
+        `├ Last msg: ${ws.lastMessageAgoMs ? Math.round((ws.lastMessageAgoMs as number) / 1000) + 's ago' : '?'}`,
+        `├ WS msgs: ${ws.totalMessages || 0} total | ${ws.txNotifications || 0} txs`,
         `├ Nansen: ${nansen.callsLastMinute || 0}/${nansen.maxPerMinute || 80}/min`,
         `├ Positions: ${status.openPositions || 0}/${status.maxPositions || 2}`,
         `├ Capital: ${(status.capitalSol as number || 0).toFixed(2)} SOL [${status.tier || 'MICRO'}]`,

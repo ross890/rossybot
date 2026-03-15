@@ -193,6 +193,7 @@ class RossyBotV2 {
       const dex = signal.validation.dexData;
       await this.telegram.sendEntryAlert({
         tokenSymbol: signal.tokenSymbol || signal.tokenMint.slice(0, 8),
+        tokenMint: signal.tokenMint,
         tier: signal.tierConfig.tier,
         wallets: signal.walletAddresses,
         walletCount: signal.walletCount,

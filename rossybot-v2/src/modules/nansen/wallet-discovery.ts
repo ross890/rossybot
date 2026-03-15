@@ -83,7 +83,7 @@ export class WalletDiscovery {
     console.log('🔍 Starting wallet discovery cycle...');
 
     try {
-      // Step 1: Pull smart money DEX trades on Solana (3 pages for coverage)
+      // Step 1: Pull smart money DEX trades on Solana (fetch pages until exhausted or 403)
       console.log('Step 1: Fetching smart money DEX trades (Solana, last 24h)...');
       const allTrades: SmartMoneyDexTrade[] = [];
 
@@ -98,7 +98,12 @@ export class WalletDiscovery {
           if (trades.length < 100) break; // No more pages
         } catch (err: unknown) {
           const axErr = err as { response?: { status?: number; data?: unknown }; message?: string };
-          console.error(`Failed to fetch dex-trades page ${page}: ${axErr.response?.status || axErr.message || err}`);
+          const status = axErr.response?.status;
+          if (status === 403) {
+            console.log(`Nansen page limit reached at page ${page} (403) — using ${allTrades.length} trades from ${page - 1} pages`);
+          } else {
+            console.error(`Failed to fetch dex-trades page ${page}: ${status || axErr.message || err}`);
+          }
           break;
         }
       }

@@ -205,5 +205,18 @@ export function getTierForCapital(capitalSol: number): CapitalTier {
 }
 
 export function getTierConfig(tier: CapitalTier): TierConfig {
-  return TIER_CONFIGS[tier];
+  const base = TIER_CONFIGS[tier];
+  if (!config.shadowMode) return base;
+
+  // Shadow mode: loosen validation to generate data
+  return {
+    ...base,
+    mcapMin: 50_000,          // $50K (was $200K)
+    mcapMax: 50_000_000,      // $50M (was $2M)
+    liquidityMin: 5_000,      // $5K (was $20K)
+    momentumMin: 0,           // any momentum (was 20%)
+    momentumMax: 500,         // up to 500% (was 200%)
+    volumeMultiplierMin: 1,   // 1x (was 2x)
+    tokenMaxAgeDays: null,    // no age limit (was 30d)
+  };
 }

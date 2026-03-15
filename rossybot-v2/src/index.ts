@@ -198,6 +198,23 @@ class RossyBotV2 {
         const positionSize = this.capitalManager.getPositionSize();
         const pos = await this.shadowTracker.openPosition(signal, positionSize);
 
+        // Look up per-wallet EV stats from DB
+        const { getMany: dbGetMany } = await import('./db/database.js');
+        const walletStats = await dbGetMany<{
+          address: string; our_total_trades: number; our_win_rate: number; our_avg_pnl_percent: number;
+        }>(
+          `SELECT address, COALESCE(our_total_trades, 0) as our_total_trades,
+                  COALESCE(our_win_rate, 0) as our_win_rate,
+                  COALESCE(our_avg_pnl_percent, 0) as our_avg_pnl_percent
+             FROM alpha_wallets WHERE address = ANY($1)`,
+          [signal.walletAddresses],
+        );
+        const walletEvMap = new Map(walletStats.map((w) => [w.address, {
+          trades: Number(w.our_total_trades),
+          winRate: Number(w.our_win_rate),
+          avgPnl: Number(w.our_avg_pnl_percent),
+        }]));
+
         // Send Telegram alert
         const dex = signal.validation.dexData;
         await this.telegram.sendEntryAlert({
@@ -207,6 +224,15 @@ class RossyBotV2 {
           wallets: signal.walletAddresses,
           walletCount: signal.walletCount,
           totalMonitored: this.walletAddresses.length,
+          walletEv: signal.walletAddresses.map((addr) => {
+            const stats = walletEvMap.get(addr);
+            return {
+              address: addr,
+              trades: stats?.trades || 0,
+              winRate: stats?.winRate || 0,
+              avgPnl: stats?.avgPnl || 0,
+            };
+          }),
           sizeSol: positionSize,
           price: pos.entry_price,
           momentum24h: dex?.priceChange?.h24 || 0,

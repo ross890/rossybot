@@ -1,3 +1,4 @@
+import axios from 'axios';
 import { logger } from '../../utils/logger.js';
 import { query, getMany } from '../../db/database.js';
 import { config, SEED_WALLETS, getTierConfig, getTierForCapital } from '../../config/index.js';
@@ -311,7 +312,10 @@ export class WalletDiscovery {
       logger.info({ count: pnlPurged.rowCount }, 'Deactivated wallets below $10K PnL minimum');
     }
 
-    return (deactivated.rowCount || 0) + (pnlPurged.rowCount || 0);
+    // Check on-chain trade activity via Helius
+    const activityDeactivated = await this.enforceTradeActivity();
+
+    return (deactivated.rowCount || 0) + (pnlPurged.rowCount || 0) + activityDeactivated;
   }
 
   private async logDiscovery(
@@ -332,6 +336,99 @@ export class WalletDiscovery {
     }
   }
 
+  /**
+   * Check on-chain activity for all active wallets via Helius getSignaturesForAddress.
+   * Deactivates wallets with no transactions in the last 7 days (except seeds).
+   * Updates last_active_at for all checked wallets.
+   */
+  async enforceTradeActivity(): Promise<number> {
+    const INACTIVE_DAYS = 7;
+    const cutoff = new Date(Date.now() - INACTIVE_DAYS * 24 * 60 * 60 * 1000);
+
+    const wallets = await getMany<{ address: string; source: string; last_active_at: string | null }>(
+      `SELECT address, source, last_active_at FROM alpha_wallets WHERE active = TRUE`,
+    );
+
+    let deactivated = 0;
+    let checked = 0;
+
+    for (const wallet of wallets) {
+      // Skip wallets already checked recently (within last 6 hours)
+      if (wallet.last_active_at) {
+        const lastCheck = new Date(wallet.last_active_at);
+        if (lastCheck.getTime() > Date.now() - 6 * 60 * 60 * 1000) {
+          continue; // Already checked recently, skip RPC call
+        }
+      }
+
+      try {
+        const lastTxTime = await this.getLastTransactionTime(wallet.address);
+        checked++;
+
+        if (lastTxTime) {
+          // Update last_active_at with actual on-chain activity time
+          await query(
+            `UPDATE alpha_wallets SET last_active_at = $1 WHERE address = $2`,
+            [new Date(lastTxTime * 1000), wallet.address],
+          );
+
+          // Deactivate if inactive for too long (skip seed wallets)
+          if (wallet.source !== 'NANSEN_SEED' && lastTxTime * 1000 < cutoff.getTime()) {
+            await query(`UPDATE alpha_wallets SET active = FALSE WHERE address = $1`, [wallet.address]);
+            deactivated++;
+            logger.info({
+              address: wallet.address.slice(0, 8),
+              lastActiveAgo: `${Math.round((Date.now() - lastTxTime * 1000) / 86400000)}d`,
+            }, 'Deactivated inactive wallet');
+          }
+        } else {
+          // No transactions found at all — deactivate non-seeds
+          if (wallet.source !== 'NANSEN_SEED') {
+            await query(`UPDATE alpha_wallets SET active = FALSE WHERE address = $1`, [wallet.address]);
+            deactivated++;
+            logger.info({ address: wallet.address.slice(0, 8) }, 'Deactivated wallet — no on-chain activity found');
+          }
+        }
+
+        // Rate-limit RPC calls: ~100ms between each
+        if (checked % 10 === 0) {
+          await new Promise((r) => setTimeout(r, 1000));
+        }
+      } catch (err) {
+        logger.debug({ err, address: wallet.address.slice(0, 8) }, 'Failed to check wallet activity');
+      }
+    }
+
+    if (deactivated > 0 || checked > 0) {
+      logger.info({ checked, deactivated, total: wallets.length, inactiveDays: INACTIVE_DAYS },
+        'Trade activity check complete');
+    }
+    return deactivated;
+  }
+
+  /**
+   * Get the timestamp of a wallet's most recent transaction via Helius RPC.
+   * Returns blockTime (unix seconds) or null if no recent tx found.
+   */
+  private async getLastTransactionTime(address: string): Promise<number | null> {
+    try {
+      const resp = await axios.post(config.helius.rpcUrl, {
+        jsonrpc: '2.0',
+        id: 1,
+        method: 'getSignaturesForAddress',
+        params: [address, { limit: 1 }],
+      }, { timeout: 5000 });
+
+      const signatures = resp.data?.result;
+      if (Array.isArray(signatures) && signatures.length > 0) {
+        return signatures[0].blockTime || null;
+      }
+    } catch {
+      // Silent — will be logged by caller
+    }
+    return null;
+  }
+
   /** Get all active wallet addresses — ranked by composite performance score */
   async getActiveWallets(): Promise<string[]> {
     const rows = await getMany<{ address: string }>(
@@ -347,6 +444,14 @@ export class WalletDiscovery {
            + CASE WHEN our_total_trades >= 3 THEN COALESCE(our_win_rate, 0) * 30 ELSE 0 END
            -- Our avg PnL (up to 15 points)
            + LEAST(GREATEST(COALESCE(our_avg_pnl_percent, 0) * 100, 0), 15)
+           -- Recent on-chain activity bonus (up to 20 points: 20 if active today, 0 if >7d ago)
+           + CASE
+               WHEN last_active_at IS NULL THEN 0
+               WHEN last_active_at > NOW() - INTERVAL '1 day' THEN 20
+               WHEN last_active_at > NOW() - INTERVAL '3 days' THEN 15
+               WHEN last_active_at > NOW() - INTERVAL '7 days' THEN 10
+               ELSE 0
+             END
            -- Consecutive losses penalty
            - COALESCE(consecutive_losses, 0) * 10
          ) as score

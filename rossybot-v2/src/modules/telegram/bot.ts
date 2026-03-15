@@ -275,6 +275,7 @@ export class TelegramService {
       address: string; label: string; tier: string; subscribed: boolean;
       nansenRoi: number; nansenPnl: number; ourTrades: number; ourWinRate: number;
       ourAvgPnl: number; consecutiveLosses: number; source: string;
+      lastActiveAgo?: string;
     }>;
     wsConnected: boolean;
     wsFallbackActive: boolean;
@@ -306,6 +307,7 @@ export class TelegramService {
       if (w.nansenPnl > 0) stats.push(`PnL $${this.formatNum(w.nansenPnl)}`);
       if (w.ourTrades > 0) stats.push(`${w.ourTrades}t ${(w.ourWinRate * 100).toFixed(0)}%W`);
       if (w.consecutiveLosses > 0) stats.push(`${w.consecutiveLosses}L`);
+      if (w.lastActiveAgo) stats.push(`🕐${w.lastActiveAgo}`);
       const statsStr = stats.length > 0 ? ` | ${stats.join(' · ')}` : '';
       return `│  ${status} [${w.tier}] ${w.address.slice(0, 6)}...${w.address.slice(-4)}${statsStr}`;
     }).join('\n');

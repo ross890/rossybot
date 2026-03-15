@@ -72,9 +72,13 @@ class RossyBotV2 {
       walletsToMonitor: tierCfg.walletsMonitored,
     }, 'Capital tier determined');
 
-    // 3. Seed wallets, enforce $10K PnL minimum, and load from DB
+    // 3. Seed wallets, enforce $10K PnL minimum, check on-chain activity, and load from DB
     await this.walletDiscovery.seedWallets(tier);
     await this.walletDiscovery.enforceMinimumPnl();
+    const activityDeactivated = await this.walletDiscovery.enforceTradeActivity(true);
+    if (activityDeactivated > 0) {
+      console.log(`Deactivated ${activityDeactivated} inactive wallets (no on-chain activity in 7 days)`);
+    }
     const allActiveWallets = await this.walletDiscovery.getActiveWallets();
 
     // Helius WS monitors top N wallets (tier-limited)
@@ -407,14 +411,15 @@ class RossyBotV2 {
         address: string; label: string; tier: string; helius_subscribed: boolean;
         source: string; nansen_roi_percent: number; nansen_pnl_usd: number;
         our_total_trades: number; our_win_rate: number; our_avg_pnl_percent: number;
-        consecutive_losses: number;
+        consecutive_losses: number; last_active_at: string | null;
       }>(`SELECT address, label, tier, helius_subscribed, source,
               COALESCE(nansen_roi_percent, 0) as nansen_roi_percent,
               COALESCE(nansen_pnl_usd, 0) as nansen_pnl_usd,
               COALESCE(our_total_trades, 0) as our_total_trades,
               COALESCE(our_win_rate, 0) as our_win_rate,
               COALESCE(our_avg_pnl_percent, 0) as our_avg_pnl_percent,
-              COALESCE(consecutive_losses, 0) as consecutive_losses
+              COALESCE(consecutive_losses, 0) as consecutive_losses,
+              last_active_at
          FROM alpha_wallets WHERE active = TRUE
          ORDER BY
            CASE WHEN source = 'NANSEN_SEED' THEN 0 ELSE 1 END ASC,
@@ -458,6 +463,9 @@ class RossyBotV2 {
           ourAvgPnl: Number(w.our_avg_pnl_percent) || 0,
           consecutiveLosses: Number(w.consecutive_losses) || 0,
           source: w.source,
+          lastActiveAgo: w.last_active_at
+            ? `${Math.round((Date.now() - new Date(w.last_active_at).getTime()) / 3600000)}h`
+            : undefined,
         })),
         wsConnected: wsStatus.connected,
         wsFallbackActive: wsStatus.fallbackMode,

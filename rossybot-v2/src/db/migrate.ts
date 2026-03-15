@@ -35,8 +35,21 @@ async function migrate() {
       our_win_rate DECIMAL DEFAULT 0,
       our_avg_pnl_percent DECIMAL DEFAULT 0,
       our_avg_hold_time_mins INT DEFAULT 0,
-      consecutive_losses INT DEFAULT 0
+      consecutive_losses INT DEFAULT 0,
+      last_active_at TIMESTAMPTZ
     )
+  `);
+
+  // Add last_active_at column if missing (for existing databases)
+  await pool.query(`
+    DO $$ BEGIN
+      IF NOT EXISTS (
+        SELECT 1 FROM information_schema.columns
+        WHERE table_name = 'alpha_wallets' AND column_name = 'last_active_at'
+      ) THEN
+        ALTER TABLE alpha_wallets ADD COLUMN last_active_at TIMESTAMPTZ;
+      END IF;
+    END $$
   `);
 
   // 2. wallet_transactions

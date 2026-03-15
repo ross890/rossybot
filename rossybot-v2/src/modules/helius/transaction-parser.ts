@@ -92,7 +92,7 @@ export class TransactionParser {
       const involvedWallets = allPubkeys.filter((pk) => this.subscribedWallets.has(pk));
 
       if (involvedWallets.length === 0) {
-        logger.debug({ sig: signature.slice(0, 12) }, 'TX dropped: no subscribed wallet found in accountKeys');
+        console.log(`⏭️ TX ${signature.slice(0, 12)}... | no subscribed wallet in accountKeys (indirect interaction)`);
         return signals;
       }
 
@@ -158,10 +158,7 @@ export class TransactionParser {
           })),
         }, 'Parsed transaction signals');
       } else if (involvedWallets.length > 0) {
-        logger.debug({
-          sig: signature.slice(0, 12),
-          wallets: involvedWallets.map((w) => w.slice(0, 8)),
-        }, 'TX received but no token transfers detected (SOL-only or program interaction)');
+        console.log(`⏭️ TX ${signature.slice(0, 12)}... | wallet ${involvedWallets[0].slice(0, 8)} | no token transfers (SOL-only or program interaction)`);
       }
     } catch (err) {
       logger.error({ err }, 'Failed to parse transaction');

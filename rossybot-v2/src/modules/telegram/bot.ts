@@ -465,7 +465,7 @@ export class TelegramService {
         `├ WebSocket: ${(ws.connected as boolean) ? '✅ Connected' : '❌ Disconnected'}`,
         `├ Fallback: ${(ws.fallbackMode as boolean) ? '⚠️ ACTIVE' : '✅ Off'}`,
         `├ Subscribed: ${ws.subscribedWallets || 0} wallets`,
-        `├ Last msg: ${ws.lastMessageAgoMs ? Math.round((ws.lastMessageAgoMs as number) / 1000) + 's ago' : '?'}`,
+        `├ Last msg: ${ws.lastMessageAgoMs ? Math.round((ws.lastMessageAgoMs as number) / 1000) + 's ago' : '?'} | Last TX: ${(ws.lastTxAgoMs as number) > 0 ? Math.round((ws.lastTxAgoMs as number) / 1000) + 's ago' : 'none yet'}`,
         `├ WS msgs: ${ws.totalMessages || 0} total | ${ws.txNotifications || 0} txs`,
         `├ Nansen: ${nansen.callsLastMinute || 0}/${nansen.maxPerMinute || 80}/min`,
         `├ Positions: ${status.openPositions || 0}/${status.maxPositions || 2}`,

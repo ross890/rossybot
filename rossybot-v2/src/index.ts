@@ -255,6 +255,60 @@ class RossyBotV2 {
       }
     });
 
+    // --- Entry Engine → Signal validation log ---
+    this.entryEngine.setSignalLogCallback(async (signal, validation) => {
+      try {
+        const { getMany: dbGetMany } = await import('./db/database.js');
+        const walletRows = await dbGetMany<{
+          address: string; label: string; our_total_trades: number; our_win_rate: number; our_avg_pnl_percent: number;
+        }>(
+          `SELECT address, label, COALESCE(our_total_trades, 0) as our_total_trades,
+                  COALESCE(our_win_rate, 0) as our_win_rate,
+                  COALESCE(our_avg_pnl_percent, 0) as our_avg_pnl_percent
+             FROM alpha_wallets WHERE address = ANY($1)`,
+          [signal.walletAddresses],
+        );
+        const walletMap = new Map(walletRows.map((w) => [w.address, w]));
+
+        const dex = validation.dexData;
+        await this.telegram.sendSignalLog({
+          tokenSymbol: signal.tokenSymbol || signal.tokenMint.slice(0, 8),
+          tokenMint: signal.tokenMint,
+          passed: signal.passed,
+          failReason: signal.failReason,
+          wallets: signal.walletAddresses.map((addr) => {
+            const w = walletMap.get(addr);
+            return {
+              address: addr,
+              label: w?.label || addr.slice(0, 8),
+              trades: Number(w?.our_total_trades || 0),
+              winRate: Number(w?.our_win_rate || 0),
+              avgPnl: Number(w?.our_avg_pnl_percent || 0),
+            };
+          }),
+          totalMonitored: this.walletAddresses.length,
+          safety: validation.safety,
+          liquidity: validation.liquidity,
+          momentum: validation.momentum,
+          mcap: validation.mcap,
+          age: validation.age,
+          dexData: dex ? {
+            mcap: dex.marketCap || dex.fdv || 0,
+            liquidity: dex.liquidity?.usd || 0,
+            priceChange24h: dex.priceChange?.h24 || 0,
+            priceChange6h: dex.priceChange?.h6 || 0,
+            priceChange1h: dex.priceChange?.h1 || 0,
+            volume24h: dex.volume?.h24 || 0,
+            ageDays: dex.pairCreatedAt ? (Date.now() - dex.pairCreatedAt) / 86400000 : 0,
+          } : null,
+          validationMs: validation.durationMs,
+          action: signal.passed ? 'ENTERED' : 'SKIPPED',
+        });
+      } catch (err) {
+        logger.error({ err }, 'Error in signal log callback');
+      }
+    });
+
     // --- Shadow Tracker close callback ---
     this.shadowTracker.setCloseCallback(async (pos) => {
       try {
@@ -280,6 +334,49 @@ class RossyBotV2 {
             reason: pos.exit_reason || 'Unknown',
           });
         }
+
+        // Send detailed trade close log
+        const { getMany: dbGetMany } = await import('./db/database.js');
+        const walletRows = await dbGetMany<{
+          address: string; label: string; our_total_trades: number; our_win_rate: number; our_avg_pnl_percent: number;
+        }>(
+          `SELECT address, label, COALESCE(our_total_trades, 0) as our_total_trades,
+                  COALESCE(our_win_rate, 0) as our_win_rate,
+                  COALESCE(our_avg_pnl_percent, 0) as our_avg_pnl_percent
+             FROM alpha_wallets WHERE address = ANY($1)`,
+          [pos.signal_wallets],
+        );
+        const walletMap = new Map(walletRows.map((w) => [w.address, w]));
+
+        // Calculate detection lag from alpha_buy_time to entry_time
+        const detectionLagMs = pos.entry_time.getTime() - pos.alpha_buy_time.getTime();
+
+        await this.telegram.sendTradeCloseLog({
+          tokenSymbol: pos.token_symbol || pos.token_address.slice(0, 8),
+          tokenMint: pos.token_address,
+          pnlPercent: pnl,
+          pnlSol: pos.simulated_entry_sol * pnl,
+          entryPrice: pos.entry_price,
+          exitPrice: pos.current_price,
+          peakPrice: pos.peak_price,
+          sizeSol: pos.simulated_entry_sol,
+          holdMins: pos.hold_time_mins || 0,
+          exitReason: pos.exit_reason || 'Unknown',
+          tier: pos.capital_tier,
+          wallets: pos.signal_wallets.map((addr) => {
+            const w = walletMap.get(addr);
+            return {
+              address: addr,
+              label: w?.label || addr.slice(0, 8),
+              trades: Number(w?.our_total_trades || 0),
+              winRate: Number(w?.our_win_rate || 0),
+              avgPnl: Number(w?.our_avg_pnl_percent || 0),
+            };
+          }),
+          entryTime: pos.entry_time.toISOString().replace('T', ' ').slice(0, 19) + ' UTC',
+          exitTime: (pos.closed_at || new Date()).toISOString().replace('T', ' ').slice(0, 19) + ' UTC',
+          detectionLagMs: Math.max(0, detectionLagMs),
+        });
       } catch (err) {
         logger.error({ err, token: pos.token_address?.slice(0, 8) }, 'Error in position close callback');
       }

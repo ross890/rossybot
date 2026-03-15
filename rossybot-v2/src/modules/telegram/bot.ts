@@ -58,6 +58,7 @@ export class TelegramService {
     wallets: string[];
     walletCount: number;
     totalMonitored: number;
+    walletEv?: Array<{ address: string; trades: number; winRate: number; avgPnl: number }>;
     sizeSol: number;
     price: number;
     momentum24h: number;
@@ -73,9 +74,25 @@ export class TelegramService {
   }): Promise<void> {
     const walletLabels = data.wallets.map((w) => w.slice(0, 8)).join(' + ');
     const dexLink = `https://dexscreener.com/solana/${data.tokenMint}`;
+
+    // Format per-wallet EV lines
+    const evLines: string[] = [];
+    if (data.walletEv && data.walletEv.length > 0) {
+      for (const w of data.walletEv) {
+        const addr = w.address.slice(0, 8);
+        if (w.trades > 0) {
+          const pnlSign = w.avgPnl >= 0 ? '+' : '';
+          evLines.push(`│  ${addr}: ${w.trades}t ${(w.winRate * 100).toFixed(0)}%W EV ${pnlSign}${w.avgPnl.toFixed(1)}%`);
+        } else {
+          evLines.push(`│  ${addr}: new (no trades yet)`);
+        }
+      }
+    }
+
     const msg = [
       `🟢 ENTRY: $${data.tokenSymbol} [${data.tier}] (SHADOW)`,
       `├ Wallets: ${walletLabels} (${data.walletCount}/${data.totalMonitored} via Helius ✅)`,
+      ...(evLines.length > 0 ? [`├ Wallet EV:`, ...evLines] : []),
       `├ Size: ${data.sizeSol.toFixed(2)} SOL @ $${data.price.toFixed(6)}`,
       `├ Momentum: ${data.momentum24h > 0 ? '+' : ''}${data.momentum24h.toFixed(0)}% (24h) | Vol ${data.volumeMultiplier.toFixed(1)}x avg`,
       `├ MCap: $${this.formatNum(data.mcap)} | Liq: $${this.formatNum(data.liquidity)} | Age: ${data.ageDays.toFixed(0)}d`,

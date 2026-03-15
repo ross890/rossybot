@@ -8,6 +8,7 @@ import { testConnection } from './db/database.js';
 import { HeliusWebSocketManager, TransactionParser, FallbackPoller } from './modules/helius/index.js';
 import { NansenClient, WalletDiscovery } from './modules/nansen/index.js';
 import { EntryEngine, type ValidatedSignal } from './modules/signals/index.js';
+import { scoreSignal, formatScoreForTelegram, type WalletEv } from './modules/signals/signal-scorer.js';
 import { ShadowTracker } from './modules/positions/index.js';
 import { CapitalManager } from './modules/trading/capital-manager.js';
 import { TelegramService } from './modules/telegram/index.js';
@@ -188,21 +189,7 @@ class RossyBotV2 {
     // --- Entry Engine → Shadow Tracker ---
     this.entryEngine.setSignalCallback(async (signal: ValidatedSignal) => {
       try {
-        // Check if we can open a position
-        if (!this.capitalManager.canOpenPosition(this.shadowTracker.getOpenCount())) {
-          logger.info({ reason: 'max positions or daily limit' }, 'Skipping signal — cannot open position');
-          return;
-        }
-
-        if (this.shadowTracker.hasPosition(signal.tokenMint)) {
-          logger.info({ token: signal.tokenMint.slice(0, 8) }, 'Skipping signal — already have position');
-          return;
-        }
-
-        const positionSize = this.capitalManager.getPositionSize();
-        const pos = await this.shadowTracker.openPosition(signal, positionSize);
-
-        // Look up per-wallet EV stats from DB
+        // Look up per-wallet EV stats from DB (needed for scoring regardless)
         const { getMany: dbGetMany } = await import('./db/database.js');
         const walletStats = await dbGetMany<{
           address: string; our_total_trades: number; our_win_rate: number; our_avg_pnl_percent: number;
@@ -213,11 +200,53 @@ class RossyBotV2 {
              FROM alpha_wallets WHERE address = ANY($1)`,
           [signal.walletAddresses],
         );
-        const walletEvMap = new Map(walletStats.map((w) => [w.address, {
+        const walletEvMap = new Map<string, WalletEv>(walletStats.map((w) => [w.address, {
           trades: Number(w.our_total_trades),
           winRate: Number(w.our_win_rate),
           avgPnl: Number(w.our_avg_pnl_percent),
         }]));
+
+        // Score the signal
+        const score = scoreSignal(signal, walletEvMap);
+        const scoreDisplay = formatScoreForTelegram(score);
+
+        logger.info({
+          token: signal.tokenMint.slice(0, 8),
+          score: score.total,
+          breakdown: score.breakdown,
+        }, 'Signal scored');
+
+        // Check if we can open a position
+        if (!this.capitalManager.canOpenPosition(this.shadowTracker.getOpenCount())) {
+          logger.info({
+            reason: 'max positions or daily limit',
+            score: score.total,
+          }, 'Skipping signal — cannot open position');
+
+          // Send opportunity cost alert with comparison to current position
+          const openPositions = this.shadowTracker.getOpenPositions();
+          const weakest = openPositions.length > 0
+            ? openPositions.reduce((a, b) => a.pnl_percent < b.pnl_percent ? a : b)
+            : null;
+
+          await this.telegram.sendOpportunityCostAlert({
+            tokenSymbol: signal.tokenSymbol || signal.tokenMint.slice(0, 8),
+            tokenMint: signal.tokenMint,
+            signalScore: scoreDisplay,
+            currentPositionSymbol: weakest?.token_symbol || weakest?.token_address?.slice(0, 8) || 'unknown',
+            currentPositionPnl: weakest?.pnl_percent || 0,
+            currentPositionHoldMins: weakest?.hold_time_mins || (weakest ? Math.round((Date.now() - weakest.entry_time.getTime()) / 60000) : 0),
+          });
+          return;
+        }
+
+        if (this.shadowTracker.hasPosition(signal.tokenMint)) {
+          logger.info({ token: signal.tokenMint.slice(0, 8) }, 'Skipping signal — already have position');
+          return;
+        }
+
+        const positionSize = this.capitalManager.getPositionSize();
+        const pos = await this.shadowTracker.openPosition(signal, positionSize);
 
         // Send Telegram alert
         const dex = signal.validation.dexData;
@@ -237,6 +266,7 @@ class RossyBotV2 {
               avgPnl: stats?.avgPnl || 0,
             };
           }),
+          signalScore: scoreDisplay,
           sizeSol: positionSize,
           price: pos.entry_price,
           momentum24h: dex?.priceChange?.h24 || 0,

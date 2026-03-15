@@ -79,7 +79,7 @@ export const config = {
 export const TIER_CONFIGS: Record<CapitalTier, TierConfig> = {
   [CapitalTier.MICRO]: {
     tier: CapitalTier.MICRO,
-    maxPositions: 2,
+    maxPositions: 1,
     walletsMonitored: 50,
     positionSizePct: 0.50,
     minPositionSol: 0.3,

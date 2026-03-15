@@ -71,6 +71,7 @@ export class TelegramService {
     profitTarget: number;
     stopLoss: number;
     hardTime: number;
+    signalScore?: string;
   }): Promise<void> {
     const walletLabels = data.wallets.map((w) => w.slice(0, 8)).join(' + ');
     const dexLink = `https://dexscreener.com/solana/${data.tokenMint}`;
@@ -98,7 +99,29 @@ export class TelegramService {
       `├ MCap: $${this.formatNum(data.mcap)} | Liq: $${this.formatNum(data.liquidity)} | Age: ${data.ageDays.toFixed(0)}d`,
       `├ Safety: ✅ | Helius lag: ${(data.detectionLagMs / 1000).toFixed(1)}s`,
       `├ Execution lag: ${this.formatLag(data.executionLagSecs)}`,
+      ...(data.signalScore ? [data.signalScore] : []),
       `├ Exit: TP +${(data.profitTarget * 100).toFixed(0)}%, SL ${(data.stopLoss * 100).toFixed(0)}%, alpha exit, ${data.hardTime}h max`,
+      `└ ${dexLink}`,
+    ].join('\n');
+
+    await this.send(msg);
+  }
+
+  async sendOpportunityCostAlert(data: {
+    tokenSymbol: string;
+    tokenMint: string;
+    signalScore: string;
+    currentPositionSymbol: string;
+    currentPositionPnl: number;
+    currentPositionHoldMins: number;
+  }): Promise<void> {
+    const dexLink = `https://dexscreener.com/solana/${data.tokenMint}`;
+    const pnlSign = data.currentPositionPnl >= 0 ? '+' : '';
+    const msg = [
+      `⚠️ SKIPPED (at max positions)`,
+      `├ Missed: $${data.tokenSymbol}`,
+      data.signalScore,
+      `├ Blocked by: $${data.currentPositionSymbol} (${pnlSign}${data.currentPositionPnl.toFixed(1)}%, hold ${this.formatHoldTime(data.currentPositionHoldMins)})`,
       `└ ${dexLink}`,
     ].join('\n');
 
@@ -788,6 +811,7 @@ export class TelegramService {
   }
 
   private formatHoldTime(mins: number): string {
+    mins = Math.round(mins);
     if (mins < 60) return `${mins}m`;
     const hours = Math.floor(mins / 60);
     const m = mins % 60;

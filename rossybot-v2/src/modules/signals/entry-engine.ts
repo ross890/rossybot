@@ -89,6 +89,10 @@ export class EntryEngine {
     const confluenceOk = this.checkConfluence(pending, tierCfg);
     if (!confluenceOk) return;
 
+    // Confluence met — mark as processed immediately to prevent duplicate validation
+    // (concurrent processBuySignal calls can race past the dedup check at the top)
+    this.processedTokens.add(mint);
+
     // Confluence met — validate token
     logger.info({
       token: mint.slice(0, 8),
@@ -140,12 +144,11 @@ export class EntryEngine {
         token: mint.slice(0, 8),
         reason: validation.failReason,
       }, 'Signal skipped — validation failed');
+      this.processedTokens.delete(mint);
       this.pendingBuys.delete(mint);
       return;
     }
 
-    // Mark as processed to prevent re-entry
-    this.processedTokens.add(mint);
     this.pendingBuys.delete(mint);
 
     // Fire callback with validated signal

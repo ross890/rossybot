@@ -318,11 +318,11 @@ export class TelegramService {
       `├─ WALLETS MONITORED (${data.wallets.length})`,
       walletLines,
       `│`,
-      `├─ ENTRY RULES [${data.tier}]`,
+      `├─ ENTRY RULES [${data.tier}]${data.shadowMode ? ' (shadow: relaxed)' : ''}`,
       `│ Confluence: ${data.shadowMode ? '1 (shadow override)' : data.tierConfig.walletConfluence} wallets within ${data.tierConfig.confluenceWindow}min`,
       `│ MCap range: ${data.tierConfig.mcapRange}`,
       `│ Min liquidity: $${this.formatNum(data.tierConfig.liquidityMin)}`,
-      `│ Validation: RugCheck + DexScreener (<30s)`,
+      `│ Validation: RugCheck + DexScreener (<30s)${data.shadowMode ? ' (thresholds loosened)' : ''}`,
       `│`,
       `├─ EXIT RULES [${data.tier}]`,
       `│ Profit target: +${(data.tierConfig.profitTarget * 100).toFixed(0)}%`,
@@ -542,6 +542,58 @@ export class TelegramService {
         ].join('\n'));
       } catch (err) {
         await this.bot.sendMessage(msg.chat.id, '❌ Failed to load PnL data');
+      }
+    });
+
+    this.bot.onText(/\/signals/, async (msg) => {
+      if (msg.chat.id.toString() !== this.chatId) return;
+      try {
+        const signals = await getMany<Record<string, unknown>>(
+          `SELECT token_address, token_symbol, validation_result, validation_details, action_taken, first_detected_at, wallet_count
+           FROM signal_events ORDER BY first_detected_at DESC LIMIT 15`,
+        );
+        if (signals.length === 0) {
+          await this.bot.sendMessage(msg.chat.id, '📭 No signals recorded yet');
+          return;
+        }
+
+        const passed = signals.filter((s) => s.action_taken === 'EXECUTED').length;
+        const lines = signals.map((s) => {
+          const sym = s.token_symbol || (s.token_address as string).slice(0, 8);
+          const icon = s.action_taken === 'EXECUTED' ? '✅' : '❌';
+          const result = s.validation_result as string;
+          const details = s.validation_details as Record<string, unknown> || {};
+
+          // Extract the specific failure reason from validation details
+          let reason = result.replace('FAILED_', '');
+          if (result === 'FAILED_MCAP' && details.mcap) {
+            const mcapDetail = details.mcap as Record<string, unknown>;
+            reason = `MCAP ($${this.formatNum(Number(mcapDetail.mcap || 0))})`;
+          } else if (result === 'FAILED_LIQUIDITY' && details.liquidity) {
+            const liqDetail = details.liquidity as Record<string, unknown>;
+            reason = `LIQ ($${this.formatNum(Number(liqDetail.liquidityUsd || 0))})`;
+          } else if (result === 'FAILED_MOMENTUM' && details.momentum) {
+            const momDetail = details.momentum as Record<string, unknown>;
+            reason = `MOM (${Number(momDetail.priceChange || 0).toFixed(0)}%)`;
+          } else if (result === 'FAILED_SAFETY') {
+            reason = 'SAFETY';
+          } else if (result === 'FAILED_AGE') {
+            reason = 'AGE';
+          } else if (result === 'PASSED') {
+            reason = 'PASSED';
+          }
+
+          const ago = Math.round((Date.now() - new Date(s.first_detected_at as string).getTime()) / 60000);
+          return `${icon} $${sym} | ${reason} | ${ago}m ago | ${s.wallet_count}w`;
+        });
+
+        await this.bot.sendMessage(msg.chat.id, [
+          `🔍 SIGNALS (last ${signals.length})`,
+          ...lines,
+          `└ ${passed}/${signals.length} passed validation`,
+        ].join('\n'));
+      } catch (err) {
+        await this.bot.sendMessage(msg.chat.id, '❌ Failed to load signals');
       }
     });
 

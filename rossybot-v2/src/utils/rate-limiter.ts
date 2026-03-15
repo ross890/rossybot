@@ -94,12 +94,13 @@ export class RateLimiter {
         const status = (err as { response?: { status?: number } })?.response?.status || 0;
         const message = err instanceof Error ? err.message : 'Unknown error';
 
-        // Retry on 403 (rate limit) or 429 (too many requests)
-        if ((status === 403 || status === 429) && attempt < this.maxRetries) {
+        // Only retry on 429 (too many requests) — transient rate limit
+        // 403 = hard access denial or billing-period limit, retrying won't help
+        if (status === 429 && attempt < this.maxRetries) {
           const backoffMs = this.retryBaseMs * Math.pow(2, attempt);
           logger.info(
-            { endpoint: item.endpoint, attempt: attempt + 1, maxRetries: this.maxRetries, backoffMs, status },
-            `Rate limited (${status}) — retrying after ${backoffMs}ms`,
+            { endpoint: item.endpoint, attempt: attempt + 1, maxRetries: this.maxRetries, backoffMs },
+            `Rate limited (429) — retrying after ${backoffMs}ms`,
           );
           await this.logApiCall(item.endpoint, status, duration, `${message} (retry ${attempt + 1})`);
           await new Promise((r) => setTimeout(r, backoffMs));

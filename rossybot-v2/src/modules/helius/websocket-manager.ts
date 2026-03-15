@@ -1,4 +1,5 @@
 import WebSocket from 'ws';
+import axios from 'axios';
 import { EventEmitter } from 'events';
 import { config } from '../../config/index.js';
 import { logger } from '../../utils/logger.js';
@@ -13,6 +14,11 @@ export interface HeliusWsEvents {
   fallbackDeactivated: () => void;
 }
 
+/**
+ * WebSocket manager using standard Solana `logsSubscribe` (works on all Helius plans).
+ * Creates one subscription per wallet using { mentions: [address] }.
+ * On log notification, fetches the full transaction via RPC and emits it.
+ */
 export class HeliusWebSocketManager extends EventEmitter {
   private ws: WebSocket | null = null;
   private subscribedWallets: Set<string> = new Set();
@@ -30,6 +36,11 @@ export class HeliusWebSocketManager extends EventEmitter {
   private rebuildTimer: ReturnType<typeof setTimeout> | null = null;
   private messageCount = 0;
   private txNotificationCount = 0;
+  // Dedup: avoid fetching the same signature twice (concurrent log notifications)
+  private recentSignatures: Set<string> = new Set();
+  // Track in-flight tx fetches to avoid overwhelming RPC
+  private activeFetches = 0;
+  private static readonly MAX_CONCURRENT_FETCHES = 5;
 
   get connected(): boolean {
     return this.ws?.readyState === WebSocket.OPEN;
@@ -51,7 +62,8 @@ export class HeliusWebSocketManager extends EventEmitter {
   async addWallet(address: string): Promise<void> {
     this.subscribedWallets.add(address);
     if (this.connected) {
-      this.scheduleRebuild();
+      // Subscribe to the new wallet immediately
+      this.sendLogsSubscribe(address);
     }
     logger.info({ address: address.slice(0, 8), total: this.subscribedWallets.size }, 'Wallet added to Helius WS');
   }
@@ -116,7 +128,7 @@ export class HeliusWebSocketManager extends EventEmitter {
     this.isConnecting = false;
     this.reconnectAttempt = 0;
     this.lastMessageAt = Date.now();
-    this.lastTxAt = 0; // Reset — will be set on first tx notification
+    this.lastTxAt = 0;
 
     logger.info({ wallets: this.subscribedWallets.size }, 'Helius WebSocket connected');
     await this.logHealth(WsHealthEvent.CONNECTED, {});
@@ -128,7 +140,7 @@ export class HeliusWebSocketManager extends EventEmitter {
       await this.logHealth(WsHealthEvent.RECONNECTED, { wasInFallback: true });
     }
 
-    // Send subscription
+    // Send logsSubscribe for each wallet
     await this.sendSubscription();
 
     // Start heartbeat
@@ -149,29 +161,95 @@ export class HeliusWebSocketManager extends EventEmitter {
         if (typeof msg.result === 'number') {
           this.activeSubscriptionIds.push(msg.result);
         }
-        logger.info({ subscriptionId: msg.result, activeCount: this.activeSubscriptionIds.length }, 'Helius subscription confirmed');
+        // Only log milestone confirmations to avoid spam with many wallets
+        if (this.activeSubscriptionIds.length <= 3 ||
+            this.activeSubscriptionIds.length === this.subscribedWallets.size) {
+          logger.info({
+            subscriptionId: msg.result,
+            confirmed: this.activeSubscriptionIds.length,
+            total: this.subscribedWallets.size,
+          }, 'logsSubscribe confirmed');
+        }
         return;
       }
 
-      // Handle transaction notification
-      if (msg.method === 'transactionNotification' && msg.params?.result) {
+      // Handle log notification (standard Solana method)
+      if (msg.method === 'logsNotification' && msg.params?.result) {
+        const logResult = msg.params.result;
+        const signature = logResult?.value?.signature;
+        const err = logResult?.value?.err;
+
+        // Skip failed transactions
+        if (err || !signature) return;
+
+        // Dedup: skip if we've already seen this signature
+        if (this.recentSignatures.has(signature)) return;
+        this.recentSignatures.add(signature);
+
+        // Keep dedup set small
+        if (this.recentSignatures.size > 500) {
+          const iter = this.recentSignatures.values();
+          for (let i = 0; i < 250; i++) iter.next();
+          const remaining = new Set<string>();
+          for (const v of iter) remaining.add(v);
+          this.recentSignatures = remaining;
+        }
+
         this.lastTxAt = Date.now();
         this.txNotificationCount++;
         if (this.txNotificationCount <= 5 || this.txNotificationCount % 10 === 0) {
-          const sig = msg.params.result?.signature || msg.params.result?.transaction?.transaction?.signatures?.[0] || '?';
-          console.log(`📡 WS TX #${this.txNotificationCount} | sig: ${typeof sig === 'string' ? sig.slice(0, 12) : '?'}... | total msgs: ${this.messageCount}`);
+          console.log(`📡 WS LOG #${this.txNotificationCount} | sig: ${signature.slice(0, 12)}... | total msgs: ${this.messageCount}`);
         }
-        this.emit('transaction', msg.params.result);
+
+        // Fetch full transaction via RPC and emit
+        this.fetchAndEmitTransaction(signature, logResult?.context?.slot);
       }
     } catch (err) {
       logger.error({ err, data: data.toString().slice(0, 200) }, 'Failed to parse WebSocket message');
     }
   }
 
+  /**
+   * Fetch the full transaction via Helius RPC and emit it for parsing.
+   * Rate-limited to MAX_CONCURRENT_FETCHES to avoid overwhelming the RPC.
+   */
+  private async fetchAndEmitTransaction(signature: string, slot?: number): Promise<void> {
+    if (this.activeFetches >= HeliusWebSocketManager.MAX_CONCURRENT_FETCHES) {
+      logger.debug({ signature: signature.slice(0, 12) }, 'Skipping tx fetch — too many concurrent fetches');
+      return;
+    }
+
+    this.activeFetches++;
+    try {
+      const resp = await axios.post(config.helius.rpcUrl, {
+        jsonrpc: '2.0',
+        id: 1,
+        method: 'getTransaction',
+        params: [signature, {
+          encoding: 'jsonParsed',
+          maxSupportedTransactionVersion: 0,
+        }],
+      }, { timeout: 10_000 });
+
+      if (resp.data?.result) {
+        const result = {
+          signature,
+          slot: slot || resp.data.result.slot,
+          transaction: resp.data.result,
+        };
+        this.emit('transaction', result);
+      }
+    } catch (err) {
+      logger.debug({ err, sig: signature.slice(0, 12) }, 'Failed to fetch transaction for log notification');
+    } finally {
+      this.activeFetches--;
+    }
+  }
+
   private async onClose(code: number, reason: string): Promise<void> {
     console.error(`Helius WebSocket closed: code=${code} reason=${reason}`);
     this.clearTimers();
-    this.activeSubscriptionIds = []; // Old subscriptions die with the connection
+    this.activeSubscriptionIds = [];
 
     await this.logHealth(WsHealthEvent.DISCONNECTED, { code, reason });
 
@@ -184,11 +262,10 @@ export class HeliusWebSocketManager extends EventEmitter {
 
   private async onError(err: Error & { code?: string }): Promise<void> {
     console.error(`Helius WebSocket error: ${err.message} | code: ${err.code || 'none'}`);
-    // onClose will be called after onError, which triggers reconnect
   }
 
   private onPong(): void {
-    this.lastMessageAt = Date.now(); // Pong proves connection is alive
+    this.lastMessageAt = Date.now();
     if (this.pongTimeout) {
       clearTimeout(this.pongTimeout);
       this.pongTimeout = null;
@@ -197,46 +274,52 @@ export class HeliusWebSocketManager extends EventEmitter {
 
   // --- Subscription management ---
 
+  /**
+   * Send logsSubscribe for each wallet using standard Solana { mentions: [address] }.
+   * Each wallet gets its own subscription since `mentions` only accepts one address.
+   */
   private async sendSubscription(): Promise<void> {
     if (!this.connected || this.subscribedWallets.size === 0) return;
 
     const wallets = Array.from(this.subscribedWallets);
+
+    for (const wallet of wallets) {
+      this.sendLogsSubscribe(wallet);
+    }
+
+    console.log(`Sent logsSubscribe for ${wallets.length} wallets`);
+    await this.logHealth(WsHealthEvent.SUBSCRIPTION_SENT, { walletCount: wallets.length });
+  }
+
+  private sendLogsSubscribe(walletAddress: string): void {
+    if (!this.connected) return;
+
     const msg = {
       jsonrpc: '2.0',
       id: this.rpcJsonId++,
-      method: 'transactionSubscribe',
+      method: 'logsSubscribe',
       params: [
-        {
-          accountInclude: wallets,
-        },
-        {
-          commitment: 'confirmed',
-          encoding: 'jsonParsed',
-          transactionDetails: 'full',
-          showRewards: false,
-          maxSupportedTransactionVersion: 0,
-        },
+        { mentions: [walletAddress] },
+        { commitment: 'confirmed' },
       ],
     };
 
     this.ws!.send(JSON.stringify(msg));
-    logger.info({ wallets: wallets.length }, 'Sent transactionSubscribe');
-    await this.logHealth(WsHealthEvent.SUBSCRIPTION_SENT, { walletCount: wallets.length, wallets });
   }
 
   private async rebuildSubscription(): Promise<void> {
-    // Unsubscribe from ALL active subscriptions to prevent stacking
+    // Unsubscribe from ALL active subscriptions
     if (this.connected && this.activeSubscriptionIds.length > 0) {
       for (const subId of this.activeSubscriptionIds) {
         const unsub = {
           jsonrpc: '2.0',
           id: this.rpcJsonId++,
-          method: 'transactionUnsubscribe',
+          method: 'logsUnsubscribe',
           params: [subId],
         };
         this.ws!.send(JSON.stringify(unsub));
       }
-      logger.info({ unsubscribed: this.activeSubscriptionIds.length }, 'Unsubscribed all active subscriptions');
+      logger.info({ unsubscribed: this.activeSubscriptionIds.length }, 'Unsubscribed all active log subscriptions');
       this.activeSubscriptionIds = [];
     }
     await this.sendSubscription();
@@ -253,7 +336,6 @@ export class HeliusWebSocketManager extends EventEmitter {
 
       this.ws!.ping();
 
-      // Set pong timeout
       this.pongTimeout = setTimeout(async () => {
         logger.warn('Helius WebSocket pong timeout — force reconnecting');
         await this.logHealth(WsHealthEvent.PING_TIMEOUT, {});
@@ -261,9 +343,8 @@ export class HeliusWebSocketManager extends EventEmitter {
       }, config.helius.pongTimeoutMs);
     }, config.helius.pingIntervalMs);
 
-    // Stale check every 30 seconds — check TRANSACTION flow, not just pong
+    // Stale check every 30 seconds
     this.staleCheckInterval = setInterval(async () => {
-      // Connection-level staleness (no pong/message at all)
       const msgElapsed = Date.now() - this.lastMessageAt;
       if (msgElapsed > config.helius.staleTimeoutMs) {
         logger.warn({ elapsedMs: msgElapsed }, 'Helius WebSocket stale — no messages at all, reconnecting');
@@ -272,9 +353,7 @@ export class HeliusWebSocketManager extends EventEmitter {
         return;
       }
 
-      // Subscription-level staleness: connection alive (pong works) but no tx notifications
-      // Only check if we've been connected long enough and have received at least 1 tx before
-      // 30 min threshold — smart money wallets may go hours between trades
+      // Subscription-level staleness — no tx notifications for 30 min
       const TX_STALE_MS = 30 * 60 * 1000;
       if (this.lastTxAt > 0) {
         const txElapsed = Date.now() - this.lastTxAt;
@@ -282,7 +361,6 @@ export class HeliusWebSocketManager extends EventEmitter {
           logger.warn({ txElapsedMs: txElapsed, lastTxAgo: `${Math.round(txElapsed / 60000)}min` },
             'Helius subscription stale — no tx for 30 min, resubscribing');
           await this.logHealth(WsHealthEvent.STALE_DETECTED, { txElapsedMs: txElapsed, action: 'resubscribe' });
-          // Reset lastTxAt so we don't immediately retrigger on next check cycle
           this.lastTxAt = Date.now();
           await this.rebuildSubscription();
         }
@@ -309,7 +387,6 @@ export class HeliusWebSocketManager extends EventEmitter {
     logger.info({ attempt: this.reconnectAttempt, delayMs: delay }, 'Reconnecting to Helius WebSocket');
     await this.logHealth(WsHealthEvent.RECONNECTING, { attempt: this.reconnectAttempt, delayMs: delay });
 
-    // Activate fallback after max attempts
     if (this.reconnectAttempt >= config.helius.maxReconnectAttempts && !this.isFallbackMode) {
       this.isFallbackMode = true;
       logger.error('Helius WebSocket failed after max attempts — activating fallback mode');

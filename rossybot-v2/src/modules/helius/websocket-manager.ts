@@ -47,7 +47,7 @@ export class HeliusWebSocketManager extends EventEmitter {
   async addWallet(address: string): Promise<void> {
     this.subscribedWallets.add(address);
     if (this.connected) {
-      await this.sendSubscription();
+      await this.rebuildSubscription();
     }
     logger.info({ address, total: this.subscribedWallets.size }, 'Wallet added to Helius WS');
   }

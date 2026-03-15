@@ -632,6 +632,118 @@ export class TelegramService {
     logger.info('Telegram bot commands registered');
   }
 
+  /** Detailed signal validation log — fires for every signal reaching confluence */
+  async sendSignalLog(data: {
+    tokenSymbol: string;
+    tokenMint: string;
+    passed: boolean;
+    failReason: string | null;
+    wallets: Array<{ address: string; label: string; trades: number; winRate: number; avgPnl: number }>;
+    totalMonitored: number;
+    safety: { passed: boolean; reason?: string };
+    liquidity: { passed: boolean; reason?: string; details?: Record<string, unknown> };
+    momentum: { passed: boolean; reason?: string; details?: Record<string, unknown> };
+    mcap: { passed: boolean; reason?: string; details?: Record<string, unknown> };
+    age: { passed: boolean; reason?: string; details?: Record<string, unknown> };
+    dexData: {
+      mcap: number;
+      liquidity: number;
+      priceChange24h: number;
+      priceChange6h: number;
+      priceChange1h: number;
+      volume24h: number;
+      ageDays: number;
+    } | null;
+    validationMs: number;
+    action: string;
+  }): Promise<void> {
+    const icon = data.passed ? '✅' : '❌';
+    const gate = (check: { passed: boolean; reason?: string }) =>
+      check.passed ? '✅' : '❌';
+
+    const walletLines = data.wallets.map((w) => {
+      const stats = w.trades > 0
+        ? `${w.trades}t ${(w.winRate * 100).toFixed(0)}%W EV ${w.avgPnl >= 0 ? '+' : ''}${(w.avgPnl * 100).toFixed(1)}%`
+        : 'new';
+      return `│  ${w.label} (${w.address.slice(0, 6)}): ${stats}`;
+    });
+
+    const dex = data.dexData;
+    const dexLines = dex ? [
+      `├ MCap: $${this.formatNum(dex.mcap)} | Liq: $${this.formatNum(dex.liquidity)}`,
+      `├ Price: ${dex.priceChange1h >= 0 ? '+' : ''}${dex.priceChange1h.toFixed(1)}% 1h | ${dex.priceChange6h >= 0 ? '+' : ''}${dex.priceChange6h.toFixed(1)}% 6h | ${dex.priceChange24h >= 0 ? '+' : ''}${dex.priceChange24h.toFixed(1)}% 24h`,
+      `├ Vol 24h: $${this.formatNum(dex.volume24h)} | Age: ${dex.ageDays.toFixed(1)}d`,
+    ] : [`├ DexScreener: no data`];
+
+    const msg = [
+      `${icon} SIGNAL LOG | $${data.tokenSymbol} | ${data.passed ? 'PASSED' : data.failReason || 'FAILED'}`,
+      `├ Wallets (${data.wallets.length}/${data.totalMonitored}):`,
+      ...walletLines,
+      `├ Gates:`,
+      `│  Safety: ${gate(data.safety)} ${data.safety.reason || ''}`,
+      `│  Liquidity: ${gate(data.liquidity)} ${data.liquidity.reason || ''}`,
+      `│  Momentum: ${gate(data.momentum)} ${data.momentum.reason || ''}`,
+      `│  MCap: ${gate(data.mcap)} ${data.mcap.reason || ''}`,
+      `│  Age: ${gate(data.age)} ${data.age.reason || ''}`,
+      ...dexLines,
+      `├ Validation: ${data.validationMs}ms`,
+      `├ Action: ${data.action}`,
+      `└ ${data.tokenMint}`,
+    ].join('\n');
+
+    await this.send(msg);
+  }
+
+  /** Detailed trade close log — fires on every position close */
+  async sendTradeCloseLog(data: {
+    tokenSymbol: string;
+    tokenMint: string;
+    pnlPercent: number;
+    pnlSol: number;
+    entryPrice: number;
+    exitPrice: number;
+    peakPrice: number;
+    sizeSol: number;
+    holdMins: number;
+    exitReason: string;
+    tier: string;
+    wallets: Array<{ address: string; label: string; trades: number; winRate: number; avgPnl: number }>;
+    entryTime: string;
+    exitTime: string;
+    detectionLagMs: number;
+  }): Promise<void> {
+    const isWin = data.pnlPercent > 0;
+    const icon = isWin ? '💰' : '💸';
+    const result = isWin ? 'WIN' : 'LOSS';
+    const pnlSign = data.pnlPercent >= 0 ? '+' : '';
+
+    const peakPnl = data.entryPrice > 0 ? ((data.peakPrice - data.entryPrice) / data.entryPrice * 100) : 0;
+    const drawdownFromPeak = data.peakPrice > 0 ? ((data.peakPrice - data.exitPrice) / data.peakPrice * 100) : 0;
+
+    const walletLines = data.wallets.map((w) => {
+      const stats = w.trades > 0
+        ? `${w.trades}t ${(w.winRate * 100).toFixed(0)}%W EV ${w.avgPnl >= 0 ? '+' : ''}${(w.avgPnl * 100).toFixed(1)}%`
+        : 'new (first trade)';
+      return `│  ${w.label} (${w.address.slice(0, 6)}): ${stats}`;
+    });
+
+    const msg = [
+      `${icon} TRADE LOG | $${data.tokenSymbol} | ${pnlSign}${(data.pnlPercent * 100).toFixed(1)}% ${result}`,
+      `├ Entry: ${data.sizeSol.toFixed(2)} SOL @ $${data.entryPrice.toFixed(8)}`,
+      `├ Exit: $${data.exitPrice.toFixed(8)} | ${data.exitReason}`,
+      `├ Net: ${pnlSign}${data.pnlSol.toFixed(4)} SOL`,
+      `├ Peak: +${peakPnl.toFixed(1)}% | Drawdown from peak: ${drawdownFromPeak.toFixed(1)}%`,
+      `├ Hold: ${this.formatHoldTime(data.holdMins)} | Tier: ${data.tier}`,
+      `├ Detection lag: ${(data.detectionLagMs / 1000).toFixed(1)}s`,
+      `├ Wallets:`,
+      ...walletLines,
+      `├ Entry: ${data.entryTime} | Exit: ${data.exitTime}`,
+      `└ ${data.tokenMint}`,
+    ].join('\n');
+
+    await this.send(msg);
+  }
+
   // --- Helpers ---
 
   private async send(text: string): Promise<void> {

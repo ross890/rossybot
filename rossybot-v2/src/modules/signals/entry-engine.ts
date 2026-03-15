@@ -15,6 +15,7 @@ export class EntryEngine {
   private pendingBuys: Map<string, PendingBuy> = new Map();
   private processedTokens: Set<string> = new Set(); // Dedup: don't re-enter same token
   private onSignalValid: ((signal: ValidatedSignal) => Promise<void>) | null = null;
+  private onSignalValidated: ((signal: ValidatedSignal & { passed: boolean; failReason: string | null }, validation: import('../../types/index.js').FullValidationResult) => Promise<void>) | null = null;
   private allTrackedWallets: Set<string> = new Set(); // All wallets in DB (subscribed + unsubscribed)
 
   constructor() {
@@ -29,6 +30,10 @@ export class EntryEngine {
 
   setSignalCallback(cb: (signal: ValidatedSignal) => Promise<void>): void {
     this.onSignalValid = cb;
+  }
+
+  setSignalLogCallback(cb: (signal: ValidatedSignal & { passed: boolean; failReason: string | null }, validation: import('../../types/index.js').FullValidationResult) => Promise<void>): void {
+    this.onSignalValidated = cb;
   }
 
   /**
@@ -109,6 +114,26 @@ export class EntryEngine {
       tierCfg.tier,
       signalAction,
     );
+
+    // Fire signal log callback for both pass and fail
+    if (this.onSignalValidated) {
+      try {
+        await this.onSignalValidated({
+          tokenMint: mint,
+          tokenSymbol: validation.dexData?.baseToken?.symbol || null,
+          walletAddresses,
+          walletCount: walletAddresses.length,
+          firstSignal,
+          validation,
+          tierConfig: tierCfg,
+          detectedAt: new Date(pending.firstDetectedAt),
+          passed: validation.passed,
+          failReason: validation.failReason,
+        }, validation);
+      } catch (err) {
+        logger.error({ err }, 'Error in signal log callback');
+      }
+    }
 
     if (!validation.passed) {
       logger.info({

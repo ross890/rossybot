@@ -341,7 +341,7 @@ export class WalletDiscovery {
    * Deactivates wallets with no transactions in the last 7 days (except seeds).
    * Updates last_active_at for all checked wallets.
    */
-  async enforceTradeActivity(): Promise<number> {
+  async enforceTradeActivity(forceCheckAll = false): Promise<number> {
     const INACTIVE_DAYS = 7;
     const cutoff = new Date(Date.now() - INACTIVE_DAYS * 24 * 60 * 60 * 1000);
 
@@ -349,15 +349,19 @@ export class WalletDiscovery {
       `SELECT address, source, last_active_at FROM alpha_wallets WHERE active = TRUE`,
     );
 
+    console.log(`🔍 Checking on-chain activity for ${wallets.length} wallets (force=${forceCheckAll})...`);
+
     let deactivated = 0;
     let checked = 0;
+    let skipped = 0;
 
     for (const wallet of wallets) {
-      // Skip wallets already checked recently (within last 6 hours)
-      if (wallet.last_active_at) {
-        const lastCheck = new Date(wallet.last_active_at);
-        if (lastCheck.getTime() > Date.now() - 6 * 60 * 60 * 1000) {
-          continue; // Already checked recently, skip RPC call
+      // Skip wallets known active within 7d (unless force-checking all)
+      if (!forceCheckAll && wallet.last_active_at) {
+        const lastActive = new Date(wallet.last_active_at);
+        if (lastActive.getTime() > cutoff.getTime()) {
+          skipped++;
+          continue; // Known active within window, skip RPC call
         }
       }
 
@@ -399,8 +403,9 @@ export class WalletDiscovery {
       }
     }
 
+    console.log(`✅ Activity check: ${checked} checked, ${skipped} skipped (known active), ${deactivated} deactivated (inactive >${INACTIVE_DAYS}d)`);
     if (deactivated > 0 || checked > 0) {
-      logger.info({ checked, deactivated, total: wallets.length, inactiveDays: INACTIVE_DAYS },
+      logger.info({ checked, skipped, deactivated, total: wallets.length, inactiveDays: INACTIVE_DAYS },
         'Trade activity check complete');
     }
     return deactivated;

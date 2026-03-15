@@ -75,7 +75,7 @@ class RossyBotV2 {
     // 3. Seed wallets, enforce $10K PnL minimum, check on-chain activity, and load from DB
     await this.walletDiscovery.seedWallets(tier);
     await this.walletDiscovery.enforceMinimumPnl();
-    const activityDeactivated = await this.walletDiscovery.enforceTradeActivity();
+    const activityDeactivated = await this.walletDiscovery.enforceTradeActivity(true);
     if (activityDeactivated > 0) {
       console.log(`Deactivated ${activityDeactivated} inactive wallets (no on-chain activity in 7 days)`);
     }

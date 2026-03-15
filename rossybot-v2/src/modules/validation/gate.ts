@@ -66,17 +66,17 @@ export async function validateToken(
 
   // Check 2: Liquidity
   const liquidity = checkLiquidity(dexPair!, tierCfg);
-  if (!liquidity.passed) {
+  if (!liquidity.passed && !isShadow) {
     return buildResult(ValidationResult.FAILED_LIQUIDITY, safety, dexPair, rugResult.result, start, liquidity);
   }
 
   // Check 3: Momentum
   const momentum = checkMomentum(dexPair!, tierCfg);
-  if (!momentum.passed) {
+  if (!momentum.passed && !isShadow) {
     return buildResult(ValidationResult.FAILED_MOMENTUM, safety, dexPair, rugResult.result, start, liquidity, momentum);
   }
 
-  // Check 4: Market Cap
+  // Check 4: Market Cap — enforced even in shadow mode to filter noise
   const mcap = checkMarketCap(dexPair!, tierCfg);
   if (!mcap.passed) {
     return buildResult(ValidationResult.FAILED_MCAP, safety, dexPair, rugResult.result, start, liquidity, momentum, mcap);
@@ -84,7 +84,7 @@ export async function validateToken(
 
   // Check 5: Token Age (MICRO/SMALL only)
   const age = checkTokenAge(dexPair!, tierCfg);
-  if (!age.passed) {
+  if (!age.passed && !isShadow) {
     return buildResult(ValidationResult.FAILED_AGE, safety, dexPair, rugResult.result, start, liquidity, momentum, mcap, age);
   }
 

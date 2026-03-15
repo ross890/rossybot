@@ -215,7 +215,7 @@ export function getTierConfig(tier: CapitalTier): TierConfig {
     mcapMin: 50_000,          // $50K (was $200K)
     mcapMax: 10_000_000,      // $10M (was $2M) — $30M+ is noise at micro capital
     liquidityMin: 5_000,      // $5K (was $20K)
-    momentumMin: -30,         // allow mild dips (was 20%) — blocks dumps like -73%, -86%
+    momentumMin: 0,           // any momentum (was 20%) — not enforced in shadow mode
     momentumMax: 500,         // up to 500% (was 200%)
     volumeMultiplierMin: 1,   // 1x (was 2x)
     tokenMaxAgeDays: null,    // no age limit (was 30d)

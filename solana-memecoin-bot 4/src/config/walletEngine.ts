@@ -12,7 +12,7 @@ export const WALLET_ENGINE_CONFIG = {
 
   // ============ GMGN FILTERS ============
   GMGN_FILTERS: {
-    minPnl30d: 0,
+    minPnl30d: 10_000,
     minTotalTrades: 50,
     maxTotalTrades: 500,
     minWinRate: 0.30,

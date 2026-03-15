@@ -251,7 +251,7 @@ export class NansenWalletDiscovery {
         const winRate = pnlSummary.win_rate || 0;
         const totalPnl = pnlSummary.total_pnl_usd_realised || 0;
 
-        if (tokenCount < 10 || winRate < 0.25 || totalPnl <= 0) {
+        if (tokenCount < 10 || winRate < 0.25 || totalPnl < 10_000) {
           logger.debug({
             wallet: candidate.walletAddress.slice(0, 8),
             tokenCount,
@@ -293,7 +293,7 @@ export class NansenWalletDiscovery {
         }
 
         // Step 8: Add to wallet engine with Nansen metadata
-        const fastTrackEligible = totalPnl > 500
+        const fastTrackEligible = totalPnl > 10_000
                                    && tokenCount >= 20
                                    && winRate >= 0.30;
 

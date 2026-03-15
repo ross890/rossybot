@@ -493,6 +493,58 @@ export class TelegramService {
       await this.bot.sendMessage(msg.chat.id, `🔪 Force close for ${token} — not implemented in shadow mode`);
     });
 
+    this.bot.onText(/\/pnl/, async (msg) => {
+      if (msg.chat.id.toString() !== this.chatId) return;
+      try {
+        // Open positions from in-memory tracker
+        const open = this.getPositions?.() || [];
+        const openCount = open.length;
+        const unrealizedSol = open.reduce((s, p) => s + p.simulated_entry_sol * p.pnl_percent, 0);
+        const unrealizedPct = open.length > 0
+          ? open.reduce((s, p) => s + p.pnl_percent, 0) / open.length * 100
+          : 0;
+
+        // Closed positions from DB
+        const closed = await getOne<Record<string, unknown>>(
+          `SELECT
+             COUNT(*) as total,
+             COUNT(*) FILTER (WHERE pnl_percent > 0) as wins,
+             COUNT(*) FILTER (WHERE pnl_percent <= 0) as losses,
+             COALESCE(SUM(simulated_entry_sol * pnl_percent), 0) as realized_sol,
+             COALESCE(AVG(pnl_percent), 0) as avg_pnl,
+             COALESCE(AVG(hold_time_mins), 0) as avg_hold,
+             MIN(entry_time) as first_trade
+           FROM shadow_positions WHERE status = 'CLOSED'`,
+        );
+
+        const total = Number(closed?.total || 0);
+        const wins = Number(closed?.wins || 0);
+        const losses = Number(closed?.losses || 0);
+        const realizedSol = Number(closed?.realized_sol || 0);
+        const avgPnl = Number(closed?.avg_pnl || 0);
+        const avgHold = Number(closed?.avg_hold || 0);
+        const wr = total > 0 ? (wins / total * 100).toFixed(0) : 'N/A';
+        const netSol = realizedSol + unrealizedSol;
+        const firstTrade = closed?.first_trade ? new Date(closed.first_trade as string) : null;
+        const sinceStr = firstTrade
+          ? firstTrade.toLocaleDateString('en-US', { month: 'short', day: 'numeric' })
+          : 'N/A';
+
+        await this.bot.sendMessage(msg.chat.id, [
+          `📈 SHADOW P&L`,
+          `├ Open positions: ${openCount}`,
+          `├ Unrealized: ${unrealizedSol >= 0 ? '+' : ''}${unrealizedSol.toFixed(3)} SOL (${unrealizedPct >= 0 ? '+' : ''}${unrealizedPct.toFixed(1)}% avg)`,
+          `├ Realized: ${realizedSol >= 0 ? '+' : ''}${realizedSol.toFixed(3)} SOL (${total} trades)`,
+          `├ Net: ${netSol >= 0 ? '+' : ''}${netSol.toFixed(3)} SOL`,
+          `├ Win rate: ${wr}% (${wins}W / ${losses}L)`,
+          `├ Avg PnL: ${(avgPnl * 100).toFixed(1)}% | Avg hold: ${this.formatHoldTime(avgHold)}`,
+          `└ Since: ${sinceStr}`,
+        ].join('\n'));
+      } catch (err) {
+        await this.bot.sendMessage(msg.chat.id, '❌ Failed to load PnL data');
+      }
+    });
+
     logger.info('Telegram bot commands registered');
   }
 

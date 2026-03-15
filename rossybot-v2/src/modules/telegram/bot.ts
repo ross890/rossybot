@@ -390,7 +390,10 @@ export class TelegramService {
           const wr = w.our_total_trades ? `${((w.our_win_rate as number) * 100).toFixed(0)}%` : 'N/A';
           return `${w.helius_subscribed ? '📡' : '⏸️'} [${w.tier}] ${w.label} | WR: ${wr} | Trades: ${w.our_total_trades}`;
         });
-        await this.bot.sendMessage(msg.chat.id, `👛 WALLETS (${wallets.length})\n${lines.join('\n')}`);
+        const walletMsg = `👛 WALLETS (${wallets.length})\n${lines.join('\n')}`;
+        for (const chunk of this.chunkMessage(walletMsg)) {
+          await this.bot.sendMessage(msg.chat.id, chunk);
+        }
       } catch (err) {
         await this.bot.sendMessage(msg.chat.id, '❌ Failed to load wallets');
       }
@@ -594,11 +597,14 @@ export class TelegramService {
           return `${icon} $${sym} | ${reason} | ${ago}m ago | ${s.wallet_count}w`;
         });
 
-        await this.bot.sendMessage(msg.chat.id, [
+        const signalMsg = [
           `🔍 SIGNALS (last ${signals.length})`,
           ...lines,
           `└ ${passed}/${signals.length} passed validation`,
-        ].join('\n'));
+        ].join('\n');
+        for (const chunk of this.chunkMessage(signalMsg)) {
+          await this.bot.sendMessage(msg.chat.id, chunk);
+        }
       } catch (err) {
         await this.bot.sendMessage(msg.chat.id, '❌ Failed to load signals');
       }
@@ -611,10 +617,30 @@ export class TelegramService {
 
   private async send(text: string): Promise<void> {
     try {
-      await this.bot.sendMessage(this.chatId, text, { parse_mode: undefined });
+      for (const chunk of this.chunkMessage(text)) {
+        await this.bot.sendMessage(this.chatId, chunk, { parse_mode: undefined });
+      }
     } catch (err) {
       logger.error({ err }, 'Failed to send Telegram message');
     }
+  }
+
+  private chunkMessage(text: string, maxLen = 4096): string[] {
+    if (text.length <= maxLen) return [text];
+    const lines = text.split('\n');
+    const chunks: string[] = [];
+    let current = '';
+    for (const line of lines) {
+      const next = current ? `${current}\n${line}` : line;
+      if (next.length > maxLen) {
+        if (current) chunks.push(current);
+        current = line.length > maxLen ? line.slice(0, maxLen) : line;
+      } else {
+        current = next;
+      }
+    }
+    if (current) chunks.push(current);
+    return chunks;
   }
 
   private formatNum(n: number): string {

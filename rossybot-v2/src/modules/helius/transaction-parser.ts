@@ -69,7 +69,10 @@ export class TransactionParser {
 
     try {
       const tx = result.transaction;
-      if (!tx || tx.meta?.err) return signals; // Skip failed txs
+      if (!tx || tx.meta?.err) {
+        logger.debug('TX dropped: failed or missing transaction data');
+        return signals;
+      }
 
       const signature = result.signature || tx.transaction?.signatures?.[0];
       if (!signature) return signals;
@@ -83,65 +86,70 @@ export class TransactionParser {
       }
       const detectionLagMs = Math.max(0, now.getTime() - blockTime * 1000);
 
-      // Step 1: Identify the wallet (first signer)
+      // Step 1: Identify which subscribed wallet(s) are involved in this tx
       const accountKeys = tx.transaction?.message?.accountKeys || [];
-      const firstSigner = accountKeys.find((k) => k.signer)?.pubkey;
-      if (!firstSigner || !this.subscribedWallets.has(firstSigner)) return signals;
+      const allPubkeys = accountKeys.map((k) => k.pubkey);
+      const involvedWallets = allPubkeys.filter((pk) => this.subscribedWallets.has(pk));
+
+      if (involvedWallets.length === 0) {
+        logger.debug({ sig: signature.slice(0, 12) }, 'TX dropped: no subscribed wallet found in accountKeys');
+        return signals;
+      }
 
       // Step 2: Detect token transfers by comparing pre/post balances
       const preBalances = tx.meta.preTokenBalances || [];
       const postBalances = tx.meta.postTokenBalances || [];
-
-      // Build balance maps per owner+mint
       const preMap = this.buildBalanceMap(preBalances);
       const postMap = this.buildBalanceMap(postBalances);
 
-      // Compute deltas for the wallet
-      const allMints = new Set([
-        ...preBalances.filter((b) => b.owner === firstSigner).map((b) => b.mint),
-        ...postBalances.filter((b) => b.owner === firstSigner).map((b) => b.mint),
-      ]);
+      // Check token balance deltas for EACH involved wallet
+      for (const wallet of involvedWallets) {
+        const allMints = new Set([
+          ...preBalances.filter((b) => b.owner === wallet).map((b) => b.mint),
+          ...postBalances.filter((b) => b.owner === wallet).map((b) => b.mint),
+        ]);
 
-      // SOL delta for value estimation
-      const signerIdx = accountKeys.findIndex((k) => k.pubkey === firstSigner);
-      const preSol = (tx.meta.preBalances[signerIdx] || 0) / 1e9;
-      const postSol = (tx.meta.postBalances[signerIdx] || 0) / 1e9;
-      const solDelta = postSol - preSol;
+        if (allMints.size === 0) continue; // No token activity for this wallet
 
-      for (const mint of allMints) {
-        if (mint === SOL_MINT) continue; // Skip wrapped SOL
+        // SOL delta for value estimation
+        const walletIdx = accountKeys.findIndex((k) => k.pubkey === wallet);
+        const preSol = walletIdx >= 0 ? (tx.meta.preBalances[walletIdx] || 0) / 1e9 : 0;
+        const postSol = walletIdx >= 0 ? (tx.meta.postBalances[walletIdx] || 0) / 1e9 : 0;
+        const solDelta = postSol - preSol;
 
-        const key = `${firstSigner}:${mint}`;
-        const preAmount = preMap.get(key) || 0;
-        const postAmount = postMap.get(key) || 0;
-        const delta = postAmount - preAmount;
+        for (const mint of allMints) {
+          if (mint === SOL_MINT) continue; // Skip wrapped SOL
 
-        if (Math.abs(delta) < 0.000001) continue; // Ignore dust
+          const key = `${wallet}:${mint}`;
+          const preAmount = preMap.get(key) || 0;
+          const postAmount = postMap.get(key) || 0;
+          const delta = postAmount - preAmount;
 
-        const type = delta > 0 ? SignalType.BUY : SignalType.SELL;
+          if (Math.abs(delta) < 0.000001) continue; // Ignore dust
 
-        const signal: ParsedSignal = {
-          walletAddress: firstSigner,
-          txSignature: signature,
-          blockTime,
-          type,
-          tokenMint: mint,
-          tokenAmount: Math.abs(delta),
-          solDelta,
-          detectedAt: now,
-          detectionLagMs,
-          detectionSource: source,
-        };
+          const type = delta > 0 ? SignalType.BUY : SignalType.SELL;
 
-        signals.push(signal);
+          const signal: ParsedSignal = {
+            walletAddress: wallet,
+            txSignature: signature,
+            blockTime,
+            type,
+            tokenMint: mint,
+            tokenAmount: Math.abs(delta),
+            solDelta,
+            detectedAt: now,
+            detectionLagMs,
+            detectionSource: source,
+          };
 
-        // Log to database
-        await this.logTransaction(signal);
+          signals.push(signal);
+          await this.logTransaction(signal);
+        }
       }
 
       if (signals.length > 0) {
         logger.info({
-          wallet: firstSigner.slice(0, 8),
+          wallets: involvedWallets.map((w) => w.slice(0, 8)),
           signals: signals.map((s) => ({
             type: s.type,
             mint: s.tokenMint.slice(0, 8),
@@ -149,6 +157,11 @@ export class TransactionParser {
             lagMs: s.detectionLagMs,
           })),
         }, 'Parsed transaction signals');
+      } else if (involvedWallets.length > 0) {
+        logger.debug({
+          sig: signature.slice(0, 12),
+          wallets: involvedWallets.map((w) => w.slice(0, 8)),
+        }, 'TX received but no token transfers detected (SOL-only or program interaction)');
       }
     } catch (err) {
       logger.error({ err }, 'Failed to parse transaction');

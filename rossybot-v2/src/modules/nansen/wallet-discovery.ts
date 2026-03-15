@@ -90,8 +90,7 @@ export class WalletDiscovery {
       for (let page = 1; page <= 3; page++) {
         try {
           const trades = await this.nansen.smartMoneyDexTrades({
-            tradeValueMin: 500,
-            labels: ['Smart Trader', '30D Smart Trader', '90D Smart Trader', '180D Smart Trader'],
+            labels: ['Smart Trader', '30D Smart Trader', '90D Smart Trader', '180D Smart Trader', 'Fund'],
             limit: 100,
             page,
           });
@@ -138,12 +137,13 @@ export class WalletDiscovery {
 
       console.log(`Step 2: ${traderMap.size} unique traders identified`);
 
-      // Step 3: Filter — 5+ trades AND 5+ unique tokens traded
+      // Step 3: Filter — 2+ trades AND 2+ unique tokens in 24h window
+      // (dex-trades is 24h only; 2+ daily ≈ 5+/week activity level)
       const allCandidates: WalletCandidate[] = [];
 
       for (const [addr, data] of traderMap) {
-        if (data.trades < 5) continue;
-        if (data.tokens.size < 5) continue;
+        if (data.trades < 2) continue;
+        if (data.tokens.size < 2) continue;
 
         // Score: trade activity + volume + diversity
         const tradeScore = Math.min(data.trades / 20, 1) * 0.35;

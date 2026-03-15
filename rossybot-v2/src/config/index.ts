@@ -45,7 +45,7 @@ export const config = {
     apiKey: env.NANSEN_API_KEY,
     baseUrl: 'https://api.nansen.ai/v1',
     maxCallsPerMin: 80,
-    discoveryIntervalMs: 4 * 60 * 60 * 1000, // 4 hours
+    discoveryIntervalMs: 1 * 60 * 60 * 1000, // 1 hour
     flowMonitorIntervalMs: 2 * 60 * 60 * 1000, // 2 hours
     screenerIntervalMs: 5 * 60 * 1000, // 5 min
     leaderboardIntervalMs: 15 * 60 * 1000, // 15 min
@@ -80,7 +80,7 @@ export const TIER_CONFIGS: Record<CapitalTier, TierConfig> = {
   [CapitalTier.MICRO]: {
     tier: CapitalTier.MICRO,
     maxPositions: 2,
-    walletsMonitored: 10,
+    walletsMonitored: 50,
     positionSizePct: 0.50,
     minPositionSol: 0.3,
     profitTarget: 0.50,
@@ -208,9 +208,10 @@ export function getTierConfig(tier: CapitalTier): TierConfig {
   const base = TIER_CONFIGS[tier];
   if (!config.shadowMode) return base;
 
-  // Shadow mode: loosen validation to generate data
+  // Shadow mode: loosen everything to generate data
   return {
     ...base,
+    maxPositions: 20,         // 20 concurrent (was 2)
     mcapMin: 50_000,          // $50K (was $200K)
     mcapMax: 50_000_000,      // $50M (was $2M)
     liquidityMin: 5_000,      // $5K (was $20K)

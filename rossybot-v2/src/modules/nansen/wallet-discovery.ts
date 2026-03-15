@@ -67,7 +67,7 @@ export class WalletDiscovery {
       () => this.runDiscovery(),
       config.nansen.discoveryIntervalMs,
     );
-    logger.info('Wallet discovery scheduler started (every 4h)');
+    logger.info('Wallet discovery scheduler started (every 1h)');
   }
 
   stop(): void {
@@ -87,7 +87,7 @@ export class WalletDiscovery {
       console.log('Step 1: Fetching smart money DEX trades (Solana, last 24h)...');
       const allTrades: SmartMoneyDexTrade[] = [];
 
-      for (let page = 1; page <= 3; page++) {
+      for (let page = 1; page <= 10; page++) {
         try {
           const trades = await this.nansen.smartMoneyDexTrades({
             labels: ['Smart Trader', '30D Smart Trader', '90D Smart Trader', '180D Smart Trader', 'Fund'],
@@ -137,13 +137,11 @@ export class WalletDiscovery {
 
       console.log(`Step 2: ${traderMap.size} unique traders identified`);
 
-      // Step 3: Filter — 2+ trades AND 2+ unique tokens in 24h window
-      // (dex-trades is 24h only; 2+ daily ≈ 5+/week activity level)
+      // Step 3: Filter — any active smart money trader (1+ trades in 24h)
       const allCandidates: WalletCandidate[] = [];
 
       for (const [addr, data] of traderMap) {
-        if (data.trades < 2) continue;
-        if (data.tokens.size < 2) continue;
+        if (data.trades < 1) continue;
 
         // Score: trade activity + volume + diversity
         const tradeScore = Math.min(data.trades / 20, 1) * 0.35;
@@ -163,12 +161,11 @@ export class WalletDiscovery {
         });
       }
 
-      // Step 4: Rank and add top candidates
+      // Step 4: Rank and add ALL qualifying candidates
       allCandidates.sort((a, b) => b.score - a.score);
-      const topCandidates = allCandidates.slice(0, 10);
 
       let walletsAdded = 0;
-      for (const c of topCandidates) {
+      for (const c of allCandidates) {
         const isNew = await this.addWallet(c);
         if (isNew) walletsAdded++;
       }

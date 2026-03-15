@@ -72,9 +72,8 @@ class RossyBotV2 {
       walletsToMonitor: tierCfg.walletsMonitored,
     }, 'Capital tier determined');
 
-    // 3. Seed wallets, purge weak ones, and load from DB
+    // 3. Seed wallets and load from DB (keep previously discovered wallets)
     await this.walletDiscovery.seedWallets(tier);
-    await this.walletDiscovery.purgeWeakWallets();
     const allActiveWallets = await this.walletDiscovery.getActiveWallets();
 
     // Helius WS monitors top N wallets (tier-limited)
@@ -155,106 +154,126 @@ class RossyBotV2 {
 
     // --- WebSocket fallback ---
     this.wsManager.on('fallbackActivated', async () => {
-      logger.warn('Fallback mode ACTIVATED');
-      this.fallbackPoller.start();
-      await this.telegram.sendWebSocketAlert('down', {
-        lastMessageAgo: `${((Date.now() - Date.now()) / 1000).toFixed(0)}s`,
-        attempts: 5,
-        maxAttempts: 5,
-      });
+      try {
+        logger.warn('Fallback mode ACTIVATED');
+        this.fallbackPoller.start();
+        await this.telegram.sendWebSocketAlert('down', {
+          lastMessageAgo: `${((Date.now() - Date.now()) / 1000).toFixed(0)}s`,
+          attempts: 5,
+          maxAttempts: 5,
+        });
+      } catch (err) {
+        logger.error({ err }, 'Error in fallbackActivated handler');
+      }
     });
 
     this.wsManager.on('fallbackDeactivated', async () => {
-      logger.info('Fallback mode DEACTIVATED');
-      this.fallbackPoller.stop();
-      await this.telegram.sendWebSocketAlert('restored', {
-        wallets: this.walletAddresses.length,
-        downtime: 'recovered',
-      });
+      try {
+        logger.info('Fallback mode DEACTIVATED');
+        this.fallbackPoller.stop();
+        await this.telegram.sendWebSocketAlert('restored', {
+          wallets: this.walletAddresses.length,
+          downtime: 'recovered',
+        });
+      } catch (err) {
+        logger.error({ err }, 'Error in fallbackDeactivated handler');
+      }
     });
 
     // --- Entry Engine → Shadow Tracker ---
     this.entryEngine.setSignalCallback(async (signal: ValidatedSignal) => {
-      // Check if we can open a position
-      if (!this.capitalManager.canOpenPosition(this.shadowTracker.getOpenCount())) {
-        logger.info({ reason: 'max positions or daily limit' }, 'Skipping signal — cannot open position');
-        return;
+      try {
+        // Check if we can open a position
+        if (!this.capitalManager.canOpenPosition(this.shadowTracker.getOpenCount())) {
+          logger.info({ reason: 'max positions or daily limit' }, 'Skipping signal — cannot open position');
+          return;
+        }
+
+        if (this.shadowTracker.hasPosition(signal.tokenMint)) {
+          logger.info({ token: signal.tokenMint.slice(0, 8) }, 'Skipping signal — already have position');
+          return;
+        }
+
+        const positionSize = this.capitalManager.getPositionSize();
+        const pos = await this.shadowTracker.openPosition(signal, positionSize);
+
+        // Send Telegram alert
+        const dex = signal.validation.dexData;
+        await this.telegram.sendEntryAlert({
+          tokenSymbol: signal.tokenSymbol || signal.tokenMint.slice(0, 8),
+          tokenMint: signal.tokenMint,
+          tier: signal.tierConfig.tier,
+          wallets: signal.walletAddresses,
+          walletCount: signal.walletCount,
+          totalMonitored: this.walletAddresses.length,
+          sizeSol: positionSize,
+          price: pos.entry_price,
+          momentum24h: dex?.priceChange?.h24 || 0,
+          volumeMultiplier: dex ? (dex.volume?.h24 || 0) / Math.max((dex.volume?.h24 || 1), 1) : 0,
+          mcap: dex?.marketCap || dex?.fdv || 0,
+          liquidity: dex?.liquidity?.usd || 0,
+          ageDays: dex?.pairCreatedAt ? (Date.now() - dex.pairCreatedAt) / 86400000 : 0,
+          detectionLagMs: signal.firstSignal.detectionLagMs,
+          executionLagSecs: Math.round((Date.now() - signal.firstSignal.blockTime * 1000) / 1000),
+          profitTarget: signal.tierConfig.profitTarget,
+          stopLoss: signal.tierConfig.stopLoss,
+          hardTime: signal.tierConfig.hardTimeHours,
+        });
+      } catch (err) {
+        logger.error({ err, token: signal.tokenMint?.slice(0, 8) }, 'Error in entry signal callback');
       }
-
-      if (this.shadowTracker.hasPosition(signal.tokenMint)) {
-        logger.info({ token: signal.tokenMint.slice(0, 8) }, 'Skipping signal — already have position');
-        return;
-      }
-
-      const positionSize = this.capitalManager.getPositionSize();
-      const pos = await this.shadowTracker.openPosition(signal, positionSize);
-
-      // Send Telegram alert
-      const dex = signal.validation.dexData;
-      await this.telegram.sendEntryAlert({
-        tokenSymbol: signal.tokenSymbol || signal.tokenMint.slice(0, 8),
-        tokenMint: signal.tokenMint,
-        tier: signal.tierConfig.tier,
-        wallets: signal.walletAddresses,
-        walletCount: signal.walletCount,
-        totalMonitored: this.walletAddresses.length,
-        sizeSol: positionSize,
-        price: pos.entry_price,
-        momentum24h: dex?.priceChange?.h24 || 0,
-        volumeMultiplier: dex ? (dex.volume?.h24 || 0) / Math.max((dex.volume?.h24 || 1), 1) : 0,
-        mcap: dex?.marketCap || dex?.fdv || 0,
-        liquidity: dex?.liquidity?.usd || 0,
-        ageDays: dex?.pairCreatedAt ? (Date.now() - dex.pairCreatedAt) / 86400000 : 0,
-        detectionLagMs: signal.firstSignal.detectionLagMs,
-        executionLagSecs: Math.round((Date.now() - signal.firstSignal.blockTime * 1000) / 1000),
-        profitTarget: signal.tierConfig.profitTarget,
-        stopLoss: signal.tierConfig.stopLoss,
-        hardTime: signal.tierConfig.hardTimeHours,
-      });
     });
 
     // --- Shadow Tracker close callback ---
     this.shadowTracker.setCloseCallback(async (pos) => {
-      const pnl = pos.pnl_percent;
-      if (pnl >= 0) {
-        await this.telegram.sendProfitTargetAlert({
-          tokenSymbol: pos.token_symbol || pos.token_address.slice(0, 8),
-          pnlPercent: pnl,
-          entrySol: pos.simulated_entry_sol,
-          exitSol: pos.simulated_entry_sol * (1 + pnl),
-          netPnlSol: pos.simulated_entry_sol * pnl,
-          holdMins: pos.hold_time_mins || 0,
-          capitalBefore: this.capitalManager.capital,
-          capitalAfter: this.capitalManager.capital + pos.simulated_entry_sol * pnl,
-        });
-      } else {
-        this.capitalManager.recordLoss(pos.simulated_entry_sol * Math.abs(pnl));
-        await this.telegram.sendStopLossAlert({
-          tokenSymbol: pos.token_symbol || pos.token_address.slice(0, 8),
-          pnlPercent: pnl,
-          lossSol: pos.simulated_entry_sol * Math.abs(pnl),
-          holdMins: pos.hold_time_mins || 0,
-          reason: pos.exit_reason || 'Unknown',
-        });
+      try {
+        const pnl = pos.pnl_percent;
+        if (pnl >= 0) {
+          await this.telegram.sendProfitTargetAlert({
+            tokenSymbol: pos.token_symbol || pos.token_address.slice(0, 8),
+            pnlPercent: pnl,
+            entrySol: pos.simulated_entry_sol,
+            exitSol: pos.simulated_entry_sol * (1 + pnl),
+            netPnlSol: pos.simulated_entry_sol * pnl,
+            holdMins: pos.hold_time_mins || 0,
+            capitalBefore: this.capitalManager.capital,
+            capitalAfter: this.capitalManager.capital + pos.simulated_entry_sol * pnl,
+          });
+        } else {
+          this.capitalManager.recordLoss(pos.simulated_entry_sol * Math.abs(pnl));
+          await this.telegram.sendStopLossAlert({
+            tokenSymbol: pos.token_symbol || pos.token_address.slice(0, 8),
+            pnlPercent: pnl,
+            lossSol: pos.simulated_entry_sol * Math.abs(pnl),
+            holdMins: pos.hold_time_mins || 0,
+            reason: pos.exit_reason || 'Unknown',
+          });
+        }
+      } catch (err) {
+        logger.error({ err, token: pos.token_address?.slice(0, 8) }, 'Error in position close callback');
       }
     });
 
     // --- Wallet Discovery → Helius subscription ---
     this.walletDiscovery.setNewWalletCallback(async (address: string) => {
-      // Always add to entry engine's tracked list for on-chain confluence
-      this.entryEngine.updateAllTrackedWallets(
-        await this.walletDiscovery.getActiveWallets(),
-      );
+      try {
+        // Always add to entry engine's tracked list for on-chain confluence
+        this.entryEngine.updateAllTrackedWallets(
+          await this.walletDiscovery.getActiveWallets(),
+        );
 
-      const tierCfg = getTierConfig(this.capitalManager.tier);
-      if (this.walletAddresses.length >= tierCfg.walletsMonitored) {
-        logger.info({ address: address.slice(0, 8) }, 'New wallet added for on-chain confluence (WS slots full)');
-        return;
+        const tierCfg = getTierConfig(this.capitalManager.tier);
+        if (this.walletAddresses.length >= tierCfg.walletsMonitored) {
+          logger.info({ address: address.slice(0, 8) }, 'New wallet added for on-chain confluence (WS slots full)');
+          return;
+        }
+        this.walletAddresses.push(address);
+        this.txParser.addWallet(address);
+        await this.wsManager.addWallet(address);
+        logger.info({ address: address.slice(0, 8), total: this.walletAddresses.length }, 'New wallet subscribed via Helius');
+      } catch (err) {
+        logger.error({ err, address: address?.slice(0, 8) }, 'Error in new wallet callback');
       }
-      this.walletAddresses.push(address);
-      this.txParser.addWallet(address);
-      await this.wsManager.addWallet(address);
-      logger.info({ address: address.slice(0, 8), total: this.walletAddresses.length }, 'New wallet subscribed via Helius');
     });
 
     // --- Telegram callbacks ---
@@ -319,10 +338,14 @@ class RossyBotV2 {
   private scheduleDailySummary(): void {
     // Check every minute if it's midnight UTC
     this.dailySummaryInterval = setInterval(async () => {
-      const now = new Date();
-      if (now.getUTCHours() === 0 && now.getUTCMinutes() === 0) {
-        await this.sendDailySummary();
-        this.capitalManager.resetDaily();
+      try {
+        const now = new Date();
+        if (now.getUTCHours() === 0 && now.getUTCMinutes() === 0) {
+          await this.sendDailySummary();
+          this.capitalManager.resetDaily();
+        }
+      } catch (err) {
+        logger.error({ err }, 'Error in daily summary');
       }
     }, 60_000);
   }

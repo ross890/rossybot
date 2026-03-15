@@ -252,7 +252,11 @@ export class ShadowTracker {
     }, 'Shadow position CLOSED');
 
     if (this.onPositionClosed) {
-      this.onPositionClosed(pos);
+      try {
+        await this.onPositionClosed(pos);
+      } catch (err) {
+        logger.error({ err, posId: pos.id.slice(0, 8) }, 'Error in position close callback');
+      }
     }
 
     // Remove from active tracking

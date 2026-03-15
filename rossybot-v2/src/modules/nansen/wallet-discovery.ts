@@ -50,6 +50,24 @@ export class WalletDiscovery {
     return eligible.map((w) => w.address);
   }
 
+  /** Deactivate wallets below $10K PnL minimum (run on startup to clean existing data) */
+  async enforceMinimumPnl(): Promise<number> {
+    const MIN_PNL_USD = 10_000;
+    const result = await query(
+      `UPDATE alpha_wallets SET active = FALSE
+       WHERE active = TRUE
+         AND source != 'NANSEN_SEED'
+         AND COALESCE(nansen_pnl_usd, 0) < $1
+       RETURNING address`,
+      [MIN_PNL_USD],
+    );
+    const count = result.rowCount || 0;
+    if (count > 0) {
+      logger.info({ count, minPnl: MIN_PNL_USD }, 'Deactivated wallets below minimum PnL threshold on startup');
+    }
+    return count;
+  }
+
   /** Remove all previously discovered wallets (clean slate for new discovery method) */
   async purgeWeakWallets(): Promise<number> {
     const result = await query(
@@ -208,9 +226,19 @@ export class WalletDiscovery {
       });
     }
 
-    candidates.sort((a, b) => b.score - a.score);
+    // Filter out wallets below $10K PnL minimum threshold
+    const MIN_PNL_USD = 10_000;
+    const qualifiedCandidates = candidates.filter((c) => c.totalVolumeUsd >= MIN_PNL_USD);
+    logger.info({
+      total: candidates.length,
+      qualified: qualifiedCandidates.length,
+      filtered: candidates.length - qualifiedCandidates.length,
+      minPnl: MIN_PNL_USD,
+    }, 'Applied $10K minimum PnL filter');
+
+    qualifiedCandidates.sort((a, b) => b.score - a.score);
     let added = 0;
-    for (const c of candidates) {
+    for (const c of qualifiedCandidates) {
       if (await this.addWallet(c)) added++;
     }
 
@@ -271,7 +299,19 @@ export class WalletDiscovery {
       `UPDATE alpha_wallets SET active = FALSE WHERE active = TRUE AND consecutive_losses >= 5 RETURNING address`,
     );
 
-    return deactivated.rowCount || 0;
+    // Deactivate wallets below $10K PnL minimum (skip seed wallets which may lack PnL data)
+    const pnlPurged = await query(
+      `UPDATE alpha_wallets SET active = FALSE
+       WHERE active = TRUE
+         AND source != 'NANSEN_SEED'
+         AND COALESCE(nansen_pnl_usd, 0) < 10000
+       RETURNING address`,
+    );
+    if ((pnlPurged.rowCount || 0) > 0) {
+      logger.info({ count: pnlPurged.rowCount }, 'Deactivated wallets below $10K PnL minimum');
+    }
+
+    return (deactivated.rowCount || 0) + (pnlPurged.rowCount || 0);
   }
 
   private async logDiscovery(

@@ -72,13 +72,9 @@ export class TransactionParser {
       const signature = result.signature || tx.transaction?.signatures?.[0];
       if (!signature) return signals;
 
-      const blockTime = tx.blockTime;
-      if (!blockTime || typeof blockTime !== 'number') {
-        logger.warn({ signature: result.signature }, 'Transaction missing blockTime — skipping');
-        return signals;
-      }
+      const blockTime = typeof tx.blockTime === 'number' ? tx.blockTime : Math.floor(now.getTime() / 1000);
       const blockDate = new Date(blockTime * 1000);
-      const detectionLagMs = now.getTime() - blockDate.getTime();
+      const detectionLagMs = tx.blockTime ? Math.max(0, now.getTime() - blockDate.getTime()) : 0;
 
       // Step 1: Identify the wallet (first signer)
       const accountKeys = tx.transaction?.message?.accountKeys || [];

@@ -67,27 +67,24 @@ export async function validateToken(
   // Check 2: Liquidity
   const liquidity = checkLiquidity(dexPair!, tierCfg);
   if (!liquidity.passed) {
-    if (!isShadow) {
-      return buildResult(ValidationResult.FAILED_LIQUIDITY, safety, dexPair, rugResult.result, start, liquidity);
-    }
-    logger.info({ mint: tokenMint.slice(0, 8), reason: liquidity.reason }, 'Liquidity check failed — allowing in shadow mode');
+    return buildResult(ValidationResult.FAILED_LIQUIDITY, safety, dexPair, rugResult.result, start, liquidity);
   }
 
   // Check 3: Momentum
   const momentum = checkMomentum(dexPair!, tierCfg);
-  if (!momentum.passed && !isShadow) {
+  if (!momentum.passed) {
     return buildResult(ValidationResult.FAILED_MOMENTUM, safety, dexPair, rugResult.result, start, liquidity, momentum);
   }
 
   // Check 4: Market Cap
   const mcap = checkMarketCap(dexPair!, tierCfg);
-  if (!mcap.passed && !isShadow) {
+  if (!mcap.passed) {
     return buildResult(ValidationResult.FAILED_MCAP, safety, dexPair, rugResult.result, start, liquidity, momentum, mcap);
   }
 
   // Check 5: Token Age (MICRO/SMALL only)
   const age = checkTokenAge(dexPair!, tierCfg);
-  if (!age.passed && !isShadow) {
+  if (!age.passed) {
     return buildResult(ValidationResult.FAILED_AGE, safety, dexPair, rugResult.result, start, liquidity, momentum, mcap, age);
   }
 

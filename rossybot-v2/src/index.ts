@@ -72,8 +72,9 @@ class RossyBotV2 {
       walletsToMonitor: tierCfg.walletsMonitored,
     }, 'Capital tier determined');
 
-    // 3. Seed wallets and load from DB (keep previously discovered wallets)
+    // 3. Seed wallets, enforce $10K PnL minimum, and load from DB
     await this.walletDiscovery.seedWallets(tier);
+    await this.walletDiscovery.enforceMinimumPnl();
     const allActiveWallets = await this.walletDiscovery.getActiveWallets();
 
     // Helius WS monitors top N wallets (tier-limited)

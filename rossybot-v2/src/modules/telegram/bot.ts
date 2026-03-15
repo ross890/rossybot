@@ -319,7 +319,7 @@ export class TelegramService {
       walletLines,
       `│`,
       `├─ ENTRY RULES [${data.tier}]`,
-      `│ Confluence: ${data.tierConfig.walletConfluence} wallets within ${data.tierConfig.confluenceWindow}min`,
+      `│ Confluence: ${data.shadowMode ? '1 (shadow override)' : data.tierConfig.walletConfluence} wallets within ${data.tierConfig.confluenceWindow}min`,
       `│ MCap range: ${data.tierConfig.mcapRange}`,
       `│ Min liquidity: $${this.formatNum(data.tierConfig.liquidityMin)}`,
       `│ Validation: RugCheck + DexScreener (<30s)`,

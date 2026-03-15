@@ -60,11 +60,13 @@ export class EntryEngine {
       detectedAt: Date.now(),
     });
 
+    const effectiveConfluence = config.shadowMode ? 1 : tierCfg.walletConfluenceRequired;
     logger.info({
       token: mint.slice(0, 8),
       wallet: signal.walletAddress.slice(0, 8),
       walletCount: pending.wallets.size,
-      required: tierCfg.walletConfluenceRequired,
+      required: effectiveConfluence,
+      shadowOverride: config.shadowMode,
     }, 'Buy signal accumulated');
 
     // Check on-chain confluence from unsubscribed tracked wallets
@@ -202,6 +204,14 @@ export class EntryEngine {
   private checkConfluence(pending: PendingBuy, tierCfg: TierConfig): boolean {
     const windowMs = tierCfg.confluenceWindow * 60 * 1000;
     const now = Date.now();
+
+    // Shadow mode: single wallet triggers — no real capital at risk
+    if (config.shadowMode) {
+      for (const [, entry] of pending.wallets) {
+        if (now - entry.detectedAt <= windowMs) return true;
+      }
+      return false;
+    }
 
     // Filter to wallets within the confluence window
     let walletsInWindow = 0;

@@ -115,8 +115,8 @@ export class EntryEngine {
       signalAction,
     );
 
-    // Fire signal log callback for both pass and fail
-    if (this.onSignalValidated) {
+    // Fire signal log callback only for passed signals
+    if (this.onSignalValidated && validation.passed) {
       try {
         await this.onSignalValidated({
           tokenMint: mint,

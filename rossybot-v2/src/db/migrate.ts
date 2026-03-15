@@ -112,7 +112,7 @@ async function migrate() {
   await pool.query(`
     CREATE TABLE IF NOT EXISTS alpha_wallet_exits (
       id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
-      position_id UUID REFERENCES positions(id),
+      position_id UUID REFERENCES shadow_positions(id),
       wallet_address TEXT NOT NULL,
       detected_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
       detection_lag_ms INT DEFAULT 0,
@@ -121,6 +121,25 @@ async function migrate() {
       our_action TEXT,
       detection_source TEXT NOT NULL DEFAULT 'HELIUS_WS'
     )
+  `);
+
+  // Fix FK constraint if it was previously pointing to positions instead of shadow_positions
+  await pool.query(`
+    DO $$ BEGIN
+      IF EXISTS (
+        SELECT 1 FROM information_schema.table_constraints
+        WHERE constraint_name = 'alpha_wallet_exits_position_id_fkey'
+          AND table_name = 'alpha_wallet_exits'
+      ) AND EXISTS (
+        SELECT 1 FROM information_schema.constraint_column_usage
+        WHERE constraint_name = 'alpha_wallet_exits_position_id_fkey'
+          AND table_name = 'positions'
+      ) THEN
+        ALTER TABLE alpha_wallet_exits DROP CONSTRAINT alpha_wallet_exits_position_id_fkey;
+        ALTER TABLE alpha_wallet_exits ADD CONSTRAINT alpha_wallet_exits_position_id_fkey
+          FOREIGN KEY (position_id) REFERENCES shadow_positions(id);
+      END IF;
+    END $$
   `);
 
   // 6. wallet_discovery_log

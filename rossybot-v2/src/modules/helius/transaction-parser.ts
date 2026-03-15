@@ -73,6 +73,10 @@ export class TransactionParser {
       if (!signature) return signals;
 
       const blockTime = tx.blockTime;
+      if (!blockTime || typeof blockTime !== 'number') {
+        logger.warn({ signature: result.signature }, 'Transaction missing blockTime — skipping');
+        return signals;
+      }
       const blockDate = new Date(blockTime * 1000);
       const detectionLagMs = now.getTime() - blockDate.getTime();
 

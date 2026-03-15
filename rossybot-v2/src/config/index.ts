@@ -208,14 +208,14 @@ export function getTierConfig(tier: CapitalTier): TierConfig {
   const base = TIER_CONFIGS[tier];
   if (!config.shadowMode) return base;
 
-  // Shadow mode: loosen everything to generate data
+  // Shadow mode: loosen thresholds but still enforce gates
   return {
     ...base,
     maxPositions: 20,         // 20 concurrent (was 2)
     mcapMin: 50_000,          // $50K (was $200K)
-    mcapMax: 50_000_000,      // $50M (was $2M)
+    mcapMax: 10_000_000,      // $10M (was $2M) — $30M+ is noise at micro capital
     liquidityMin: 5_000,      // $5K (was $20K)
-    momentumMin: 0,           // any momentum (was 20%)
+    momentumMin: 0,           // any momentum (was 20%) — not enforced in shadow mode
     momentumMax: 500,         // up to 500% (was 200%)
     volumeMultiplierMin: 1,   // 1x (was 2x)
     tokenMaxAgeDays: null,    // no age limit (was 30d)

@@ -8,16 +8,32 @@ interface QueueItem {
   endpoint: string;
 }
 
+interface RateLimiterOptions {
+  /** Minimum ms between consecutive calls (prevents bursting) */
+  minIntervalMs?: number;
+  /** Max retries on 403/429 responses */
+  maxRetries?: number;
+  /** Base delay for exponential backoff on 403/429 (ms) */
+  retryBaseMs?: number;
+}
+
 export class RateLimiter {
   private queue: QueueItem[] = [];
   private callTimestamps: number[] = [];
   private maxCallsPerMin: number;
   private provider: string;
   private processing = false;
+  private lastCallTime = 0;
+  private minIntervalMs: number;
+  private maxRetries: number;
+  private retryBaseMs: number;
 
-  constructor(provider: string, maxCallsPerMin: number) {
+  constructor(provider: string, maxCallsPerMin: number, options?: RateLimiterOptions) {
     this.provider = provider;
     this.maxCallsPerMin = maxCallsPerMin;
+    this.minIntervalMs = options?.minIntervalMs ?? 1500;
+    this.maxRetries = options?.maxRetries ?? 3;
+    this.retryBaseMs = options?.retryBaseMs ?? 5000;
   }
 
   async execute<T>(endpoint: string, fn: () => Promise<T>): Promise<T> {
@@ -41,15 +57,30 @@ export class RateLimiter {
       const now = Date.now();
       this.callTimestamps = this.callTimestamps.filter((t) => now - t < 60_000);
 
+      // Per-minute rate limit
       if (this.callTimestamps.length >= this.maxCallsPerMin) {
-        // Wait until oldest call expires
         const waitMs = 60_000 - (now - this.callTimestamps[0]) + 100;
         await new Promise((r) => setTimeout(r, waitMs));
         continue;
       }
 
+      // Minimum spacing between calls (prevents bursting)
+      const sinceLast = Date.now() - this.lastCallTime;
+      if (sinceLast < this.minIntervalMs) {
+        await new Promise((r) => setTimeout(r, this.minIntervalMs - sinceLast));
+      }
+
       const item = this.queue.shift()!;
+      await this.executeWithRetry(item);
+    }
+
+    this.processing = false;
+  }
+
+  private async executeWithRetry(item: QueueItem): Promise<void> {
+    for (let attempt = 0; attempt <= this.maxRetries; attempt++) {
       this.callTimestamps.push(Date.now());
+      this.lastCallTime = Date.now();
 
       const start = Date.now();
       try {
@@ -57,16 +88,29 @@ export class RateLimiter {
         const duration = Date.now() - start;
         await this.logApiCall(item.endpoint, 200, duration);
         item.resolve(result);
+        return;
       } catch (err: unknown) {
         const duration = Date.now() - start;
         const status = (err as { response?: { status?: number } })?.response?.status || 0;
         const message = err instanceof Error ? err.message : 'Unknown error';
+
+        // Retry on 403 (rate limit) or 429 (too many requests)
+        if ((status === 403 || status === 429) && attempt < this.maxRetries) {
+          const backoffMs = this.retryBaseMs * Math.pow(2, attempt);
+          logger.info(
+            { endpoint: item.endpoint, attempt: attempt + 1, maxRetries: this.maxRetries, backoffMs, status },
+            `Rate limited (${status}) — retrying after ${backoffMs}ms`,
+          );
+          await this.logApiCall(item.endpoint, status, duration, `${message} (retry ${attempt + 1})`);
+          await new Promise((r) => setTimeout(r, backoffMs));
+          continue;
+        }
+
         await this.logApiCall(item.endpoint, status, duration, message);
         item.reject(err);
+        return;
       }
     }
-
-    this.processing = false;
   }
 
   private async logApiCall(endpoint: string, statusCode: number, durationMs: number, error?: string): Promise<void> {

@@ -128,25 +128,29 @@ export class WalletDiscovery {
   private async discoverFromDexTrades(): Promise<{ added: number; candidates: number }> {
     logger.info('Pipeline 1: Fetching smart money DEX trades...');
     const allTrades: SmartMoneyDexTrade[] = [];
+    let consecutiveErrors = 0;
 
-    for (let page = 1; page <= 10; page++) {
+    for (let page = 1; page <= 5; page++) {
       try {
         const trades = await this.nansen.smartMoneyDexTrades({
           labels: ['Smart Trader', '30D Smart Trader', '90D Smart Trader', '180D Smart Trader', 'Fund'],
           limit: 100,
           page,
         });
+        consecutiveErrors = 0;
         allTrades.push(...trades);
         if (trades.length < 100) break;
       } catch (err: unknown) {
         const axErr = err as { response?: { status?: number }; message?: string };
         const status = axErr.response?.status;
-        if (status === 403) {
-          logger.info({ page, trades: allTrades.length }, 'Nansen dex-trades page limit reached (403)');
+        consecutiveErrors++;
+        if (status === 403 || status === 429) {
+          logger.warn({ page, trades: allTrades.length }, `Nansen dex-trades rate limited (${status}) after retries exhausted`);
         } else {
           logger.warn({ page, status, err: axErr.message }, 'Failed to fetch dex-trades page');
         }
-        break;
+        // If we already have some data, use what we have; otherwise try next page once more
+        if (consecutiveErrors >= 2 || allTrades.length > 0) break;
       }
     }
 
@@ -226,9 +230,12 @@ export class WalletDiscovery {
     }
 
     // Step 2: For each token, pull PnL leaderboard to find top profitable traders
+    // Limit to top 15 tokens to stay within rate limits (15 calls + 1 screener = 16 per cycle)
+    const tokensToProcess = tokens.slice(0, 15);
     const walletScores = new Map<string, { label: string; totalPnl: number; totalTrades: number; tokensFound: number }>();
+    let consecutiveErrors = 0;
 
-    for (const token of tokens) {
+    for (const token of tokensToProcess) {
       try {
         const leaders = await this.nansen.tokenPnlLeaderboard(token.address, {
           pnlUsdMin: 100,
@@ -236,6 +243,7 @@ export class WalletDiscovery {
           limit: 25,
         });
 
+        consecutiveErrors = 0;
         for (const leader of leaders) {
           if (!leader.trader_address) continue;
           // Skip if PnL is negative
@@ -252,12 +260,19 @@ export class WalletDiscovery {
         }
       } catch (err: unknown) {
         const axErr = err as { response?: { status?: number }; message?: string };
-        // 403 = rate limited, stop hitting more tokens
-        if (axErr.response?.status === 403) {
-          logger.info({ tokensProcessed: tokens.indexOf(token) + 1 }, 'Nansen leaderboard rate limited — stopping');
-          break;
+        consecutiveErrors++;
+        const status = axErr.response?.status;
+        if (status === 403 || status === 429) {
+          logger.warn(
+            { tokensProcessed: tokensToProcess.indexOf(token) + 1, total: tokensToProcess.length },
+            `Nansen leaderboard rate limited (${status}) after retries exhausted`,
+          );
+          // If we have some data, use it; if 2+ consecutive failures, stop
+          if (consecutiveErrors >= 2) break;
+        } else {
+          logger.warn({ token: token.symbol, err: axErr.message }, 'PnL leaderboard failed for token');
+          if (consecutiveErrors >= 3) break;
         }
-        logger.warn({ token: token.symbol, err: axErr.message }, 'PnL leaderboard failed for token');
       }
     }
 

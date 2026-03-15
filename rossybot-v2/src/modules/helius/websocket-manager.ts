@@ -21,6 +21,7 @@ export class HeliusWebSocketManager extends EventEmitter {
   private staleCheckInterval: ReturnType<typeof setInterval> | null = null;
   private pongTimeout: ReturnType<typeof setTimeout> | null = null;
   private lastMessageAt: number = Date.now();
+  private lastTxAt: number = 0;
   private activeSubscriptionIds: number[] = [];
   private isConnecting = false;
   private isFallbackMode = false;
@@ -115,6 +116,7 @@ export class HeliusWebSocketManager extends EventEmitter {
     this.isConnecting = false;
     this.reconnectAttempt = 0;
     this.lastMessageAt = Date.now();
+    this.lastTxAt = 0; // Reset — will be set on first tx notification
 
     logger.info({ wallets: this.subscribedWallets.size }, 'Helius WebSocket connected');
     await this.logHealth(WsHealthEvent.CONNECTED, {});
@@ -153,6 +155,7 @@ export class HeliusWebSocketManager extends EventEmitter {
 
       // Handle transaction notification
       if (msg.method === 'transactionNotification' && msg.params?.result) {
+        this.lastTxAt = Date.now();
         this.txNotificationCount++;
         if (this.txNotificationCount <= 5 || this.txNotificationCount % 10 === 0) {
           const sig = msg.params.result?.signature || msg.params.result?.transaction?.transaction?.signatures?.[0] || '?';
@@ -258,13 +261,28 @@ export class HeliusWebSocketManager extends EventEmitter {
       }, config.helius.pongTimeoutMs);
     }, config.helius.pingIntervalMs);
 
-    // Stale check every 30 seconds
+    // Stale check every 30 seconds — check TRANSACTION flow, not just pong
     this.staleCheckInterval = setInterval(async () => {
-      const elapsed = Date.now() - this.lastMessageAt;
-      if (elapsed > config.helius.staleTimeoutMs) {
-        logger.warn({ elapsedMs: elapsed }, 'Helius WebSocket stale — no messages for 2 min, reconnecting');
-        await this.logHealth(WsHealthEvent.STALE_DETECTED, { elapsedMs: elapsed });
+      // Connection-level staleness (no pong/message at all)
+      const msgElapsed = Date.now() - this.lastMessageAt;
+      if (msgElapsed > config.helius.staleTimeoutMs) {
+        logger.warn({ elapsedMs: msgElapsed }, 'Helius WebSocket stale — no messages at all, reconnecting');
+        await this.logHealth(WsHealthEvent.STALE_DETECTED, { elapsedMs: msgElapsed });
         this.ws?.terminate();
+        return;
+      }
+
+      // Subscription-level staleness: connection alive (pong works) but no tx notifications
+      // Only check if we've been connected long enough and have received at least 1 tx before
+      const TX_STALE_MS = 5 * 60 * 1000; // 5 minutes with zero tx notifications
+      if (this.lastTxAt > 0) {
+        const txElapsed = Date.now() - this.lastTxAt;
+        if (txElapsed > TX_STALE_MS) {
+          logger.warn({ txElapsedMs: txElapsed, lastTxAgo: `${Math.round(txElapsed / 1000)}s` },
+            'Helius subscription stale — connection alive but no tx for 5 min, resubscribing');
+          await this.logHealth(WsHealthEvent.STALE_DETECTED, { txElapsedMs: txElapsed, action: 'resubscribe' });
+          await this.rebuildSubscription();
+        }
       }
     }, 30_000);
   }
@@ -324,6 +342,7 @@ export class HeliusWebSocketManager extends EventEmitter {
     subscribedWallets: number;
     reconnectAttempt: number;
     lastMessageAgoMs: number;
+    lastTxAgoMs: number;
     totalMessages: number;
     txNotifications: number;
   } {
@@ -333,6 +352,7 @@ export class HeliusWebSocketManager extends EventEmitter {
       subscribedWallets: this.subscribedWallets.size,
       reconnectAttempt: this.reconnectAttempt,
       lastMessageAgoMs: Date.now() - this.lastMessageAt,
+      lastTxAgoMs: this.lastTxAt > 0 ? Date.now() - this.lastTxAt : -1,
       totalMessages: this.messageCount,
       txNotifications: this.txNotificationCount,
     };

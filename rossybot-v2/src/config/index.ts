@@ -33,7 +33,7 @@ export const config = {
   helius: {
     apiKey: env.HELIUS_API_KEY,
     rpcUrl: env.HELIUS_RPC_URL || `https://mainnet.helius-rpc.com/?api-key=${env.HELIUS_API_KEY}`,
-    wsUrl: env.HELIUS_WS_URL || `wss://atlas-mainnet.helius-rpc.com/?api-key=${env.HELIUS_API_KEY}`,
+    wsUrl: env.HELIUS_WS_URL || `wss://mainnet.helius-rpc.com/?api-key=${env.HELIUS_API_KEY}`,
     pingIntervalMs: 30_000,
     pongTimeoutMs: 10_000,
     staleTimeoutMs: 1_800_000, // 30 minutes — wallets may not trade for hours

@@ -274,13 +274,16 @@ export class HeliusWebSocketManager extends EventEmitter {
 
       // Subscription-level staleness: connection alive (pong works) but no tx notifications
       // Only check if we've been connected long enough and have received at least 1 tx before
-      const TX_STALE_MS = 5 * 60 * 1000; // 5 minutes with zero tx notifications
+      // 30 min threshold — smart money wallets may go hours between trades
+      const TX_STALE_MS = 30 * 60 * 1000;
       if (this.lastTxAt > 0) {
         const txElapsed = Date.now() - this.lastTxAt;
         if (txElapsed > TX_STALE_MS) {
-          logger.warn({ txElapsedMs: txElapsed, lastTxAgo: `${Math.round(txElapsed / 1000)}s` },
-            'Helius subscription stale — connection alive but no tx for 5 min, resubscribing');
+          logger.warn({ txElapsedMs: txElapsed, lastTxAgo: `${Math.round(txElapsed / 60000)}min` },
+            'Helius subscription stale — no tx for 30 min, resubscribing');
           await this.logHealth(WsHealthEvent.STALE_DETECTED, { txElapsedMs: txElapsed, action: 'resubscribe' });
+          // Reset lastTxAt so we don't immediately retrigger on next check cycle
+          this.lastTxAt = Date.now();
           await this.rebuildSubscription();
         }
       }

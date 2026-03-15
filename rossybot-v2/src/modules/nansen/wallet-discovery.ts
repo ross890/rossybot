@@ -29,10 +29,13 @@ export class WalletDiscovery {
 
   /** Seed initial wallets into DB */
   async seedWallets(capitalTier: CapitalTier): Promise<string[]> {
-    const eligible = SEED_WALLETS.filter((w) => {
-      const tierOrder = [CapitalTier.MICRO, CapitalTier.SMALL, CapitalTier.MEDIUM, CapitalTier.FULL];
-      return tierOrder.indexOf(w.minTier) <= tierOrder.indexOf(capitalTier);
-    });
+    // In shadow mode, seed ALL wallets regardless of tier for max signal coverage
+    const eligible = config.shadowMode
+      ? SEED_WALLETS
+      : SEED_WALLETS.filter((w) => {
+          const tierOrder = [CapitalTier.MICRO, CapitalTier.SMALL, CapitalTier.MEDIUM, CapitalTier.FULL];
+          return tierOrder.indexOf(w.minTier) <= tierOrder.indexOf(capitalTier);
+        });
 
     for (const w of eligible) {
       await query(

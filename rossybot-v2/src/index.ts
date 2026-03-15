@@ -72,9 +72,8 @@ class RossyBotV2 {
       walletsToMonitor: tierCfg.walletsMonitored,
     }, 'Capital tier determined');
 
-    // 3. Seed wallets, purge weak ones, and load from DB
+    // 3. Seed wallets and load from DB (keep previously discovered wallets)
     await this.walletDiscovery.seedWallets(tier);
-    await this.walletDiscovery.purgeWeakWallets();
     const allActiveWallets = await this.walletDiscovery.getActiveWallets();
 
     // Helius WS monitors top N wallets (tier-limited)

@@ -227,6 +227,7 @@ export class HeliusWebSocketManager extends EventEmitter {
         method: 'getTransaction',
         params: [signature, {
           encoding: 'jsonParsed',
+          commitment: 'confirmed',
           maxSupportedTransactionVersion: 0,
         }],
       }, { timeout: 10_000 });
@@ -238,6 +239,8 @@ export class HeliusWebSocketManager extends EventEmitter {
           transaction: resp.data.result,
         };
         this.emit('transaction', result);
+      } else {
+        logger.warn({ sig: signature.slice(0, 12), error: resp.data?.error }, 'getTransaction returned null — tx may not be confirmed yet');
       }
     } catch (err) {
       logger.debug({ err, sig: signature.slice(0, 12) }, 'Failed to fetch transaction for log notification');

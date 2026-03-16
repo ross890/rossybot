@@ -410,7 +410,28 @@ class RossyBotV2 {
           return;
         }
 
-        const positionSize = this.capitalManager.getPositionSize();
+        let positionSize = this.capitalManager.getPositionSize();
+
+        // Scale position size down for dip entries — less capital at risk
+        const entryMomentum = signal.validation.dexData?.priceChange?.h24 ?? 0;
+        if (entryMomentum < 0) {
+          let dipMultiplier: number;
+          if (entryMomentum >= -10) {
+            dipMultiplier = 0.85;   // Small dip: 85% size
+          } else if (entryMomentum >= -25) {
+            dipMultiplier = 0.70;   // Moderate dip: 70% size
+          } else {
+            dipMultiplier = 0.60;   // Deep dip: 60% size
+          }
+          positionSize = Math.max(positionSize * dipMultiplier, signal.tierConfig.minPositionSol);
+          logger.info({
+            token: signal.tokenMint.slice(0, 8),
+            momentum: entryMomentum.toFixed(1),
+            dipMultiplier,
+            adjustedSize: positionSize.toFixed(3),
+          }, 'Dip entry — reduced position size');
+        }
+
         let posView: PositionView;
 
         if (this.liveTracker) {

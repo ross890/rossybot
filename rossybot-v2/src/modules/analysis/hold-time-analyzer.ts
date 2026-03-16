@@ -1,6 +1,5 @@
 import { logger } from '../../utils/logger.js';
 import { query, getMany, getOne } from '../../db/database.js';
-import { fetchDexPair, getPriceUsd } from '../validation/dexscreener.js';
 
 /**
  * Wallet hold-time profile — tells us whether a wallet's trades
@@ -35,8 +34,6 @@ interface RoundTrip {
   buySol: number;
   sellSol: number | null;
   pnlPct: number | null;   // null if still holding
-  currentPriceUsd: number | null; // for open positions
-  entryPriceApprox: number | null;
 }
 
 export class HoldTimeAnalyzer {
@@ -90,10 +87,7 @@ export class HoldTimeAnalyzer {
     // Pair BUY→SELL per token (FIFO matching)
     const roundTrips = this.pairTrades(txs);
 
-    // For open positions, check current price
-    await this.enrichOpenPositions(roundTrips);
-
-    // Calculate metrics
+    // Calculate metrics (no DexScreener calls — uses SOL values from transactions only)
     return this.calculateProfile(address, walletRow.label, roundTrips);
   }
 
@@ -141,8 +135,6 @@ export class HoldTimeAnalyzer {
             buySol,
             sellSol,
             pnlPct,
-            currentPriceUsd: null,
-            entryPriceApprox: null,
           });
         }
       }
@@ -159,46 +151,11 @@ export class HoldTimeAnalyzer {
           buySol: Number(buy.estimated_sol_value) || 0,
           sellSol: null,
           pnlPct: null,
-          currentPriceUsd: null,
-          entryPriceApprox: null,
         });
       }
     }
 
     return roundTrips;
-  }
-
-  /**
-   * For open positions, fetch current DexScreener price to estimate unrealized PnL.
-   * Rate-limits to avoid hammering DexScreener.
-   */
-  private async enrichOpenPositions(roundTrips: RoundTrip[]): Promise<void> {
-    const openPositions = roundTrips.filter((rt) => rt.sellTime === null);
-
-    // Deduplicate by token mint
-    const uniqueMints = [...new Set(openPositions.map((rt) => rt.tokenMint))];
-
-    // Limit to 10 price lookups per wallet analysis
-    for (const mint of uniqueMints.slice(0, 10)) {
-      try {
-        const pair = await fetchDexPair(mint);
-        if (!pair) continue;
-
-        const currentPrice = getPriceUsd(pair);
-        if (currentPrice <= 0) continue;
-
-        // Apply current price to all open positions for this token
-        for (const rt of openPositions) {
-          if (rt.tokenMint === mint) {
-            rt.currentPriceUsd = currentPrice;
-            // We can't perfectly calculate PnL without knowing entry price in USD,
-            // but we can flag that they're still holding (bag-holding indicator)
-          }
-        }
-      } catch {
-        // Silent — best effort
-      }
-    }
   }
 
   private calculateProfile(address: string, label: string, roundTrips: RoundTrip[]): HoldTimeProfile {

@@ -717,6 +717,9 @@ class RossyBotV2 {
     });
 
     this.telegram.setPositionsCallback(() => this.getOpenPositions());
+    this.telegram.setPumpFunPositionsCallback(() =>
+      this.pumpFunTracker.getOpenPositions().map((p) => ({ ...p } as Record<string, unknown>)),
+    );
     this.telegram.setWsHealthCallback(() => this.wsManager.getStatus());
     this.telegram.setNansenUsageCallback(() => this.nansen.usage);
     this.telegram.setDiscoveryCallback(() => this.walletDiscovery.runDiscovery());

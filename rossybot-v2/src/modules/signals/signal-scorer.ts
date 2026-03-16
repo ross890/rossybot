@@ -79,9 +79,10 @@ function scoreWalletQuality(
     const nansenEstWinRate = ev.nansenTrades > 0
       ? Math.min(0.85, 0.50 + Math.max(0, ev.nansenRoi) / 1000)
       : 0;
-    // Nansen avg PnL: use ROI / trade count as rough per-trade avg, capped
-    const nansenEstAvgPnl = ev.nansenTrades > 0
-      ? Math.min(50, Math.max(0, ev.nansenRoi / Math.max(1, ev.nansenTrades)))
+    // Nansen avg PnL: use ROI as quality signal (best token ROI → estimated per-trade EV)
+    // ROI 150% → 15%, ROI 300% → 30%, ROI 500% → 50% (capped)
+    const nansenEstAvgPnl = ev.nansenRoi > 0
+      ? Math.min(50, ev.nansenRoi / 10)
       : 0;
 
     const blendedWinRate = ourWeight * ev.winRate + nansenWeight * nansenEstWinRate;

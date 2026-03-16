@@ -175,6 +175,7 @@ class RossyBotV2 {
       console.log(`Startup purge: removed ${purged} weak/unproven wallets`);
     }
     await this.walletDiscovery.enforceMinimumPnl();
+    await this.walletDiscovery.backfillNansenRoi();
     const activityDeactivated = await this.walletDiscovery.enforceTradeActivity(true);
     if (activityDeactivated > 0) {
       console.log(`Deactivated ${activityDeactivated} inactive wallets (no on-chain activity in 7 days)`);

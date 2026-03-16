@@ -12,6 +12,7 @@ interface WalletCandidate {
   tradeCount: number;
   totalVolumeUsd: number;
   tokensTraded: number;
+  bestRoi: number;
   score: number;
 }
 
@@ -68,6 +69,32 @@ export class WalletDiscovery {
 
     logger.info({ count: eligible.length, tier: capitalTier }, 'Seed wallets loaded');
     return eligible.map((w) => w.address);
+  }
+
+  /**
+   * Backfill nansen_roi_percent for wallets that have PnL data but no ROI.
+   * Estimates ROI from PnL / trade count — conservative but better than 0.
+   * Run on startup to fix wallets added before ROI was stored.
+   */
+  async backfillNansenRoi(): Promise<number> {
+    // Estimate: if a wallet has $10K PnL across 20 trades, avg PnL per trade ≈ $500
+    // Assume avg position size ~$1K → ROI ≈ 50% per trade → overall ROI ~1000%
+    // Simplified: ROI ≈ (pnl_usd / max(trade_count, 1)) * 10 (assumes ~$100 avg cost basis per trade)
+    const result = await query(
+      `UPDATE alpha_wallets
+       SET nansen_roi_percent = LEAST(
+         (COALESCE(nansen_pnl_usd, 0) / GREATEST(COALESCE(nansen_trade_count, 1), 1)) * 10,
+         5000
+       )
+       WHERE COALESCE(nansen_roi_percent, 0) = 0
+         AND COALESCE(nansen_pnl_usd, 0) > 0
+       RETURNING address`,
+    );
+    const count = result.rowCount || 0;
+    if (count > 0) {
+      logger.info({ count }, 'Backfilled nansen_roi_percent for existing wallets');
+    }
+    return count;
   }
 
   /** Deactivate wallets below $1K PnL minimum (run on startup to clean existing data) */
@@ -275,6 +302,7 @@ export class WalletDiscovery {
         tradeCount: data.totalTrades,
         totalVolumeUsd: data.totalPnl,
         tokensTraded: data.tokensFound,
+        bestRoi: data.bestRoi,
         score: pnlScore + tradeScore + diversityScore,
       });
     }
@@ -322,9 +350,9 @@ export class WalletDiscovery {
         // No score yet or decent score — reactivate
         await query(
           `UPDATE alpha_wallets SET active = TRUE, label = $2, nansen_trade_count = $3,
-                  nansen_pnl_usd = $4, last_validated_at = NOW()
+                  nansen_pnl_usd = $4, nansen_roi_percent = $5, last_validated_at = NOW()
            WHERE address = $1`,
-          [candidate.address, candidate.label, candidate.tradeCount, candidate.totalVolumeUsd],
+          [candidate.address, candidate.label, candidate.tradeCount, candidate.totalVolumeUsd, candidate.bestRoi],
         );
         if (this.onNewWallet) this.onNewWallet(candidate.address);
         logger.info({ address: candidate.address.slice(0, 8), pnl: candidate.totalVolumeUsd }, 'Reactivated wallet');
@@ -332,12 +360,13 @@ export class WalletDiscovery {
       }
 
       const result = await query(
-        `INSERT INTO alpha_wallets (address, label, source, nansen_trade_count, nansen_pnl_usd, tier, active, helius_subscribed)
-         VALUES ($1, $2, $3, $4, $5, $6, TRUE, FALSE)
+        `INSERT INTO alpha_wallets (address, label, source, nansen_trade_count, nansen_pnl_usd, nansen_roi_percent, tier, active, helius_subscribed)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, TRUE, FALSE)
          ON CONFLICT (address) DO UPDATE SET
            label = $2,
            nansen_trade_count = $4,
            nansen_pnl_usd = $5,
+           nansen_roi_percent = $6,
            last_validated_at = NOW()
          RETURNING (xmax = 0) AS is_new`,
         [
@@ -346,6 +375,7 @@ export class WalletDiscovery {
           WalletSource.NANSEN_DISCOVERY,
           candidate.tradeCount,
           candidate.totalVolumeUsd,
+          candidate.bestRoi,
           WalletTier.B,
         ],
       );

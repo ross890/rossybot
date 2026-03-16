@@ -61,7 +61,7 @@ export async function checkRugSafety(mintAddress: string): Promise<{ result: Rug
     const reasons: string[] = [];
     if (!mintAuthorityRevoked) reasons.push('Mint authority not revoked');
     if (!freezeAuthorityRevoked) reasons.push('Freeze authority not revoked');
-    if (topHolderConcentration > 50) reasons.push(`Top 10 holders: ${topHolderConcentration.toFixed(1)}% (>50%)`);
+    if (topHolderConcentration > 65) reasons.push(`Top 10 holders: ${topHolderConcentration.toFixed(1)}% (>65%)`);
 
     const passed = reasons.length === 0;
 

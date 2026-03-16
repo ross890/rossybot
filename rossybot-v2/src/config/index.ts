@@ -87,7 +87,7 @@ export const TIER_CONFIGS: Record<CapitalTier, TierConfig> = {
     stopLoss: -0.20,
     hardKill: -0.25,
     partialExitsEnabled: false,
-    walletConfluenceRequired: 2,
+    walletConfluenceRequired: 1,
     confluenceWindow: 30,
     timeKills: [
       { hours: 1, minPnlPct: 0.05 },
@@ -114,7 +114,7 @@ export const TIER_CONFIGS: Record<CapitalTier, TierConfig> = {
     stopLoss: -0.20,
     hardKill: -0.25,
     partialExitsEnabled: false,
-    walletConfluenceRequired: 2,
+    walletConfluenceRequired: 1,
     confluenceWindow: 30,
     timeKills: [
       { hours: 1, minPnlPct: 0.05 },

@@ -102,6 +102,11 @@ export class SwapExecutor {
         const currentPriorityFee = attempt === 0 ? priorityFee : priorityFee * 2;
 
         // 1. Get quote
+        const jupHeaders: Record<string, string> = {};
+        if (config.jupiter.apiKey) {
+          jupHeaders['x-api-key'] = config.jupiter.apiKey;
+        }
+
         const quoteResponse = await axios.get(`${config.jupiter.apiUrl}/quote`, {
           params: {
             inputMint,
@@ -110,6 +115,7 @@ export class SwapExecutor {
             slippageBps,
             onlyDirectRoutes: false,
           },
+          headers: jupHeaders,
           timeout: 10_000,
         });
 
@@ -125,7 +131,10 @@ export class SwapExecutor {
           wrapAndUnwrapSol: true,
           computeUnitPriceMicroLamports: currentPriorityFee,
           dynamicComputeUnitLimit: true,
-        }, { timeout: 15_000 });
+        }, {
+          headers: { ...jupHeaders, 'Content-Type': 'application/json' },
+          timeout: 15_000,
+        });
 
         const { swapTransaction } = swapResponse.data;
         if (!swapTransaction) {

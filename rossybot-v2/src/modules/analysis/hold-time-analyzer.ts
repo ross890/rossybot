@@ -341,8 +341,10 @@ export class HoldTimeAnalyzer {
             reason,
           }, 'Seed wallet DEMOTED — not a quick flipper');
         } else {
+          // Don't fully deactivate — keep wallet active for pump.fun signals
+          // Standard pipeline will skip pumpfun_only wallets
           await query(
-            `UPDATE alpha_wallets SET active = FALSE WHERE address = $1`, [profile.address],
+            `UPDATE alpha_wallets SET pumpfun_only = TRUE WHERE address = $1`, [profile.address],
           );
           deactivated.push(profile.address);
           logger.warn({
@@ -351,7 +353,7 @@ export class HoldTimeAnalyzer {
             score: profile.shortTermAlphaScore,
             medianHold: `${Math.round(profile.medianHoldTimeMins / 60)}h`,
             reason,
-          }, 'Wallet DEACTIVATED — not a quick flipper');
+          }, 'Wallet set to PUMP.FUN ONLY — bag-holder for standard trades');
         }
         continue;
       }

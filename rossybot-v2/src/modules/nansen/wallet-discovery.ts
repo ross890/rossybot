@@ -302,6 +302,32 @@ export class WalletDiscovery {
 
   private async addWallet(candidate: WalletCandidate): Promise<boolean> {
     try {
+      // Check if wallet exists but was deactivated — reactivate if it now qualifies
+      const existing = await getMany<{ address: string; active: boolean; short_term_alpha_score: number | null }>(
+        `SELECT address, active, short_term_alpha_score FROM alpha_wallets WHERE address = $1`,
+        [candidate.address],
+      );
+
+      if (existing.length > 0 && !existing[0].active) {
+        // Previously deactivated — only reactivate if it was deactivated because it
+        // had no data (score is null), not because it was proven bad (score < 25)
+        const score = existing[0].short_term_alpha_score;
+        if (score !== null && score < 25) {
+          // Proven bad — don't reactivate
+          return false;
+        }
+        // No score yet or decent score — reactivate
+        await query(
+          `UPDATE alpha_wallets SET active = TRUE, label = $2, nansen_trade_count = $3,
+                  nansen_pnl_usd = $4, last_validated_at = NOW()
+           WHERE address = $1`,
+          [candidate.address, candidate.label, candidate.tradeCount, candidate.totalVolumeUsd],
+        );
+        if (this.onNewWallet) this.onNewWallet(candidate.address);
+        logger.info({ address: candidate.address.slice(0, 8), pnl: candidate.totalVolumeUsd }, 'Reactivated wallet');
+        return true;
+      }
+
       const result = await query(
         `INSERT INTO alpha_wallets (address, label, source, nansen_trade_count, nansen_pnl_usd, tier, active, helius_subscribed)
          VALUES ($1, $2, $3, $4, $5, $6, TRUE, FALSE)

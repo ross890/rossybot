@@ -269,6 +269,34 @@ async function migrate() {
     )
   `);
 
+  // --- Pump.fun positions ---
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS pumpfun_positions (
+      id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+      token_address TEXT NOT NULL,
+      token_symbol TEXT,
+      bonding_curve_address TEXT,
+      entry_price_sol DECIMAL NOT NULL,
+      entry_time TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      alpha_buy_time TIMESTAMPTZ,
+      signal_wallets TEXT[] DEFAULT '{}',
+      capital_tier TEXT NOT NULL,
+      simulated_entry_sol DECIMAL NOT NULL,
+      status TEXT NOT NULL DEFAULT 'OPEN',
+      curve_fill_pct_at_entry DECIMAL DEFAULT 0,
+      current_curve_fill_pct DECIMAL DEFAULT 0,
+      last_curve_check_sol DECIMAL DEFAULT 0,
+      graduated BOOLEAN DEFAULT FALSE,
+      graduated_at TIMESTAMPTZ,
+      current_price DECIMAL DEFAULT 0,
+      peak_price DECIMAL DEFAULT 0,
+      pnl_percent DECIMAL DEFAULT 0,
+      exit_reason TEXT,
+      closed_at TIMESTAMPTZ,
+      hold_time_mins INT
+    )
+  `);
+
   // --- Indexes ---
   await pool.query(`CREATE INDEX IF NOT EXISTS idx_wallet_tx_wallet ON wallet_transactions(wallet_address)`);
   await pool.query(`CREATE INDEX IF NOT EXISTS idx_wallet_tx_token ON wallet_transactions(token_mint)`);
@@ -279,6 +307,8 @@ async function migrate() {
   await pool.query(`CREATE INDEX IF NOT EXISTS idx_shadow_positions_status ON shadow_positions(status)`);
   await pool.query(`CREATE INDEX IF NOT EXISTS idx_ws_health_event ON ws_health(event)`);
   await pool.query(`CREATE INDEX IF NOT EXISTS idx_api_call_log_provider ON api_call_log(provider, timestamp)`);
+  await pool.query(`CREATE INDEX IF NOT EXISTS idx_pumpfun_positions_status ON pumpfun_positions(status)`);
+  await pool.query(`CREATE INDEX IF NOT EXISTS idx_pumpfun_positions_token ON pumpfun_positions(token_address)`);
 
   console.log('✅ All migrations complete');
   await pool.end();

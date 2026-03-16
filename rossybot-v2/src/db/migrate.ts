@@ -52,6 +52,22 @@ async function migrate() {
     END $$
   `);
 
+  // Add short-term alpha scoring columns
+  await pool.query(`
+    DO $$ BEGIN
+      IF NOT EXISTS (
+        SELECT 1 FROM information_schema.columns
+        WHERE table_name = 'alpha_wallets' AND column_name = 'short_term_alpha_score'
+      ) THEN
+        ALTER TABLE alpha_wallets ADD COLUMN short_term_alpha_score INT DEFAULT 0;
+        ALTER TABLE alpha_wallets ADD COLUMN round_trips_analyzed INT DEFAULT 0;
+        ALTER TABLE alpha_wallets ADD COLUMN pct_profitable_48h DECIMAL DEFAULT 0;
+        ALTER TABLE alpha_wallets ADD COLUMN median_hold_time_mins INT DEFAULT 0;
+        ALTER TABLE alpha_wallets ADD COLUMN alpha_analyzed_at TIMESTAMPTZ;
+      END IF;
+    END $$
+  `);
+
   // 2. wallet_transactions
   await pool.query(`
     CREATE TABLE IF NOT EXISTS wallet_transactions (

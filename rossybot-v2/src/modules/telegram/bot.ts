@@ -18,6 +18,7 @@ export class TelegramService {
   private getWsHealth: (() => Record<string, unknown>) | null = null;
   private getNansenUsage: (() => Record<string, unknown>) | null = null;
   private onKill: ((token: string) => Promise<{ success: boolean; token?: string; error?: string }>) | null = null;
+  private onHoldTimeAnalysis: (() => Promise<string[]>) | null = null;
 
   constructor() {
     this.bot = new TelegramBot(config.telegram.botToken, {
@@ -48,6 +49,7 @@ export class TelegramService {
   setWsHealthCallback(cb: () => Record<string, unknown>): void { this.getWsHealth = cb; }
   setNansenUsageCallback(cb: () => Record<string, unknown>): void { this.getNansenUsage = cb; }
   setKillCallback(cb: (token: string) => Promise<{ success: boolean; token?: string; error?: string }>): void { this.onKill = cb; }
+  setHoldTimeCallback(cb: () => Promise<string[]>): void { this.onHoldTimeAnalysis = cb; }
 
   get isPaused(): boolean { return this.paused; }
 
@@ -640,6 +642,28 @@ export class TelegramService {
         await this.bot.sendMessage(msg.chat.id, lines.join('\n'));
       } catch (err) {
         await this.bot.sendMessage(msg.chat.id, '❌ Failed to load PnL data');
+      }
+    });
+
+    this.bot.onText(/\/holdtime/, async (msg) => {
+      if (msg.chat.id.toString() !== this.chatId) return;
+      if (!this.onHoldTimeAnalysis) {
+        await this.bot.sendMessage(msg.chat.id, '❌ Hold-time analysis not available');
+        return;
+      }
+      await this.bot.sendMessage(msg.chat.id, '🔍 Running hold-time analysis...');
+      try {
+        const lines = await this.onHoldTimeAnalysis();
+        if (lines.length === 0) {
+          await this.bot.sendMessage(msg.chat.id, '📭 No wallet trade data to analyze yet');
+          return;
+        }
+        const output = `📊 HOLD-TIME ANALYSIS\n\n${lines.join('\n\n')}`;
+        for (const chunk of this.chunkMessage(output)) {
+          await this.bot.sendMessage(msg.chat.id, chunk);
+        }
+      } catch (err) {
+        await this.bot.sendMessage(msg.chat.id, '❌ Hold-time analysis failed');
       }
     });
 

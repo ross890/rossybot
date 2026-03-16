@@ -628,6 +628,33 @@ class RossyBotV2 {
         return this.liveTracker!.forceClose(tokenIdentifier);
       });
     }
+
+    // /holdtime command — run hold-time analysis on demand
+    this.telegram.setHoldTimeCallback(async () => {
+      const analyzer = this.walletDiscovery.getHoldTimeAnalyzer();
+      const profiles = await analyzer.analyzeAllWallets();
+      return profiles.map((p) => analyzer.formatProfileForTelegram(p));
+    });
+
+    // Hold-time enforcement alerts
+    this.walletDiscovery.setHoldTimeCallback(async (results) => {
+      if (results.deactivated.length > 0) {
+        await this.telegram.send(
+          `🚫 HOLD-TIME ENFORCEMENT\n` +
+          `├ Deactivated: ${results.deactivated.length} wallet(s) — proven bag-holders\n` +
+          `│  ${results.deactivated.map((a) => a.slice(0, 8)).join(', ')}\n` +
+          `└ These wallets don't profit within our 48h window`,
+        );
+      }
+      if (results.demoted.length > 0) {
+        await this.telegram.send(
+          `⚠️ HOLD-TIME DEMOTION\n` +
+          `├ Demoted to Tier B: ${results.demoted.length} wallet(s)\n` +
+          `│  ${results.demoted.map((a) => a.slice(0, 8)).join(', ')}\n` +
+          `└ Poor short-term alpha — deprioritized in ranking`,
+        );
+      }
+    });
   }
 
   /** Handle sell signals from alpha wallets */

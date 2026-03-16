@@ -63,7 +63,7 @@ export class LiveTracker {
     const result = await this.swapExecutor.buyToken(signal.tokenMint, positionSizeSol, liquidityUsd);
 
     if (!result.success) {
-      logger.error({ error: result.error, token: tokenSymbol }, 'BUY swap failed');
+      logger.error({ error: result.error, token: tokenSymbol }, `BUY swap failed: ${result.error}`);
       this.onSwapFailed?.(tokenSymbol, result.error || 'Unknown error', 'BUY');
       return null;
     }

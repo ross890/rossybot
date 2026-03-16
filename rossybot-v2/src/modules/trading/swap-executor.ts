@@ -185,7 +185,7 @@ export class SwapExecutor {
 
       } catch (err) {
         const errMsg = err instanceof Error ? err.message : String(err);
-        logger.error({ err: errMsg, attempt, type: isBuy ? 'BUY' : 'SELL' }, 'Swap attempt failed');
+        logger.error({ err: errMsg, attempt, type: isBuy ? 'BUY' : 'SELL' }, `Swap attempt failed: ${errMsg}`);
 
         if (attempt >= config.jupiter.maxRetries) {
           return {

@@ -140,9 +140,20 @@ export class EntryEngine {
     }
 
     if (!validation.passed) {
+      // Find the specific check that failed and log its reason
+      const failedCheck = validation.failReason === 'FAILED_SAFETY' ? validation.safety
+        : validation.failReason === 'FAILED_LIQUIDITY' ? validation.liquidity
+        : validation.failReason === 'FAILED_MOMENTUM' ? validation.momentum
+        : validation.failReason === 'FAILED_MCAP' ? validation.mcap
+        : validation.failReason === 'FAILED_AGE' ? validation.age
+        : null;
       logger.info({
         token: mint.slice(0, 8),
         reason: validation.failReason,
+        detail: failedCheck?.reason || 'unknown',
+        mcap: validation.dexData?.marketCap || validation.dexData?.fdv,
+        liquidity: validation.dexData?.liquidity?.usd,
+        momentum24h: validation.dexData?.priceChange?.h24,
       }, 'Signal skipped — validation failed');
       this.processedTokens.delete(mint);
       this.pendingBuys.delete(mint);

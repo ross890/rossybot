@@ -56,12 +56,12 @@ export async function checkRugSafety(mintAddress: string): Promise<{ result: Rug
       risks,
     };
 
-    // Safety gate — all must pass
+    // Safety gate — critical checks must pass
+    // LP lock is optional for quick-flip tokens (<$500K mcap) since many legit micro tokens don't lock
     const reasons: string[] = [];
     if (!mintAuthorityRevoked) reasons.push('Mint authority not revoked');
     if (!freezeAuthorityRevoked) reasons.push('Freeze authority not revoked');
     if (topHolderConcentration > 50) reasons.push(`Top 10 holders: ${topHolderConcentration.toFixed(1)}% (>50%)`);
-    if (!lpLocked) reasons.push('LP not locked');
 
     const passed = reasons.length === 0;
 

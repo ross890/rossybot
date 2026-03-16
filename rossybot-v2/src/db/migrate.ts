@@ -68,6 +68,18 @@ async function migrate() {
     END $$
   `);
 
+  // Add pumpfun_only column — wallets deactivated from standard trading but still active for pump.fun
+  await pool.query(`
+    DO $$ BEGIN
+      IF NOT EXISTS (
+        SELECT 1 FROM information_schema.columns
+        WHERE table_name = 'alpha_wallets' AND column_name = 'pumpfun_only'
+      ) THEN
+        ALTER TABLE alpha_wallets ADD COLUMN pumpfun_only BOOLEAN DEFAULT FALSE;
+      END IF;
+    END $$
+  `);
+
   // 2. wallet_transactions
   await pool.query(`
     CREATE TABLE IF NOT EXISTS wallet_transactions (

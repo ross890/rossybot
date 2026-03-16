@@ -252,24 +252,44 @@ class RossyBotV2 {
         const tierCfg = getTierConfig(this.capitalManager.tier);
 
         for (const signal of signals) {
-          // Send Telegram alert for every detected trade (pipeline visibility)
-          const walletRow = await (await import('./db/database.js')).getOne<{ label: string }>(
-            `SELECT label FROM alpha_wallets WHERE address = $1`, [signal.walletAddress],
+          // Look up wallet info (label + stats) for noise filtering
+          const walletRow = await (await import('./db/database.js')).getOne<{
+            label: string; pumpfun_only: boolean;
+            our_total_trades: number; our_win_rate: number; our_avg_pnl_percent: number;
+          }>(
+            `SELECT label, COALESCE(pumpfun_only, FALSE) as pumpfun_only,
+                    COALESCE(our_total_trades, 0) as our_total_trades,
+                    COALESCE(our_win_rate, 0) as our_win_rate,
+                    COALESCE(our_avg_pnl_percent, 0) as our_avg_pnl_percent
+               FROM alpha_wallets WHERE address = $1`, [signal.walletAddress],
           );
-          await this.telegram.sendTradeDetected({
-            action: signal.type === SignalType.BUY ? 'BUY' : 'SELL',
-            walletAddress: signal.walletAddress,
-            walletLabel: walletRow?.label || signal.walletAddress.slice(0, 8),
-            tokenMint: signal.tokenMint,
-            tokenSymbol: signal.tokenMint.slice(0, 6),
-            amountUsd: Math.abs(signal.solDelta) * 170,
-            detectionLagMs: signal.detectionLagMs,
-          });
+
+          // Suppress Telegram noise: skip BUY/SELL notifications for wallets
+          // with 2+ trades and poor stats (won't pass scoring anyway)
+          const trades = Number(walletRow?.our_total_trades || 0);
+          const winRate = Number(walletRow?.our_win_rate || 0);
+          const avgPnl = Number(walletRow?.our_avg_pnl_percent || 0);
+          const isProvenWeak = trades >= 2 && (winRate < 0.40 || avgPnl < 0.05);
+
+          if (!isProvenWeak) {
+            await this.telegram.sendTradeDetected({
+              action: signal.type === SignalType.BUY ? 'BUY' : 'SELL',
+              walletAddress: signal.walletAddress,
+              walletLabel: walletRow?.label || signal.walletAddress.slice(0, 8),
+              tokenMint: signal.tokenMint,
+              tokenSymbol: signal.tokenMint.slice(0, 6),
+              amountUsd: Math.abs(signal.solDelta) * 170,
+              detectionLagMs: signal.detectionLagMs,
+            });
+          }
+
+          // Route signals: pumpfun_only wallets skip standard pipeline
+          const isPumpFunOnly = walletRow?.pumpfun_only === true;
 
           if (signal.type === SignalType.BUY) {
             if (signal.isPumpFun) {
               await this.handlePumpFunBuy(signal);
-            } else {
+            } else if (!isPumpFunOnly) {
               await this.entryEngine.processBuySignal(signal, tierCfg);
             }
           } else if (signal.type === SignalType.SELL) {
@@ -319,10 +339,11 @@ class RossyBotV2 {
         // Look up per-wallet EV stats from DB (our stats + Nansen bootstrap)
         const { getMany: dbGetMany } = await import('./db/database.js');
         const walletStats = await dbGetMany<{
-          address: string; our_total_trades: number; our_win_rate: number; our_avg_pnl_percent: number;
+          address: string; label: string; our_total_trades: number; our_win_rate: number; our_avg_pnl_percent: number;
           nansen_roi_percent: number; nansen_trade_count: number; nansen_pnl_usd: number;
         }>(
-          `SELECT address, COALESCE(our_total_trades, 0) as our_total_trades,
+          `SELECT address, COALESCE(label, '') as label,
+                  COALESCE(our_total_trades, 0) as our_total_trades,
                   COALESCE(our_win_rate, 0) as our_win_rate,
                   COALESCE(our_avg_pnl_percent, 0) as our_avg_pnl_percent,
                   COALESCE(nansen_roi_percent, 0) as nansen_roi_percent,
@@ -350,8 +371,49 @@ class RossyBotV2 {
           breakdown: score.breakdown,
         }, 'Signal scored');
 
-        // Score gate — reject weak signals
+        // Send signal log with actual scoring outcome (not just validation pass/fail)
         const minScore = signal.tierConfig.minSignalScore;
+        const scorePassed = score.total >= minScore && !score.walletRejected;
+        try {
+          const dex = signal.validation.dexData;
+          await this.telegram.sendSignalLog({
+            tokenSymbol: signal.tokenSymbol || signal.tokenMint.slice(0, 8),
+            tokenMint: signal.tokenMint,
+            passed: scorePassed,
+            failReason: !scorePassed ? `Score ${score.total.toFixed(0)}/${minScore}` : null,
+            wallets: signal.walletAddresses.map((addr) => {
+              const stats = walletEvMap.get(addr);
+              return {
+                address: addr,
+                label: walletStats.find((w) => w.address === addr)?.label || addr.slice(0, 8),
+                trades: stats?.trades || 0,
+                winRate: stats?.winRate || 0,
+                avgPnl: stats?.avgPnl || 0,
+              };
+            }),
+            totalMonitored: this.walletAddresses.length,
+            safety: signal.validation.safety,
+            liquidity: signal.validation.liquidity,
+            momentum: signal.validation.momentum,
+            mcap: signal.validation.mcap,
+            age: signal.validation.age,
+            dexData: dex ? {
+              mcap: dex.marketCap || dex.fdv || 0,
+              liquidity: dex.liquidity?.usd || 0,
+              priceChange24h: dex.priceChange?.h24 || 0,
+              priceChange6h: dex.priceChange?.h6 || 0,
+              priceChange1h: dex.priceChange?.h1 || 0,
+              volume24h: dex.volume?.h24 || 0,
+              ageDays: dex.pairCreatedAt ? (Date.now() - dex.pairCreatedAt) / 86400000 : 0,
+            } : null,
+            validationMs: signal.validation.durationMs,
+            action: scorePassed ? 'ENTERED' : `REJECTED (${score.total.toFixed(0)}/${minScore})`,
+          });
+        } catch (err) {
+          logger.error({ err }, 'Error sending signal log');
+        }
+
+        // Score gate — reject weak signals
         if (score.total < minScore) {
           logger.info({
             token: signal.tokenMint.slice(0, 8),
@@ -489,59 +551,8 @@ class RossyBotV2 {
       }
     });
 
-    // --- Entry Engine → Signal validation log ---
-    this.entryEngine.setSignalLogCallback(async (signal, validation) => {
-      try {
-        const { getMany: dbGetMany } = await import('./db/database.js');
-        const walletRows = await dbGetMany<{
-          address: string; label: string; our_total_trades: number; our_win_rate: number; our_avg_pnl_percent: number;
-        }>(
-          `SELECT address, label, COALESCE(our_total_trades, 0) as our_total_trades,
-                  COALESCE(our_win_rate, 0) as our_win_rate,
-                  COALESCE(our_avg_pnl_percent, 0) as our_avg_pnl_percent
-             FROM alpha_wallets WHERE address = ANY($1)`,
-          [signal.walletAddresses],
-        );
-        const walletMap = new Map(walletRows.map((w) => [w.address, w]));
-
-        const dex = validation.dexData;
-        await this.telegram.sendSignalLog({
-          tokenSymbol: signal.tokenSymbol || signal.tokenMint.slice(0, 8),
-          tokenMint: signal.tokenMint,
-          passed: signal.passed,
-          failReason: signal.failReason,
-          wallets: signal.walletAddresses.map((addr) => {
-            const w = walletMap.get(addr);
-            return {
-              address: addr,
-              label: w?.label || addr.slice(0, 8),
-              trades: Number(w?.our_total_trades || 0),
-              winRate: Number(w?.our_win_rate || 0),
-              avgPnl: Number(w?.our_avg_pnl_percent || 0),
-            };
-          }),
-          totalMonitored: this.walletAddresses.length,
-          safety: validation.safety,
-          liquidity: validation.liquidity,
-          momentum: validation.momentum,
-          mcap: validation.mcap,
-          age: validation.age,
-          dexData: dex ? {
-            mcap: dex.marketCap || dex.fdv || 0,
-            liquidity: dex.liquidity?.usd || 0,
-            priceChange24h: dex.priceChange?.h24 || 0,
-            priceChange6h: dex.priceChange?.h6 || 0,
-            priceChange1h: dex.priceChange?.h1 || 0,
-            volume24h: dex.volume?.h24 || 0,
-            ageDays: dex.pairCreatedAt ? (Date.now() - dex.pairCreatedAt) / 86400000 : 0,
-          } : null,
-          validationMs: validation.durationMs,
-          action: signal.passed ? 'ENTERED' : 'SKIPPED',
-        });
-      } catch (err) {
-        logger.error({ err }, 'Error in signal log callback');
-      }
-    });
+    // Signal log is now sent from the signal callback (below) after scoring,
+    // so the action reflects the actual outcome (ENTERED vs REJECTED by score).
 
     // --- Position close callback (works for both trackers) ---
     const handlePositionClose = async (posView: PositionView) => {
@@ -766,10 +777,10 @@ class RossyBotV2 {
     this.walletDiscovery.setHoldTimeCallback(async (results) => {
       if (results.deactivated.length > 0) {
         await this.telegram.send(
-          `🚫 HOLD-TIME ENFORCEMENT\n` +
-          `├ Deactivated: ${results.deactivated.length} wallet(s) — proven bag-holders\n` +
+          `🎰 HOLD-TIME ENFORCEMENT\n` +
+          `├ Pump.fun only: ${results.deactivated.length} wallet(s) — bag-holders for standard trades\n` +
           `│  ${results.deactivated.map((a) => a.slice(0, 8)).join(', ')}\n` +
-          `└ These wallets don't profit within our 48h window`,
+          `└ Still active for pump.fun signals (short holds work there)`,
         );
       }
       if (results.demoted.length > 0) {

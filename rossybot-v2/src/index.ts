@@ -779,6 +779,12 @@ class RossyBotV2 {
       this.telegram.setDropCallback(async (tokenIdentifier: string) => {
         return this.liveTracker!.forceRemove(tokenIdentifier);
       });
+      this.liveTracker.setManualSellCallback((tokenSymbol: string) => {
+        this.telegram.send(
+          `🗑 Auto-dropped $${tokenSymbol}\n` +
+          `└ Token no longer in wallet (manual sell detected)`,
+        ).catch(() => {});
+      });
     }
 
     // /holdtime command — run hold-time analysis on demand

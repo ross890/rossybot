@@ -13,7 +13,8 @@ const envSchema = z.object({
   WALLET_PRIVATE_KEY: z.string().optional().default(''),
   TELEGRAM_BOT_TOKEN: z.string(),
   TELEGRAM_CHAT_ID: z.string(),
-  JUPITER_API_URL: z.string().default('https://quote-api.jup.ag/v6'),
+  JUPITER_API_URL: z.string().default('https://api.jup.ag/swap/v1'),
+  JUPITER_API_KEY: z.string().optional().default(''),
   SHADOW_MODE: z.string().default('false'),
 });
 
@@ -59,6 +60,7 @@ export const config = {
   },
   jupiter: {
     apiUrl: env.JUPITER_API_URL,
+    apiKey: env.JUPITER_API_KEY,
     defaultSlippageBps: 150, // 1.5%
     thinLiquiditySlippageBps: 300, // 3%
     maxRetries: 1,

@@ -183,7 +183,7 @@ export class WalletDiscovery {
   /**
    * Single pipeline: screen trending tokens → get PnL leaderboard for each →
    * find the most profitable traders across multiple tokens and watch them.
-   * Uses ~9 API calls per cycle (1 screener + 8 leaderboard).
+   * Uses ~26 API calls per cycle (1 screener + 25 leaderboard).
    */
   private async discoverTopTraders(): Promise<{ added: number; candidates: number; tokensScreened: number }> {
     // Step 1: Find trending Solana memecoins via token screener
@@ -208,9 +208,9 @@ export class WalletDiscovery {
       return { added: 0, candidates: 0, tokensScreened: 0 };
     }
 
-    // Step 2: For the top 8 tokens, pull 30-day PnL leaderboard to find top profitable traders
-    // 8 tokens keeps us well within rate limits (1 screener + 8 leaderboard = 9 calls/cycle)
-    const tokensToProcess = tokens.slice(0, 8);
+    // Step 2: For the top 25 tokens, pull 30-day PnL leaderboard to find top profitable traders
+    // 25 tokens keeps us within rate limits (1 screener + 25 leaderboard = 26 calls/cycle, limit is 80/min)
+    const tokensToProcess = tokens.slice(0, 25);
     const walletScores = new Map<string, {
       label: string;
       totalPnl: number;

@@ -849,7 +849,7 @@ export class TelegramService {
     tokenMint: string;
     passed: boolean;
     failReason: string | null;
-    wallets: Array<{ address: string; label: string; trades: number; winRate: number; avgPnl: number }>;
+    wallets: Array<{ address: string; label: string; trades: number; winRate: number; avgPnl: number; nansenRoi?: number; nansenPnlUsd?: number }>;
     totalMonitored: number;
     safety: { passed: boolean; reason?: string };
     liquidity: { passed: boolean; reason?: string; details?: Record<string, unknown> };
@@ -873,10 +873,16 @@ export class TelegramService {
       check.passed ? '✅' : '❌';
 
     const walletLines = data.wallets.map((w) => {
-      const stats = w.trades > 0
+      const ourStats = w.trades > 0
         ? `${w.trades}t ${(w.winRate * 100).toFixed(0)}%W EV ${w.avgPnl >= 0 ? '+' : ''}${(w.avgPnl * 100).toFixed(1)}%`
         : 'new';
-      return `│  ${w.label} (${w.address.slice(0, 6)}): ${stats}`;
+      // Show Nansen data when available so we can diagnose blended quality
+      const nansenTag = w.nansenRoi && w.nansenRoi > 0
+        ? ` | Nansen: ${w.nansenRoi.toFixed(0)}% ROI`
+        : w.nansenPnlUsd && w.nansenPnlUsd > 0
+          ? ` | Nansen: $${this.formatNum(w.nansenPnlUsd)} PnL (ROI=0!)`
+          : '';
+      return `│  ${w.label} (${w.address.slice(0, 6)}): ${ourStats}${nansenTag}`;
     });
 
     const dex = data.dexData;

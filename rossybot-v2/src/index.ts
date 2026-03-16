@@ -266,10 +266,14 @@ class RossyBotV2 {
 
           // Suppress Telegram noise: skip BUY/SELL notifications for wallets
           // with 2+ trades and poor stats (won't pass scoring anyway)
+          // Catches: <40% WR, <5% avg PnL, OR coin-flip wallets (≤55% WR AND ≤10% PnL)
           const trades = Number(walletRow?.our_total_trades || 0);
           const winRate = Number(walletRow?.our_win_rate || 0);
           const avgPnl = Number(walletRow?.our_avg_pnl_percent || 0);
-          const isProvenWeak = trades >= 2 && (winRate < 0.40 || avgPnl < 0.05);
+          const isProvenWeak = trades >= 2 && (
+            winRate < 0.40 || avgPnl < 0.05 ||
+            (winRate <= 0.55 && avgPnl <= 0.10)  // coin-flip + low EV = noise
+          );
 
           if (!isProvenWeak) {
             await this.telegram.sendTradeDetected({
@@ -389,6 +393,8 @@ class RossyBotV2 {
                 trades: stats?.trades || 0,
                 winRate: stats?.winRate || 0,
                 avgPnl: stats?.avgPnl || 0,
+                nansenRoi: stats?.nansenRoi || 0,
+                nansenPnlUsd: stats?.nansenPnlUsd || 0,
               };
             }),
             totalMonitored: this.walletAddresses.length,
@@ -430,16 +436,16 @@ class RossyBotV2 {
           return;
         }
 
-        // Wallet quality floor — reject if no wallet meets 50% WR / 25% avg PnL
+        // Wallet quality floor — reject if no wallet meets blended 45% WR / 15% avg PnL
         if (score.walletRejected) {
           logger.info({
             token: signal.tokenMint.slice(0, 8),
             wallets: signal.walletAddresses.length,
-          }, 'Skipping signal — no wallet meets quality floor (50% WR / 25% avg PnL)');
+          }, 'Skipping signal — no wallet meets blended quality floor (45% WR / 15% avg PnL)');
 
           await this.telegram.send(
             `⛔ Wallet quality too low: ${signal.tokenSymbol || signal.tokenMint.slice(0, 8)}\n` +
-            `No wallet meets 50% WR / 25% avg PnL floor\n` +
+            `No wallet meets 45% WR / 15% avg PnL floor (blended with Nansen)\n` +
             scoreDisplay,
           );
           return;

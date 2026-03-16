@@ -96,6 +96,9 @@ class RossyBotV2 {
   // Quick symbol cache for BUY/SELL notifications
   private symbolCache: Map<string, string> = new Map();
 
+  // Tokens we've closed/dropped — never re-buy in this session
+  private blockedTokens: Set<string> = new Set();
+
   // Pump.fun position tracking (runs alongside standard tracker)
   private pumpFunTracker: PumpFunTracker;
 
@@ -226,6 +229,24 @@ class RossyBotV2 {
       await this.liveTracker.loadOpenPositions();
     } else {
       await this.shadowTracker!.loadOpenPositions();
+    }
+
+    // 5b. Populate token blocklist from recently closed positions (last 24h)
+    try {
+      const { getMany: dbGetMany } = await import('./db/database.js');
+      const closedMints = await dbGetMany<{ token_address: string }>(
+        `SELECT DISTINCT token_address FROM positions WHERE status = 'CLOSED' AND closed_at > NOW() - INTERVAL '24 hours'
+         UNION
+         SELECT DISTINCT token_address FROM pumpfun_positions WHERE status = 'CLOSED' AND closed_at > NOW() - INTERVAL '24 hours'`,
+      );
+      for (const row of closedMints) {
+        this.blockedTokens.add(row.token_address);
+      }
+      if (this.blockedTokens.size > 0) {
+        logger.info({ count: this.blockedTokens.size }, 'Loaded blocked tokens from recent closed positions');
+      }
+    } catch (err) {
+      logger.error({ err }, 'Failed to load blocked tokens from DB');
     }
 
     // 6. Wire up callbacks
@@ -506,6 +527,11 @@ class RossyBotV2 {
           return;
         }
 
+        if (this.blockedTokens.has(signal.tokenMint)) {
+          logger.info({ token: signal.tokenMint.slice(0, 8) }, 'Skipping signal — token was previously closed/dropped');
+          return;
+        }
+
         let positionSize = this.capitalManager.getPositionSize();
 
         // Scale position size down for dip entries — less capital at risk
@@ -589,6 +615,8 @@ class RossyBotV2 {
 
     // --- Position close callback (works for both trackers) ---
     const handlePositionClose = async (posView: PositionView) => {
+      // Block token from being re-bought this session
+      this.blockedTokens.add(posView.token_address);
       try {
         const pnl = posView.pnl_percent;
         if (pnl >= 0) {
@@ -715,6 +743,7 @@ class RossyBotV2 {
 
     // --- Pump.fun tracker callbacks ---
     this.pumpFunTracker.setCloseCallback(async (pos) => {
+      this.blockedTokens.add(pos.token_address);
       try {
         const pnl = pos.pnl_percent;
         const emoji = pnl >= 0 ? '🟢' : '🔴';
@@ -852,6 +881,12 @@ class RossyBotV2 {
       // Skip if we also have a standard position
       if (this.hasPosition(mint)) {
         logger.info({ token: mint.slice(0, 8) }, 'Pump.fun skip — standard position exists');
+        return;
+      }
+
+      // Skip tokens we've previously closed/dropped
+      if (this.blockedTokens.has(mint)) {
+        logger.info({ token: mint.slice(0, 8) }, 'Pump.fun skip — token was previously closed/dropped');
         return;
       }
 

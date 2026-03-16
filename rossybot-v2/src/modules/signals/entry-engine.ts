@@ -155,7 +155,7 @@ export class EntryEngine {
         liquidity: validation.dexData?.liquidity?.usd,
         momentum24h: validation.dexData?.priceChange?.h24,
       }, `Signal skipped — ${validation.failReason}: ${failedCheck?.reason || 'unknown'}`);
-      this.processedTokens.delete(mint);
+      // Keep in processedTokens — don't allow re-entry with different wallet combos
       this.pendingBuys.delete(mint);
       return;
     }

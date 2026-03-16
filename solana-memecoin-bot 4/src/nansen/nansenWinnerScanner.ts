@@ -48,7 +48,7 @@ export class NansenWinnerScanner {
           },
           pagination: { page: 1, per_page: 20 },
           filters: {
-            pnl_usd_realised: { min: 200 },
+            pnl_usd_realised: { min: 20 },
           },
           order_by: [{ field: 'roi_percent_realised', direction: 'DESC' }],
         },
@@ -82,7 +82,7 @@ export class NansenWinnerScanner {
 
         if (result.isNew && result.id > 0) {
           // Store Nansen metadata
-          const fastTrackEligible = pnl >= 500 && roi >= 50;
+          const fastTrackEligible = pnl >= 100 && roi >= 50;
 
           await Database.updateEngineWalletNansenData(result.id, {
             nansen_label: trader.trader_label || null,

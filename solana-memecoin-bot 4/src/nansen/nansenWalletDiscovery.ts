@@ -51,11 +51,11 @@ interface NansenTokenPnl {
 // ============ CONSTANTS ============
 
 const SCAN_INTERVAL_MS = 6 * 60 * 60 * 1000; // 6 hours
-const MCAP_MIN = 30_000;
-const MCAP_MAX = 1_000_000;
+const MCAP_MIN = 10_000;
+const MCAP_MAX = 200_000;
 const MAX_TOKENS_PER_SCAN = 5;
 const MAX_TRADERS_PER_TOKEN = 20;
-const AVG_BUY_SIZE_MAX = 10_000; // Skip wallets with avg buy >$10K (not micro-cap traders)
+const AVG_BUY_SIZE_MAX = 500; // Skip wallets with avg buy >$500 (we trade ~1 SOL entries)
 
 // ============ DISCOVERY CLASS ============
 
@@ -181,7 +181,7 @@ export class NansenWalletDiscovery {
           },
           pagination: { page: 1, per_page: MAX_TRADERS_PER_TOKEN },
           filters: {
-            pnl_usd_realised: { min: 100 },
+            pnl_usd_realised: { min: 20 },
           },
           order_by: [{ field: 'pnl_usd_realised', direction: 'DESC' }],
         },
@@ -251,7 +251,7 @@ export class NansenWalletDiscovery {
         const winRate = pnlSummary.win_rate || 0;
         const totalPnl = pnlSummary.total_pnl_usd_realised || 0;
 
-        if (tokenCount < 10 || winRate < 0.25 || totalPnl < 10_000) {
+        if (tokenCount < 20 || winRate < 0.25 || totalPnl < 1_000) {
           logger.debug({
             wallet: candidate.walletAddress.slice(0, 8),
             tokenCount,
@@ -293,8 +293,8 @@ export class NansenWalletDiscovery {
         }
 
         // Step 8: Add to wallet engine with Nansen metadata
-        const fastTrackEligible = totalPnl > 10_000
-                                   && tokenCount >= 20
+        const fastTrackEligible = totalPnl > 1_000
+                                   && tokenCount >= 30
                                    && winRate >= 0.30;
 
         const result = await walletEngine.addCandidate(

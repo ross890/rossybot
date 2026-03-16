@@ -11,12 +11,14 @@ import type { ValidatedSignal } from '../signals/entry-engine.js';
 export class LiveTracker {
   private positions: Map<string, Position> = new Map();
   private priceCheckInterval: ReturnType<typeof setInterval> | null = null;
+  private balanceScanInterval: ReturnType<typeof setInterval> | null = null;
   private swapExecutor: SwapExecutor;
 
   // Callbacks
   private onPositionClosed: ((pos: Position) => void) | null = null;
   private onAlphaExitTriggered: ((pos: Position, walletAddress: string, sellPct: number) => void) | null = null;
   private onSwapFailed: ((tokenSymbol: string, error: string, type: 'BUY' | 'SELL') => void) | null = null;
+  private onManualSellDetected: ((tokenSymbol: string) => void) | null = null;
 
   constructor(swapExecutor: SwapExecutor) {
     this.swapExecutor = swapExecutor;
@@ -34,18 +36,31 @@ export class LiveTracker {
     this.onSwapFailed = cb;
   }
 
+  setManualSellCallback(cb: (tokenSymbol: string) => void): void {
+    this.onManualSellDetected = cb;
+  }
+
   start(): void {
     this.priceCheckInterval = setInterval(
       () => this.checkPrices(),
       config.dexScreener.priceCheckIntervalMs,
     );
-    logger.info('Live position tracker started (price check every 10s)');
+    // Scan wallet balances every 5 minutes to detect manual sells
+    this.balanceScanInterval = setInterval(
+      () => this.scanWalletBalances(),
+      5 * 60 * 1000,
+    );
+    logger.info('Live position tracker started (price check every 10s, balance scan every 5m)');
   }
 
   stop(): void {
     if (this.priceCheckInterval) {
       clearInterval(this.priceCheckInterval);
       this.priceCheckInterval = null;
+    }
+    if (this.balanceScanInterval) {
+      clearInterval(this.balanceScanInterval);
+      this.balanceScanInterval = null;
     }
   }
 
@@ -173,6 +188,50 @@ export class LiveTracker {
     }
   }
 
+  /** Scan wallet for tokens we think we hold — auto-drop if balance is 0 */
+  private async scanWalletBalances(): Promise<void> {
+    const openPositions = Array.from(this.positions.values()).filter(
+      (p) => p.status !== PositionStatus.CLOSED,
+    );
+    if (openPositions.length === 0) return;
+
+    for (const pos of openPositions) {
+      try {
+        const balance = await this.swapExecutor.getTokenBalance(pos.token_address);
+        if (balance > 0) continue;
+
+        // Token is gone from wallet — manual sell detected
+        const tokenName = pos.token_symbol || pos.token_address.slice(0, 8);
+        logger.info({
+          id: pos.id.slice(0, 8),
+          token: tokenName,
+          holdMins: Math.round((Date.now() - pos.entry_time.getTime()) / (1000 * 60)),
+        }, 'Balance scan: token gone from wallet — auto-dropping position');
+
+        pos.status = PositionStatus.CLOSED;
+        pos.exit_reason = 'Manual sell detected (balance scan)';
+        pos.closed_at = new Date();
+        pos.hold_time_mins = Math.round((pos.closed_at.getTime() - pos.entry_time.getTime()) / (1000 * 60));
+
+        await this.updatePosition(pos);
+
+        if (this.onPositionClosed) {
+          try { await this.onPositionClosed(pos); } catch (err) {
+            logger.error({ err, posId: pos.id.slice(0, 8) }, 'Error in position close callback');
+          }
+        }
+
+        if (this.onManualSellDetected) {
+          try { this.onManualSellDetected(tokenName); } catch { /* ignore */ }
+        }
+
+        this.positions.delete(pos.id);
+      } catch (err) {
+        logger.error({ err, token: pos.token_symbol }, 'Balance scan failed for position');
+      }
+    }
+  }
+
   /** Force close a position by token (for /kill command) */
   async forceClose(tokenIdentifier: string): Promise<{ success: boolean; token?: string; error?: string }> {
     // Match by symbol or address prefix
@@ -187,6 +246,41 @@ export class LiveTracker {
     }
 
     await this.closePosition(match, 'Force close (/kill)');
+    return { success: true, token: match.token_symbol || match.token_address.slice(0, 8) };
+  }
+
+  /** Remove a position from tracking without executing a sell (for manually-sold tokens) */
+  async forceRemove(tokenIdentifier: string): Promise<{ success: boolean; token?: string; error?: string }> {
+    const match = Array.from(this.positions.values()).find((p) =>
+      p.status !== PositionStatus.CLOSED &&
+      (p.token_symbol?.toLowerCase() === tokenIdentifier.toLowerCase() ||
+       p.token_address.toLowerCase().startsWith(tokenIdentifier.toLowerCase())),
+    );
+
+    if (!match) {
+      return { success: false, error: `No open position found for "${tokenIdentifier}"` };
+    }
+
+    match.status = PositionStatus.CLOSED;
+    match.exit_reason = 'Manual sell — removed from tracking (/drop)';
+    match.closed_at = new Date();
+    match.hold_time_mins = Math.round((match.closed_at.getTime() - match.entry_time.getTime()) / (1000 * 60));
+
+    await this.updatePosition(match);
+
+    logger.info({
+      id: match.id.slice(0, 8),
+      token: match.token_symbol,
+      holdMins: match.hold_time_mins,
+    }, 'LIVE position DROPPED (manual sell)');
+
+    if (this.onPositionClosed) {
+      try { await this.onPositionClosed(match); } catch (err) {
+        logger.error({ err, posId: match.id.slice(0, 8) }, 'Error in position close callback');
+      }
+    }
+
+    this.positions.delete(match.id);
     return { success: true, token: match.token_symbol || match.token_address.slice(0, 8) };
   }
 

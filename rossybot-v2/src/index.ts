@@ -770,10 +770,20 @@ class RossyBotV2 {
     this.telegram.setPauseCallback(() => logger.info('Trading PAUSED via Telegram'));
     this.telegram.setResumeCallback(() => logger.info('Trading RESUMED via Telegram'));
 
-    // /kill command — live mode force close
+    // /kill command — live mode force close (sells token)
+    // /drop command — remove from tracking without selling (for manually-sold tokens)
     if (this.liveTracker) {
       this.telegram.setKillCallback(async (tokenIdentifier: string) => {
         return this.liveTracker!.forceClose(tokenIdentifier);
+      });
+      this.telegram.setDropCallback(async (tokenIdentifier: string) => {
+        return this.liveTracker!.forceRemove(tokenIdentifier);
+      });
+      this.liveTracker.setManualSellCallback((tokenSymbol: string) => {
+        this.telegram.send(
+          `🗑 Auto-dropped $${tokenSymbol}\n` +
+          `└ Token no longer in wallet (manual sell detected)`,
+        ).catch(() => {});
       });
     }
 

@@ -12,15 +12,15 @@ export const WALLET_ENGINE_CONFIG = {
 
   // ============ GMGN FILTERS ============
   GMGN_FILTERS: {
-    minPnl30d: 10_000,
+    minPnl30d: 1_000,
     minTotalTrades: 50,
     maxTotalTrades: 500,
     minWinRate: 0.30,
     maxWinRate: 0.70,
-    maxAvgEntryMcap: 500_000,
+    maxAvgEntryMcap: 200_000,
     minAvgHoldTimeMinutes: 5,
     maxAvgHoldTimeMinutes: 1440,
-    minDistinctTokens: 10,
+    minDistinctTokens: 20,
     maxSingleTokenPnlPercent: 0.50,
   },
 
@@ -28,7 +28,7 @@ export const WALLET_ENGINE_CONFIG = {
   MIN_OBSERVED_TRADES: 10,
   MIN_OBSERVED_EV: 0,
   MIN_OBSERVED_WIN_RATE: 0.25,
-  MAX_OBSERVED_AVG_MCAP: 500_000,
+  MAX_OBSERVED_AVG_MCAP: 200_000,
   MIN_OBSERVED_AVG_HOLD_MINUTES: 5,
   FAST_TRACK_WINNER_SCANS: 2,
   MAX_OBSERVED_TRADES_FOR_PURGE: 30,
@@ -73,7 +73,7 @@ export const WALLET_ENGINE_CONFIG = {
 
   // ============ OBSERVATION ============
   OBSERVATION_MCAP_MIN: 10_000,
-  OBSERVATION_MCAP_MAX: 1_000_000,
+  OBSERVATION_MCAP_MAX: 200_000,
   OBSERVATION_TRACK_HOURS: 48,
 } as const;
 

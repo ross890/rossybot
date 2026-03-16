@@ -14,7 +14,7 @@ const envSchema = z.object({
   TELEGRAM_BOT_TOKEN: z.string(),
   TELEGRAM_CHAT_ID: z.string(),
   JUPITER_API_URL: z.string().default('https://quote-api.jup.ag/v6'),
-  SHADOW_MODE: z.string().default('true'),
+  SHADOW_MODE: z.string().default('false'),
 });
 
 const parsed = envSchema.safeParse(process.env);
@@ -79,7 +79,7 @@ export const config = {
 export const TIER_CONFIGS: Record<CapitalTier, TierConfig> = {
   [CapitalTier.MICRO]: {
     tier: CapitalTier.MICRO,
-    maxPositions: 2,
+    maxPositions: 1,
     walletsMonitored: 50,
     positionSizePct: 0.50,
     minPositionSol: 0.3,

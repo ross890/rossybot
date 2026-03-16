@@ -154,7 +154,7 @@ export class EntryEngine {
         mcap: validation.dexData?.marketCap || validation.dexData?.fdv,
         liquidity: validation.dexData?.liquidity?.usd,
         momentum24h: validation.dexData?.priceChange?.h24,
-      }, 'Signal skipped — validation failed');
+      }, `Signal skipped — ${validation.failReason}: ${failedCheck?.reason || 'unknown'}`);
       this.processedTokens.delete(mint);
       this.pendingBuys.delete(mint);
       return;

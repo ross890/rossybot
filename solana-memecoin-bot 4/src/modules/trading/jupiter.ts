@@ -15,7 +15,8 @@ import { botWallet } from './wallet.js';
 
 // ============ CONSTANTS ============
 
-const JUPITER_API_URL = 'https://quote-api.jup.ag/v6';
+const JUPITER_API_URL = process.env.JUPITER_API_URL || 'https://api.jup.ag/swap/v1';
+const JUPITER_API_KEY = process.env.JUPITER_API_KEY || '';
 const SOL_MINT = 'So11111111111111111111111111111111111111112';
 
 // ============ TYPES ============
@@ -92,7 +93,10 @@ export class JupiterClient {
         asLegacyTransaction: 'false',
       });
 
-      const response = await fetch(`${JUPITER_API_URL}/quote?${params}`);
+      const headers: Record<string, string> = {};
+      if (JUPITER_API_KEY) headers['x-api-key'] = JUPITER_API_KEY;
+
+      const response = await fetch(`${JUPITER_API_URL}/quote?${params}`, { headers });
 
       if (!response.ok) {
         const errorText = await response.text();
@@ -151,9 +155,12 @@ export class JupiterClient {
         }
 
         // Step 2: Get swap transaction
+        const swapHeaders: Record<string, string> = { 'Content-Type': 'application/json' };
+        if (JUPITER_API_KEY) swapHeaders['x-api-key'] = JUPITER_API_KEY;
+
         const swapResponse = await fetch(`${JUPITER_API_URL}/swap`, {
           method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
+          headers: swapHeaders,
           body: JSON.stringify({
             quoteResponse: quote,
             userPublicKey: botWallet.getAddress(),

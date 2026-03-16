@@ -115,25 +115,61 @@ function scoreWalletQuality(
 }
 
 // --- Momentum (0-25) ---
-// Sweet spot: strong 24h momentum (40-120%), not overheated
+// Scores both upward momentum AND dip-buying opportunities using buy ratio context.
+// Buy ratio = h24 buys / (buys + sells). High buy ratio on a dip = smart accumulation.
 function scoreMomentum(dex: DexScreenerPair | null): number {
   if (!dex) return 0; // No data = no free points
 
   const h24 = dex.priceChange?.h24 || 0;
   const h1 = dex.priceChange?.h1 || 0;
 
-  // 24h momentum: 0% = 0, 50% = 15, 100% = 22, 200%+ = 15 (overheated penalty)
+  // Buy ratio from transaction counts
+  const txns = dex.txns?.h24;
+  const totalTxns = (txns?.buys ?? 0) + (txns?.sells ?? 0);
+  const buyRatio = totalTxns > 0 ? (txns?.buys ?? 0) / totalTxns : 0.5;
+
   let momentumScore: number;
-  if (h24 <= 0) {
-    momentumScore = 0;
-  } else if (h24 <= 100) {
-    momentumScore = (h24 / 100) * 22;
-  } else if (h24 <= 200) {
-    // Diminishing returns, slight penalty for overheated
-    momentumScore = 22 - ((h24 - 100) / 100) * 7;
+
+  if (h24 >= 0) {
+    // --- Positive momentum (unchanged logic) ---
+    if (h24 <= 100) {
+      momentumScore = (h24 / 100) * 22;
+    } else if (h24 <= 200) {
+      momentumScore = 22 - ((h24 - 100) / 100) * 7;
+    } else {
+      momentumScore = 15 - Math.min(10, (h24 - 200) / 100 * 5);
+    }
   } else {
-    momentumScore = 15 - Math.min(10, (h24 - 200) / 100 * 5);
+    // --- Negative momentum: score based on dip severity + buy ratio ---
+    // A dip with heavy buying = accumulation opportunity
+    // A dip with heavy selling = capitulation, avoid
+
+    if (buyRatio >= 0.50) {
+      // Accumulation: buyers active despite price drop — reward this
+      if (h24 >= -5) {
+        // Tiny pullback with buyers: 8-10 pts
+        momentumScore = 8 + buyRatio * 4; // 8-10
+      } else if (h24 >= -25) {
+        // Moderate dip with accumulation: 5-8 pts
+        const dipDepth = Math.abs(h24) / 25; // 0-1 normalized
+        momentumScore = 8 - dipDepth * 3;    // 8 → 5
+        // Extra reward for very high buy ratio (smart money conviction)
+        if (buyRatio >= 0.60) momentumScore += 2;
+      } else {
+        // Deep dip (-25% to -50%) with buyers still active: 3-5 pts
+        const dipDepth = Math.min(1, (Math.abs(h24) - 25) / 25);
+        momentumScore = 5 - dipDepth * 2;    // 5 → 3
+        if (buyRatio >= 0.55) momentumScore += 1;
+      }
+    } else if (buyRatio >= 0.40) {
+      // Mixed: roughly equal buys and sells — cautious score
+      momentumScore = Math.max(0, 3 - Math.abs(h24) / 20);
+    } else {
+      // Capitulation: sells dominating — no points
+      momentumScore = 0;
+    }
   }
+
   momentumScore = Math.max(0, momentumScore);
 
   // 1h recency bonus: positive recent movement is good (+3 max)

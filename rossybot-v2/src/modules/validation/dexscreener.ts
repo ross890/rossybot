@@ -45,7 +45,32 @@ export function checkMomentum(pair: DexScreenerPair, tierCfg: TierConfig): Valid
 
   const reasons: string[] = [];
 
-  // Must be up within range
+  // --- Death spiral detection for negative momentum ---
+  // Allow dips down to momentumMin (e.g. -50%), but reject death spirals
+  // where price is cratering across ALL timeframes with no buying activity
+  if (priceChange < 0) {
+    const h24 = pair.priceChange?.h24 ?? 0;
+    const h6 = pair.priceChange?.h6 ?? 0;
+    const h1 = pair.priceChange?.h1 ?? 0;
+
+    // Buy ratio: what fraction of transactions are buys (vs sells)
+    const txns24 = pair.txns?.h24;
+    const totalTxns = (txns24?.buys ?? 0) + (txns24?.sells ?? 0);
+    const buyRatio = totalTxns > 0 ? (txns24?.buys ?? 0) / totalTxns : 0;
+
+    // Death spiral: ALL timeframes deeply negative AND sells dominating
+    const isDeathSpiral = h24 < -40 && h6 < -25 && h1 < -10 && buyRatio < 0.35;
+
+    if (isDeathSpiral) {
+      return {
+        passed: false,
+        reason: `Death spiral: h24=${h24.toFixed(0)}% h6=${h6.toFixed(0)}% h1=${h1.toFixed(0)}% buyRatio=${(buyRatio * 100).toFixed(0)}%`,
+        details: { priceChange, h24, h6, h1, buyRatio, volumeMultiplier: volMultiplier, window, deathSpiral: true },
+      };
+    }
+  }
+
+  // Standard range check (now allows negative down to momentumMin)
   if (priceChange < tierCfg.momentumMin) {
     reasons.push(`Price change ${priceChange.toFixed(1)}% < ${tierCfg.momentumMin}% min`);
   }
@@ -58,12 +83,20 @@ export function checkMomentum(pair: DexScreenerPair, tierCfg: TierConfig): Valid
     reasons.push(`Volume ${volMultiplier.toFixed(1)}x < ${tierCfg.volumeMultiplierMin}x avg`);
   }
 
+  const buyRatio = getBuyRatio(pair);
   const passed = reasons.length === 0;
   return {
     passed,
     reason: passed ? undefined : reasons.join('; '),
-    details: { priceChange, volumeMultiplier: volMultiplier, window },
+    details: { priceChange, volumeMultiplier: volMultiplier, window, buyRatio },
   };
+}
+
+/** Calculate 24h buy ratio from DexScreener transaction data */
+export function getBuyRatio(pair: DexScreenerPair): number {
+  const txns = pair.txns?.h24;
+  const total = (txns?.buys ?? 0) + (txns?.sells ?? 0);
+  return total > 0 ? (txns?.buys ?? 0) / total : 0.5; // Default 0.5 if no data
 }
 
 export function checkMarketCap(pair: DexScreenerPair, tierCfg: TierConfig): ValidationCheckResult {

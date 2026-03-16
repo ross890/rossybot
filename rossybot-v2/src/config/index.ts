@@ -115,7 +115,7 @@ export const TIER_CONFIGS: Record<CapitalTier, TierConfig> = {
     mcapMax: 10_000_000,
     liquidityMin: 10_000,
     momentumWindow: '24h',
-    momentumMin: 0,
+    momentumMin: -50,
     momentumMax: 300,
     volumeMultiplierMin: 1,
     tokenMaxAgeDays: 30,
@@ -143,7 +143,7 @@ export const TIER_CONFIGS: Record<CapitalTier, TierConfig> = {
     mcapMax: 2_000_000,
     liquidityMin: 30_000,
     momentumWindow: '24h',
-    momentumMin: 0,
+    momentumMin: -50,
     momentumMax: 200,
     volumeMultiplierMin: 1,
     tokenMaxAgeDays: 30,
@@ -170,7 +170,7 @@ export const TIER_CONFIGS: Record<CapitalTier, TierConfig> = {
     mcapMax: 10_000_000,
     liquidityMin: 75_000,
     momentumWindow: '6h',
-    momentumMin: 0,
+    momentumMin: -50,
     momentumMax: 80,
     volumeMultiplierMin: 1,
     tokenMaxAgeDays: null,
@@ -198,7 +198,7 @@ export const TIER_CONFIGS: Record<CapitalTier, TierConfig> = {
     mcapMax: 50_000_000,
     liquidityMin: 50_000,
     momentumWindow: '6h',
-    momentumMin: 0,
+    momentumMin: -50,
     momentumMax: 80,
     volumeMultiplierMin: 1,
     tokenMaxAgeDays: null,
@@ -235,7 +235,7 @@ export function getTierConfig(tier: CapitalTier): TierConfig {
     mcapMin: 50_000,          // $50K (was $200K)
     mcapMax: 10_000_000,      // $10M (was $2M) — $30M+ is noise at micro capital
     liquidityMin: 5_000,      // $5K (was $20K)
-    momentumMin: 0,           // any momentum (was 20%) — not enforced in shadow mode
+    momentumMin: -60,           // allow deeper dips in shadow mode for data collection
     momentumMax: 500,         // up to 500% (was 200%)
     volumeMultiplierMin: 1,   // 1x (was 2x)
     tokenMaxAgeDays: null,    // no age limit (was 30d)

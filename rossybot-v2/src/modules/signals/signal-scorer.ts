@@ -87,16 +87,17 @@ function scoreWalletQuality(
     const blendedWinRate = ourWeight * ev.winRate + nansenWeight * nansenEstWinRate;
     const blendedAvgPnl = ourWeight * ev.avgPnl + nansenWeight * nansenEstAvgPnl;
 
-    // Hard floor: 50% win rate AND 25% avg PnL (blended)
-    // For wallets with 0 of our trades, Nansen data must be strong enough
-    if (blendedWinRate >= 0.50 && blendedAvgPnl >= 25) {
+    // Hard floor: 45% win rate AND 15% avg PnL (blended)
+    // Lowered from 50%/25% — Nansen estimates are conservative, and early in live
+    // trading we need enough signal flow to build our own performance data
+    if (blendedWinRate >= 0.45 && blendedAvgPnl >= 15) {
       anyWalletPassesFloor = true;
     }
 
-    // Confidence: ramp from 0.3 (no our trades, Nansen only) to 1.0 (10+ our trades)
-    // Nansen trades provide a smaller confidence boost
-    const nansenConfBoost = Math.min(0.2, (ev.nansenTrades / 50) * 0.2);
-    const confidence = Math.min(1.0, 0.3 + (ev.trades / 10) * 0.7 + nansenConfBoost);
+    // Confidence: ramp from 0.4 (no our trades, Nansen only) to 1.0 (10+ our trades)
+    // Nansen trades provide a confidence boost — these wallets were discovered as top PnL traders
+    const nansenConfBoost = Math.min(0.25, (ev.nansenTrades / 50) * 0.25);
+    const confidence = Math.min(1.0, 0.4 + (ev.trades / 10) * 0.6 + nansenConfBoost);
 
     // Win rate component (0-15): 50% = 0, 70% = 10.5, 90% = 15
     const wrScore = Math.max(0, (blendedWinRate - 0.5) * 37.5);

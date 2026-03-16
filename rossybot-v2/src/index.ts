@@ -15,6 +15,7 @@ import { CapitalManager } from './modules/trading/capital-manager.js';
 import { SwapExecutor } from './modules/trading/swap-executor.js';
 import { TelegramService } from './modules/telegram/index.js';
 import { PumpFunTracker, validatePumpFunSignal } from './modules/pumpfun/index.js';
+import { fetchDexPair } from './modules/validation/dexscreener.js';
 import { SignalType, type ParsedSignal, type PositionView } from './types/index.js';
 
 /** Convert ShadowPosition to common PositionView */
@@ -92,6 +93,12 @@ class RossyBotV2 {
   private liveTracker: LiveTracker | null = null;
   private swapExecutor: SwapExecutor | null = null;
 
+  // Quick symbol cache for BUY/SELL notifications
+  private symbolCache: Map<string, string> = new Map();
+
+  // Tokens we've closed/dropped — never re-buy in this session
+  private blockedTokens: Set<string> = new Set();
+
   // Pump.fun position tracking (runs alongside standard tracker)
   private pumpFunTracker: PumpFunTracker;
 
@@ -144,6 +151,23 @@ class RossyBotV2 {
 
   private hasPosition(tokenMint: string): boolean {
     return this.liveTracker?.hasPosition(tokenMint) ?? this.shadowTracker!.hasPosition(tokenMint);
+  }
+
+  /** Quick symbol lookup — cached, 2s timeout, falls back to mint prefix */
+  private async resolveSymbol(tokenMint: string): Promise<string> {
+    const cached = this.symbolCache.get(tokenMint);
+    if (cached) return cached;
+    try {
+      const pair = await Promise.race([
+        fetchDexPair(tokenMint),
+        new Promise<null>((_, reject) => setTimeout(() => reject(new Error('timeout')), 2000)),
+      ]);
+      const symbol = pair?.baseToken?.symbol || tokenMint.slice(0, 6);
+      this.symbolCache.set(tokenMint, symbol);
+      return symbol;
+    } catch {
+      return tokenMint.slice(0, 6);
+    }
   }
 
   async start(): Promise<void> {
@@ -205,6 +229,24 @@ class RossyBotV2 {
       await this.liveTracker.loadOpenPositions();
     } else {
       await this.shadowTracker!.loadOpenPositions();
+    }
+
+    // 5b. Populate token blocklist from recently closed positions (last 24h)
+    try {
+      const { getMany: dbGetMany } = await import('./db/database.js');
+      const closedMints = await dbGetMany<{ token_address: string }>(
+        `SELECT DISTINCT token_address FROM positions WHERE status = 'CLOSED' AND closed_at > NOW() - INTERVAL '24 hours'
+         UNION
+         SELECT DISTINCT token_address FROM pumpfun_positions WHERE status = 'CLOSED' AND closed_at > NOW() - INTERVAL '24 hours'`,
+      );
+      for (const row of closedMints) {
+        this.blockedTokens.add(row.token_address);
+      }
+      if (this.blockedTokens.size > 0) {
+        logger.info({ count: this.blockedTokens.size }, 'Loaded blocked tokens from recent closed positions');
+      }
+    } catch (err) {
+      logger.error({ err }, 'Failed to load blocked tokens from DB');
     }
 
     // 6. Wire up callbacks
@@ -276,12 +318,13 @@ class RossyBotV2 {
           );
 
           if (!isProvenWeak) {
+            const tokenSymbol = await this.resolveSymbol(signal.tokenMint);
             await this.telegram.sendTradeDetected({
               action: signal.type === SignalType.BUY ? 'BUY' : 'SELL',
               walletAddress: signal.walletAddress,
               walletLabel: walletRow?.label || signal.walletAddress.slice(0, 8),
               tokenMint: signal.tokenMint,
-              tokenSymbol: signal.tokenMint.slice(0, 6),
+              tokenSymbol,
               amountUsd: Math.abs(signal.solDelta) * 170,
               detectionLagMs: signal.detectionLagMs,
             });
@@ -484,6 +527,11 @@ class RossyBotV2 {
           return;
         }
 
+        if (this.blockedTokens.has(signal.tokenMint)) {
+          logger.info({ token: signal.tokenMint.slice(0, 8) }, 'Skipping signal — token was previously closed/dropped');
+          return;
+        }
+
         let positionSize = this.capitalManager.getPositionSize();
 
         // Scale position size down for dip entries — less capital at risk
@@ -567,6 +615,8 @@ class RossyBotV2 {
 
     // --- Position close callback (works for both trackers) ---
     const handlePositionClose = async (posView: PositionView) => {
+      // Block token from being re-bought this session
+      this.blockedTokens.add(posView.token_address);
       try {
         const pnl = posView.pnl_percent;
         if (pnl >= 0) {
@@ -693,6 +743,7 @@ class RossyBotV2 {
 
     // --- Pump.fun tracker callbacks ---
     this.pumpFunTracker.setCloseCallback(async (pos) => {
+      this.blockedTokens.add(pos.token_address);
       try {
         const pnl = pos.pnl_percent;
         const emoji = pnl >= 0 ? '🟢' : '🔴';
@@ -830,6 +881,12 @@ class RossyBotV2 {
       // Skip if we also have a standard position
       if (this.hasPosition(mint)) {
         logger.info({ token: mint.slice(0, 8) }, 'Pump.fun skip — standard position exists');
+        return;
+      }
+
+      // Skip tokens we've previously closed/dropped
+      if (this.blockedTokens.has(mint)) {
+        logger.info({ token: mint.slice(0, 8) }, 'Pump.fun skip — token was previously closed/dropped');
         return;
       }
 

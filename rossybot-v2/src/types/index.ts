@@ -213,6 +213,7 @@ export interface TierConfig {
   momentumMax: number;
   volumeMultiplierMin: number;
   tokenMaxAgeDays: number | null;
+  minSignalScore: number; // minimum score (0-100) to enter a trade
 }
 
 // --- Helius Types ---

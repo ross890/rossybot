@@ -15,6 +15,7 @@ import { CapitalManager } from './modules/trading/capital-manager.js';
 import { SwapExecutor } from './modules/trading/swap-executor.js';
 import { TelegramService } from './modules/telegram/index.js';
 import { PumpFunTracker, validatePumpFunSignal } from './modules/pumpfun/index.js';
+import { fetchDexPair } from './modules/validation/dexscreener.js';
 import { SignalType, type ParsedSignal, type PositionView } from './types/index.js';
 
 /** Convert ShadowPosition to common PositionView */
@@ -92,6 +93,9 @@ class RossyBotV2 {
   private liveTracker: LiveTracker | null = null;
   private swapExecutor: SwapExecutor | null = null;
 
+  // Quick symbol cache for BUY/SELL notifications
+  private symbolCache: Map<string, string> = new Map();
+
   // Pump.fun position tracking (runs alongside standard tracker)
   private pumpFunTracker: PumpFunTracker;
 
@@ -144,6 +148,23 @@ class RossyBotV2 {
 
   private hasPosition(tokenMint: string): boolean {
     return this.liveTracker?.hasPosition(tokenMint) ?? this.shadowTracker!.hasPosition(tokenMint);
+  }
+
+  /** Quick symbol lookup — cached, 2s timeout, falls back to mint prefix */
+  private async resolveSymbol(tokenMint: string): Promise<string> {
+    const cached = this.symbolCache.get(tokenMint);
+    if (cached) return cached;
+    try {
+      const pair = await Promise.race([
+        fetchDexPair(tokenMint),
+        new Promise<null>((_, reject) => setTimeout(() => reject(new Error('timeout')), 2000)),
+      ]);
+      const symbol = pair?.baseToken?.symbol || tokenMint.slice(0, 6);
+      this.symbolCache.set(tokenMint, symbol);
+      return symbol;
+    } catch {
+      return tokenMint.slice(0, 6);
+    }
   }
 
   async start(): Promise<void> {
@@ -276,12 +297,13 @@ class RossyBotV2 {
           );
 
           if (!isProvenWeak) {
+            const tokenSymbol = await this.resolveSymbol(signal.tokenMint);
             await this.telegram.sendTradeDetected({
               action: signal.type === SignalType.BUY ? 'BUY' : 'SELL',
               walletAddress: signal.walletAddress,
               walletLabel: walletRow?.label || signal.walletAddress.slice(0, 8),
               tokenMint: signal.tokenMint,
-              tokenSymbol: signal.tokenMint.slice(0, 6),
+              tokenSymbol,
               amountUsd: Math.abs(signal.solDelta) * 170,
               detectionLagMs: signal.detectionLagMs,
             });

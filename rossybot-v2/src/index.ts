@@ -298,14 +298,18 @@ class RossyBotV2 {
     // --- Entry Engine → Position Tracker ---
     this.entryEngine.setSignalCallback(async (signal: ValidatedSignal) => {
       try {
-        // Look up per-wallet EV stats from DB
+        // Look up per-wallet EV stats from DB (our stats + Nansen bootstrap)
         const { getMany: dbGetMany } = await import('./db/database.js');
         const walletStats = await dbGetMany<{
           address: string; our_total_trades: number; our_win_rate: number; our_avg_pnl_percent: number;
+          nansen_roi_percent: number; nansen_trade_count: number; nansen_pnl_usd: number;
         }>(
           `SELECT address, COALESCE(our_total_trades, 0) as our_total_trades,
                   COALESCE(our_win_rate, 0) as our_win_rate,
-                  COALESCE(our_avg_pnl_percent, 0) as our_avg_pnl_percent
+                  COALESCE(our_avg_pnl_percent, 0) as our_avg_pnl_percent,
+                  COALESCE(nansen_roi_percent, 0) as nansen_roi_percent,
+                  COALESCE(nansen_trade_count, 0) as nansen_trade_count,
+                  COALESCE(nansen_pnl_usd, 0) as nansen_pnl_usd
              FROM alpha_wallets WHERE address = ANY($1)`,
           [signal.walletAddresses],
         );
@@ -313,6 +317,9 @@ class RossyBotV2 {
           trades: Number(w.our_total_trades),
           winRate: Number(w.our_win_rate),
           avgPnl: Number(w.our_avg_pnl_percent),
+          nansenRoi: Number(w.nansen_roi_percent),
+          nansenTrades: Number(w.nansen_trade_count),
+          nansenPnlUsd: Number(w.nansen_pnl_usd),
         }]));
 
         // Score the signal
@@ -324,6 +331,39 @@ class RossyBotV2 {
           score: score.total,
           breakdown: score.breakdown,
         }, 'Signal scored');
+
+        // Score gate — reject weak signals
+        const minScore = signal.tierConfig.minSignalScore;
+        if (score.total < minScore) {
+          logger.info({
+            token: signal.tokenMint.slice(0, 8),
+            score: score.total,
+            minScore,
+            breakdown: score.breakdown,
+          }, 'Skipping signal — below minimum score');
+
+          await this.telegram.send(
+            `⛔ Signal rejected: ${signal.tokenSymbol || signal.tokenMint.slice(0, 8)}\n` +
+            `Score ${score.total.toFixed(0)}/${minScore} minimum\n` +
+            scoreDisplay,
+          );
+          return;
+        }
+
+        // Wallet quality floor — reject if no wallet meets 50% WR / 25% avg PnL
+        if (score.walletRejected) {
+          logger.info({
+            token: signal.tokenMint.slice(0, 8),
+            wallets: signal.walletAddresses.length,
+          }, 'Skipping signal — no wallet meets quality floor (50% WR / 25% avg PnL)');
+
+          await this.telegram.send(
+            `⛔ Wallet quality too low: ${signal.tokenSymbol || signal.tokenMint.slice(0, 8)}\n` +
+            `No wallet meets 50% WR / 25% avg PnL floor\n` +
+            scoreDisplay,
+          );
+          return;
+        }
 
         // Check if we can open a position
         if (!this.capitalManager.canOpenPosition(this.getOpenCount())) {

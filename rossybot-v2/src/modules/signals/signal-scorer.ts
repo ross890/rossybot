@@ -5,6 +5,9 @@ export interface WalletEv {
   trades: number;
   winRate: number;
   avgPnl: number;
+  nansenRoi: number;
+  nansenTrades: number;
+  nansenPnlUsd: number;
 }
 
 export interface SignalScore {
@@ -16,6 +19,7 @@ export interface SignalScore {
     liquidityRatio: number;  // 0-10 pts
     confluence: number;      // 0-10 pts
   };
+  walletRejected: boolean; // true if best wallet fails hard quality floor
 }
 
 /**
@@ -28,55 +32,92 @@ export function scoreSignal(
 ): SignalScore {
   const dex = signal.validation.dexData;
 
-  const walletQuality = scoreWalletQuality(signal.walletAddresses, walletEvs);
+  const walletResult = scoreWalletQuality(signal.walletAddresses, walletEvs);
   const momentum = scoreMomentum(dex);
   const mcapFit = scoreMcapFit(dex);
   const liquidityRatio = scoreLiquidity(dex);
   const confluence = scoreConfluence(signal.walletCount);
 
-  const total = walletQuality + momentum + mcapFit + liquidityRatio + confluence;
+  const total = walletResult.score + momentum + mcapFit + liquidityRatio + confluence;
 
   return {
     total,
-    breakdown: { walletQuality, momentum, mcapFit, liquidityRatio, confluence },
+    breakdown: {
+      walletQuality: walletResult.score,
+      momentum,
+      mcapFit,
+      liquidityRatio,
+      confluence,
+    },
+    walletRejected: walletResult.rejected,
   };
 }
 
 // --- Wallet Quality (0-35) ---
-// Best wallets have high EV, high win rate, and enough trades for confidence
-function scoreWalletQuality(addresses: string[], evMap: Map<string, WalletEv>): number {
-  if (addresses.length === 0) return 0;
+// Uses our trade data when available, falls back to Nansen data for unproven wallets.
+// Hard floor: blended win rate must be >= 50% and blended avg PnL >= 25%.
+function scoreWalletQuality(
+  addresses: string[],
+  evMap: Map<string, WalletEv>,
+): { score: number; rejected: boolean } {
+  if (addresses.length === 0) return { score: 0, rejected: true };
 
   let bestScore = 0;
+  let anyWalletPassesFloor = false;
+
   for (const addr of addresses) {
     const ev = evMap.get(addr);
     if (!ev) continue;
 
-    // Confidence weight: ramp from 0.3 (new) to 1.0 (10+ trades)
-    const confidence = Math.min(1.0, 0.3 + (ev.trades / 10) * 0.7);
+    // Blend our data with Nansen data.
+    // If we have 5+ of our own trades, trust our data fully.
+    // Otherwise, blend with Nansen stats weighted by how few of our trades we have.
+    const ourWeight = Math.min(1.0, ev.trades / 5);
+    const nansenWeight = 1.0 - ourWeight;
+
+    // Estimate Nansen win rate from ROI: ROI > 100% maps to ~0.65 WR, > 500% to ~0.80
+    const nansenEstWinRate = ev.nansenTrades > 0
+      ? Math.min(0.85, 0.50 + Math.max(0, ev.nansenRoi) / 1000)
+      : 0;
+    // Nansen avg PnL: use ROI / trade count as rough per-trade avg, capped
+    const nansenEstAvgPnl = ev.nansenTrades > 0
+      ? Math.min(50, Math.max(0, ev.nansenRoi / Math.max(1, ev.nansenTrades)))
+      : 0;
+
+    const blendedWinRate = ourWeight * ev.winRate + nansenWeight * nansenEstWinRate;
+    const blendedAvgPnl = ourWeight * ev.avgPnl + nansenWeight * nansenEstAvgPnl;
+
+    // Hard floor: 50% win rate AND 25% avg PnL (blended)
+    // For wallets with 0 of our trades, Nansen data must be strong enough
+    if (blendedWinRate >= 0.50 && blendedAvgPnl >= 25) {
+      anyWalletPassesFloor = true;
+    }
+
+    // Confidence: ramp from 0.3 (no our trades, Nansen only) to 1.0 (10+ our trades)
+    // Nansen trades provide a smaller confidence boost
+    const nansenConfBoost = Math.min(0.2, (ev.nansenTrades / 50) * 0.2);
+    const confidence = Math.min(1.0, 0.3 + (ev.trades / 10) * 0.7 + nansenConfBoost);
 
     // Win rate component (0-15): 50% = 0, 70% = 10.5, 90% = 15
-    const wrScore = Math.max(0, (ev.winRate - 0.5) * 37.5);
+    const wrScore = Math.max(0, (blendedWinRate - 0.5) * 37.5);
 
     // EV component (0-20): 0% = 5, 10% = 15, 20%+ = 20
-    const evScore = Math.min(20, Math.max(0, 5 + ev.avgPnl));
+    const evScore = Math.min(20, Math.max(0, 5 + blendedAvgPnl));
 
     const walletScore = (wrScore + evScore) * confidence;
     bestScore = Math.max(bestScore, walletScore);
   }
 
-  // If all wallets are new (no stats), give a baseline score
-  if (bestScore === 0 && addresses.length > 0) {
-    return 10; // Neutral — we have wallets but no track record
-  }
-
-  return Math.min(35, bestScore);
+  return {
+    score: Math.min(35, bestScore),
+    rejected: !anyWalletPassesFloor,
+  };
 }
 
 // --- Momentum (0-25) ---
 // Sweet spot: strong 24h momentum (40-120%), not overheated
 function scoreMomentum(dex: DexScreenerPair | null): number {
-  if (!dex) return 5;
+  if (!dex) return 0; // No data = no free points
 
   const h24 = dex.priceChange?.h24 || 0;
   const h1 = dex.priceChange?.h1 || 0;
@@ -104,7 +145,7 @@ function scoreMomentum(dex: DexScreenerPair | null): number {
 // --- MCap Sweet Spot (0-20) ---
 // Micro cap ideal range: $50K-$500K. Too low = risky, too high = limited upside
 function scoreMcapFit(dex: DexScreenerPair | null): number {
-  if (!dex) return 5;
+  if (!dex) return 0; // No data = no free points
 
   const mcap = dex.marketCap || dex.fdv || 0;
   if (mcap <= 0) return 0;
@@ -123,7 +164,7 @@ function scoreMcapFit(dex: DexScreenerPair | null): number {
 // --- Liquidity Ratio (0-10) ---
 // Enough liquidity relative to position = lower slippage risk
 function scoreLiquidity(dex: DexScreenerPair | null): number {
-  if (!dex) return 3;
+  if (!dex) return 0; // No data = no free points
 
   const liq = dex.liquidity?.usd || 0;
   if (liq <= 0) return 0;

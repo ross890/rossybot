@@ -18,6 +18,7 @@ export class TelegramService {
   private getWsHealth: (() => Record<string, unknown>) | null = null;
   private getNansenUsage: (() => Record<string, unknown>) | null = null;
   private onKill: ((token: string) => Promise<{ success: boolean; token?: string; error?: string }>) | null = null;
+  private onDrop: ((token: string) => Promise<{ success: boolean; token?: string; error?: string }>) | null = null;
   private onHoldTimeAnalysis: (() => Promise<string[]>) | null = null;
   private getPumpFunPositions: (() => Array<Record<string, unknown>>) | null = null;
 
@@ -50,6 +51,7 @@ export class TelegramService {
   setWsHealthCallback(cb: () => Record<string, unknown>): void { this.getWsHealth = cb; }
   setNansenUsageCallback(cb: () => Record<string, unknown>): void { this.getNansenUsage = cb; }
   setKillCallback(cb: (token: string) => Promise<{ success: boolean; token?: string; error?: string }>): void { this.onKill = cb; }
+  setDropCallback(cb: (token: string) => Promise<{ success: boolean; token?: string; error?: string }>): void { this.onDrop = cb; }
   setHoldTimeCallback(cb: () => Promise<string[]>): void { this.onHoldTimeAnalysis = cb; }
   setPumpFunPositionsCallback(cb: () => Array<Record<string, unknown>>): void { this.getPumpFunPositions = cb; }
 
@@ -580,6 +582,32 @@ export class TelegramService {
         }
       } catch (err) {
         await this.bot.sendMessage(msg.chat.id, `❌ Kill failed: ${err instanceof Error ? err.message : 'unknown error'}`);
+      }
+    });
+
+    this.bot.onText(/\/drop (.+)/, async (msg, match) => {
+      if (msg.chat.id.toString() !== this.chatId) return;
+      const token = match?.[1];
+      if (!token) {
+        await this.bot.sendMessage(msg.chat.id, 'Usage: /drop <token_symbol_or_address>\nRemoves position from tracking without selling (for manually-sold tokens)');
+        return;
+      }
+
+      if (!this.onDrop) {
+        await this.bot.sendMessage(msg.chat.id, `🗑 Drop not available in shadow mode`);
+        return;
+      }
+
+      await this.bot.sendMessage(msg.chat.id, `🗑 Dropping $${token} from tracking...`);
+      try {
+        const result = await this.onDrop(token);
+        if (result.success) {
+          await this.bot.sendMessage(msg.chat.id, `✅ Dropped $${result.token} — removed from tracking (no sell executed)`);
+        } else {
+          await this.bot.sendMessage(msg.chat.id, `❌ ${result.error}`);
+        }
+      } catch (err) {
+        await this.bot.sendMessage(msg.chat.id, `❌ Drop failed: ${err instanceof Error ? err.message : 'unknown error'}`);
       }
     });
 

@@ -190,6 +190,41 @@ export class LiveTracker {
     return { success: true, token: match.token_symbol || match.token_address.slice(0, 8) };
   }
 
+  /** Remove a position from tracking without executing a sell (for manually-sold tokens) */
+  async forceRemove(tokenIdentifier: string): Promise<{ success: boolean; token?: string; error?: string }> {
+    const match = Array.from(this.positions.values()).find((p) =>
+      p.status !== PositionStatus.CLOSED &&
+      (p.token_symbol?.toLowerCase() === tokenIdentifier.toLowerCase() ||
+       p.token_address.toLowerCase().startsWith(tokenIdentifier.toLowerCase())),
+    );
+
+    if (!match) {
+      return { success: false, error: `No open position found for "${tokenIdentifier}"` };
+    }
+
+    match.status = PositionStatus.CLOSED;
+    match.exit_reason = 'Manual sell — removed from tracking (/drop)';
+    match.closed_at = new Date();
+    match.hold_time_mins = Math.round((match.closed_at.getTime() - match.entry_time.getTime()) / (1000 * 60));
+
+    await this.updatePosition(match);
+
+    logger.info({
+      id: match.id.slice(0, 8),
+      token: match.token_symbol,
+      holdMins: match.hold_time_mins,
+    }, 'LIVE position DROPPED (manual sell)');
+
+    if (this.onPositionClosed) {
+      try { await this.onPositionClosed(match); } catch (err) {
+        logger.error({ err, posId: match.id.slice(0, 8) }, 'Error in position close callback');
+      }
+    }
+
+    this.positions.delete(match.id);
+    return { success: true, token: match.token_symbol || match.token_address.slice(0, 8) };
+  }
+
   /** Check prices and apply exit rules */
   private async checkPrices(): Promise<void> {
     for (const pos of this.positions.values()) {

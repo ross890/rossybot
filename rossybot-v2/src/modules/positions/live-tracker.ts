@@ -5,6 +5,7 @@ import { config } from '../../config/index.js';
 import { CapitalTier, PositionStatus, type Position } from '../../types/index.js';
 import { fetchDexPair, getPriceUsd } from '../validation/dexscreener.js';
 import { SwapExecutor, type SwapResult } from '../trading/swap-executor.js';
+import { TIER_CONFIGS } from '../../config/index.js';
 import type { ValidatedSignal } from '../signals/entry-engine.js';
 
 export class LiveTracker {
@@ -217,74 +218,61 @@ export class LiveTracker {
 
   private async applyExitRules(pos: Position): Promise<void> {
     const tier = pos.capital_tier_at_entry as CapitalTier;
+    const tierCfg = TIER_CONFIGS[tier];
     const pnl = pos.pnl_percent;
     const holdMins = (Date.now() - pos.entry_time.getTime()) / (1000 * 60);
 
-    // Hard time kill: 48 hours
-    if (holdMins >= 48 * 60) {
-      await this.closePosition(pos, 'Hard time kill (48h)');
+    // Hard time kill from config
+    if (holdMins >= tierCfg.hardTimeHours * 60) {
+      await this.closePosition(pos, `Hard time kill (${tierCfg.hardTimeHours}h)`);
       return;
     }
 
-    // --- MICRO/SMALL ---
-    if (tier === CapitalTier.MICRO || tier === CapitalTier.SMALL) {
-      const profitTarget = tier === CapitalTier.MICRO ? 0.50 : 0.40;
+    // Hard kill and stop loss from config
+    if (pnl <= tierCfg.hardKill) { await this.closePosition(pos, `Hard kill (${(pnl * 100).toFixed(1)}%)`); return; }
+    if (pnl <= tierCfg.stopLoss) { await this.closePosition(pos, `Stop loss (${(pnl * 100).toFixed(1)}%)`); return; }
 
-      if (pnl <= -0.25) { await this.closePosition(pos, `Hard kill (${(pnl * 100).toFixed(1)}%)`); return; }
-      if (pnl <= -0.20) { await this.closePosition(pos, `Stop loss (${(pnl * 100).toFixed(1)}%)`); return; }
-      if (pnl >= profitTarget) { await this.closePosition(pos, `Profit target (${(pnl * 100).toFixed(1)}%)`); return; }
-
-      if (holdMins >= 60 && pnl < 0.05) { await this.closePosition(pos, 'Time kill 1h (<5%)'); return; }
-      if (holdMins >= 240 && pnl < 0.15) { await this.closePosition(pos, 'Time kill 4h (<15%)'); return; }
-      if (holdMins >= 720 && pnl < 0.25) { await this.closePosition(pos, 'Time kill 12h (<25%)'); return; }
+    // Profit target (MICRO/SMALL — non-partial tiers)
+    if (!tierCfg.partialExitsEnabled && pnl >= tierCfg.profitTarget) {
+      await this.closePosition(pos, `Profit target (${(pnl * 100).toFixed(1)}%)`);
       return;
     }
 
-    // --- MEDIUM ---
-    if (tier === CapitalTier.MEDIUM) {
-      if (pnl <= -0.20) { await this.closePosition(pos, `Hard kill (${(pnl * 100).toFixed(1)}%)`); return; }
-      if (pnl <= -0.15) { await this.closePosition(pos, `Stop loss (${(pnl * 100).toFixed(1)}%)`); return; }
-
-      // Trailing after first partial
-      if (pos.partial_exits.length > 0 && pos.peak_price > 0) {
-        const drawdown = (pos.peak_price - pos.current_price) / pos.peak_price;
-        if (drawdown >= 0.20) { await this.closePosition(pos, `Trailing stop (${(drawdown * 100).toFixed(1)}% from peak)`); return; }
+    // Trailing stop after first partial (MEDIUM+)
+    if (tierCfg.partialExitsEnabled && pos.partial_exits.length > 0 && pos.peak_price > 0) {
+      const drawdown = (pos.peak_price - pos.current_price) / pos.peak_price;
+      const trailPct = (tier === CapitalTier.FULL && pnl >= 0.50) ? 0.15 : 0.20;
+      if (drawdown >= trailPct) {
+        await this.closePosition(pos, `Trailing stop (${(drawdown * 100).toFixed(1)}% from peak)`);
+        return;
       }
-
-      // Partials
-      if (pnl >= 0.60 && pos.partial_exits.length < 2) {
-        await this.executePartialSell(pos, 50, 'Partial 2 (+60%)');
-      } else if (pnl >= 0.30 && pos.partial_exits.length < 1) {
-        await this.executePartialSell(pos, 50, 'Partial 1 (+30%)');
-      }
-
-      if (holdMins >= 60 && pnl < 0.05) { await this.closePosition(pos, 'Time kill 1h (<5%)'); return; }
-      if (holdMins >= 240 && pnl < 0.15) { await this.closePosition(pos, 'Time kill 4h (<15%)'); return; }
-      return;
     }
 
-    // --- FULL ---
-    if (tier === CapitalTier.FULL) {
-      if (pnl <= -0.20) { await this.closePosition(pos, `Hard kill (${(pnl * 100).toFixed(1)}%)`); return; }
-      if (pnl <= -0.15) { await this.closePosition(pos, `Stop loss (${(pnl * 100).toFixed(1)}%)`); return; }
-
-      if (pos.partial_exits.length > 0 && pos.peak_price > 0) {
-        const drawdown = (pos.peak_price - pos.current_price) / pos.peak_price;
-        const trailPct = pnl >= 1.0 ? 0.15 : pnl >= 0.50 ? 0.15 : 0.20;
-        if (drawdown >= trailPct) { await this.closePosition(pos, `Trailing stop (${(drawdown * 100).toFixed(1)}% from peak)`); return; }
+    // Partial exits for MEDIUM+
+    if (tierCfg.partialExitsEnabled) {
+      if (tier === CapitalTier.FULL) {
+        if (pnl >= 1.0 && pos.partial_exits.length < 3) {
+          await this.executePartialSell(pos, 50, 'Partial 3 (+100%)');
+        } else if (pnl >= 0.50 && pos.partial_exits.length < 2) {
+          await this.executePartialSell(pos, 60, 'Partial 2 (+50%)');
+        } else if (pnl >= 0.25 && pos.partial_exits.length < 1) {
+          await this.executePartialSell(pos, 50, 'Partial 1 (+25%)');
+        }
+      } else if (tier === CapitalTier.MEDIUM) {
+        if (pnl >= 0.60 && pos.partial_exits.length < 2) {
+          await this.executePartialSell(pos, 50, 'Partial 2 (+60%)');
+        } else if (pnl >= 0.30 && pos.partial_exits.length < 1) {
+          await this.executePartialSell(pos, 50, 'Partial 1 (+30%)');
+        }
       }
+    }
 
-      if (pnl >= 1.0 && pos.partial_exits.length < 3) {
-        await this.executePartialSell(pos, 50, 'Partial 3 (+100%)');
-      } else if (pnl >= 0.50 && pos.partial_exits.length < 2) {
-        await this.executePartialSell(pos, 60, 'Partial 2 (+50%)');
-      } else if (pnl >= 0.25 && pos.partial_exits.length < 1) {
-        await this.executePartialSell(pos, 50, 'Partial 1 (+25%)');
+    // Time kills from config — use the tier's configured windows
+    for (const tk of tierCfg.timeKills) {
+      if (holdMins >= tk.hours * 60 && pnl < tk.minPnlPct) {
+        await this.closePosition(pos, `Time kill ${tk.hours}h (<${(tk.minPnlPct * 100).toFixed(0)}%)`);
+        return;
       }
-
-      if (holdMins >= 60 && pnl < 0.05) { await this.closePosition(pos, 'Time kill 1h (<5%)'); return; }
-      if (holdMins >= 240 && pnl < 0.15) { await this.closePosition(pos, 'Time kill 4h (<15%)'); return; }
-      if (holdMins >= 720 && pnl < 0.25) { await this.closePosition(pos, 'Time kill 12h (<25%)'); return; }
     }
   }
 

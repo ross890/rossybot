@@ -119,7 +119,7 @@ export const TIER_CONFIGS: Record<CapitalTier, TierConfig> = {
     momentumMax: 300,
     volumeMultiplierMin: 1,
     tokenMaxAgeDays: 30,
-    minSignalScore: 40,
+    minSignalScore: 35,
   },
   [CapitalTier.SMALL]: {
     tier: CapitalTier.SMALL,
@@ -147,7 +147,7 @@ export const TIER_CONFIGS: Record<CapitalTier, TierConfig> = {
     momentumMax: 200,
     volumeMultiplierMin: 1,
     tokenMaxAgeDays: 30,
-    minSignalScore: 40,
+    minSignalScore: 35,
   },
   [CapitalTier.MEDIUM]: {
     tier: CapitalTier.MEDIUM,

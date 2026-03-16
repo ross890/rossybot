@@ -337,6 +337,32 @@ export interface ParsedSignal {
   detectionSource: DetectionSource;
 }
 
+// --- Common position view for Telegram/UI (works with both Shadow & Live) ---
+
+export interface PositionView {
+  id: string;
+  token_address: string;
+  token_symbol: string | null;
+  entry_price: number;
+  entry_sol: number;
+  entry_time: Date;
+  alpha_buy_time: Date;
+  status: PositionStatus;
+  current_price: number;
+  peak_price: number;
+  pnl_percent: number;
+  pnl_sol: number;
+  fees_paid_sol: number;
+  net_pnl_sol: number;
+  exit_reason: string | null;
+  closed_at: Date | null;
+  hold_time_mins: number | null;
+  partial_exits: Array<{ time: Date; pct: number; price: number; reason: string }>;
+  signal_wallets: string[];
+  capital_tier: string;
+  entry_tx?: string;
+}
+
 // --- Shadow Position (Phase 1) ---
 
 export interface ShadowPosition {

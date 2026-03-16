@@ -15,6 +15,11 @@ interface WalletCandidate {
   score: number;
 }
 
+// Cap total active wallets — no point tracking hundreds we can't monitor
+const MAX_ACTIVE_WALLETS = 75;
+// Wallets with no trade data after 3 days get cut
+const STALE_WALLET_DAYS = 3;
+
 export class WalletDiscovery {
   private nansen: NansenClient;
   private holdTimeAnalyzer: HoldTimeAnalyzer;
@@ -83,16 +88,28 @@ export class WalletDiscovery {
     return count;
   }
 
-  /** Remove all previously discovered wallets (clean slate for new discovery method) */
+  /**
+   * Aggressive startup purge: deactivate discovered wallets that have zero evidence of being quick flippers.
+   * Keeps seed wallets and any wallet with proven alpha score >25.
+   */
   async purgeWeakWallets(): Promise<number> {
     const result = await query(
-      `DELETE FROM alpha_wallets
-       WHERE source != 'NANSEN_SEED'
+      `UPDATE alpha_wallets SET active = FALSE
+       WHERE active = TRUE
+         AND source != 'NANSEN_SEED'
+         AND (
+           -- No trade data at all
+           (COALESCE(our_total_trades, 0) = 0 AND COALESCE(round_trips_analyzed, 0) = 0)
+           -- OR has data but poor alpha score
+           OR (COALESCE(round_trips_analyzed, 0) >= 3 AND COALESCE(short_term_alpha_score, 0) < 25)
+           -- OR proven bag holder (median hold >12h with data)
+           OR (COALESCE(median_hold_time_mins, 0) > 720 AND COALESCE(round_trips_analyzed, 0) >= 3)
+         )
        RETURNING address`,
     );
     const count = result.rowCount || 0;
     if (count > 0) {
-      console.log(`Purged ${count} old discovered wallets`);
+      console.log(`Purged ${count} weak/unproven wallets on startup`);
     }
     return count;
   }
@@ -134,16 +151,20 @@ export class WalletDiscovery {
         this.onHoldTimeResults?.(holdTimeResults);
       }
 
+      // Auto-cleanup: remove stale, slow, and excess wallets
+      const cleanup = await this.autoCleanup();
+
       const duration = Date.now() - start;
       await this.logDiscovery(result.tokensScreened, result.candidates, result.added,
-        walletsRemoved + holdTimeResults.deactivated.length, duration);
+        walletsRemoved + holdTimeResults.deactivated.length + cleanup.removed, duration);
 
       logger.info({
         tokensScreened: result.tokensScreened,
         candidates: result.candidates,
         added: result.added,
-        removed: walletsRemoved + holdTimeResults.deactivated.length,
+        removed: walletsRemoved + holdTimeResults.deactivated.length + cleanup.removed,
         holdTimeDemoted: holdTimeResults.demoted.length,
+        cleanupReasons: cleanup.reasons,
         durationMs: duration,
       }, 'Discovery cycle complete');
     } catch (err: unknown) {
@@ -312,20 +333,24 @@ export class WalletDiscovery {
   }
 
   private async validateExistingWallets(): Promise<number> {
-    // Auto-promote: 5+ trades, >40% win rate, avg hold <12h → Tier A
+    // Auto-promote: 3+ trades, >50% win rate, avg hold <4h, alpha score >40 → Tier A (quick flippers)
     await query(
       `UPDATE alpha_wallets SET tier = 'A'
-       WHERE tier = 'B' AND our_total_trades >= 5 AND our_win_rate > 0.40 AND our_avg_hold_time_mins < 720`,
+       WHERE tier = 'B' AND our_total_trades >= 3 AND our_win_rate > 0.50
+         AND our_avg_hold_time_mins < 240
+         AND COALESCE(short_term_alpha_score, 0) > 40`,
     );
 
-    // Demote: 3 consecutive losses → Tier B
+    // Demote: 2 consecutive losses → Tier B (tighter than before)
     await query(
-      `UPDATE alpha_wallets SET tier = 'B' WHERE tier = 'A' AND consecutive_losses >= 3`,
+      `UPDATE alpha_wallets SET tier = 'B' WHERE tier = 'A' AND consecutive_losses >= 2`,
     );
 
-    // Deactivate: 5 consecutive losses
+    // Deactivate: 3 consecutive losses (was 5 — tighter)
     const deactivated = await query(
-      `UPDATE alpha_wallets SET active = FALSE WHERE active = TRUE AND consecutive_losses >= 5 RETURNING address`,
+      `UPDATE alpha_wallets SET active = FALSE
+       WHERE active = TRUE AND source != 'NANSEN_SEED' AND consecutive_losses >= 3
+       RETURNING address`,
     );
 
     // Deactivate wallets below $10K PnL minimum (skip seed wallets which may lack PnL data)
@@ -462,6 +487,87 @@ export class WalletDiscovery {
     return null;
   }
 
+  /**
+   * Automatic wallet cleanup — runs every discovery cycle.
+   * 1. Remove stale wallets (no trade data after STALE_WALLET_DAYS)
+   * 2. Remove wallets with median hold >12h (proven slow holders)
+   * 3. Cap total active wallets at MAX_ACTIVE_WALLETS (cut lowest-scoring)
+   */
+  async autoCleanup(): Promise<{ removed: number; reasons: Record<string, number> }> {
+    const reasons: Record<string, number> = {};
+    let totalRemoved = 0;
+
+    // 1. Stale wallets: discovered >3 days ago, no trade data from us, not a seed
+    const staleCutoff = new Date(Date.now() - STALE_WALLET_DAYS * 24 * 60 * 60 * 1000);
+    const staleResult = await query(
+      `UPDATE alpha_wallets SET active = FALSE
+       WHERE active = TRUE
+         AND source != 'NANSEN_SEED'
+         AND COALESCE(our_total_trades, 0) = 0
+         AND COALESCE(round_trips_analyzed, 0) = 0
+         AND discovered_at < $1
+       RETURNING address`,
+      [staleCutoff],
+    );
+    const staleCount = staleResult.rowCount || 0;
+    if (staleCount > 0) {
+      reasons['stale (no trade data)'] = staleCount;
+      totalRemoved += staleCount;
+      logger.info({ count: staleCount }, 'Removed stale wallets with no trade data');
+    }
+
+    // 2. Proven slow holders: median hold >12h with 3+ analyzed trips (not seeds)
+    const slowResult = await query(
+      `UPDATE alpha_wallets SET active = FALSE
+       WHERE active = TRUE
+         AND source != 'NANSEN_SEED'
+         AND COALESCE(median_hold_time_mins, 0) > 720
+         AND COALESCE(round_trips_analyzed, 0) >= 3
+       RETURNING address`,
+    );
+    const slowCount = slowResult.rowCount || 0;
+    if (slowCount > 0) {
+      reasons['slow holder (median >12h)'] = slowCount;
+      totalRemoved += slowCount;
+      logger.info({ count: slowCount }, 'Removed slow-holder wallets (median hold >12h)');
+    }
+
+    // 3. Cap at MAX_ACTIVE_WALLETS — remove lowest-scoring non-seed wallets
+    const activeCount = await getMany<{ count: string }>(
+      `SELECT COUNT(*) as count FROM alpha_wallets WHERE active = TRUE`,
+    );
+    const currentActive = parseInt(activeCount[0]?.count || '0');
+    if (currentActive > MAX_ACTIVE_WALLETS) {
+      const excess = currentActive - MAX_ACTIVE_WALLETS;
+      // Remove the lowest-scoring non-seed wallets
+      const capResult = await query(
+        `UPDATE alpha_wallets SET active = FALSE
+         WHERE address IN (
+           SELECT address FROM alpha_wallets
+           WHERE active = TRUE AND source != 'NANSEN_SEED'
+           ORDER BY
+             COALESCE(short_term_alpha_score, 0) ASC,
+             COALESCE(nansen_pnl_usd, 0) ASC
+           LIMIT $1
+         )
+         RETURNING address`,
+        [excess],
+      );
+      const capCount = capResult.rowCount || 0;
+      if (capCount > 0) {
+        reasons[`cap exceeded (>${MAX_ACTIVE_WALLETS})`] = capCount;
+        totalRemoved += capCount;
+        logger.info({ count: capCount, cap: MAX_ACTIVE_WALLETS }, 'Removed lowest-scoring wallets to enforce cap');
+      }
+    }
+
+    if (totalRemoved > 0) {
+      logger.info({ totalRemoved, reasons }, 'Auto-cleanup complete');
+    }
+
+    return { removed: totalRemoved, reasons };
+  }
+
   /** Get all active wallet addresses — ranked by composite performance score */
   async getActiveWallets(): Promise<string[]> {
     const rows = await getMany<{ address: string }>(
@@ -490,10 +596,10 @@ export class WalletDiscovery {
              END
            -- Consecutive losses penalty
            - COALESCE(consecutive_losses, 0) * 10
-           -- Bag-holder penalty: high median hold time = bad fit
+           -- Bag-holder penalty: high median hold time = bad fit for quick flips
            - CASE
-               WHEN COALESCE(median_hold_time_mins, 0) > 2880 AND COALESCE(round_trips_analyzed, 0) >= 3 THEN 20
-               WHEN COALESCE(median_hold_time_mins, 0) > 1440 AND COALESCE(round_trips_analyzed, 0) >= 3 THEN 10
+               WHEN COALESCE(median_hold_time_mins, 0) > 720 AND COALESCE(round_trips_analyzed, 0) >= 3 THEN 30
+               WHEN COALESCE(median_hold_time_mins, 0) > 240 AND COALESCE(round_trips_analyzed, 0) >= 3 THEN 15
                ELSE 0
              END
          ) as score

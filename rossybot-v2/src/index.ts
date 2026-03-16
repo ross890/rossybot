@@ -165,11 +165,22 @@ class RossyBotV2 {
 
     // 3. Seed wallets, enforce $10K PnL minimum, check on-chain activity, and load from DB
     await this.walletDiscovery.seedWallets(tier);
+    const purged = await this.walletDiscovery.purgeWeakWallets();
+    if (purged > 0) {
+      console.log(`Startup purge: removed ${purged} weak/unproven wallets`);
+    }
     await this.walletDiscovery.enforceMinimumPnl();
     const activityDeactivated = await this.walletDiscovery.enforceTradeActivity(true);
     if (activityDeactivated > 0) {
       console.log(`Deactivated ${activityDeactivated} inactive wallets (no on-chain activity in 7 days)`);
     }
+
+    // Auto-cleanup: purge stale, slow-holder, and excess wallets
+    const cleanup = await this.walletDiscovery.autoCleanup();
+    if (cleanup.removed > 0) {
+      console.log(`Auto-cleanup removed ${cleanup.removed} wallets:`, cleanup.reasons);
+    }
+
     const allActiveWallets = await this.walletDiscovery.getActiveWallets();
 
     // Helius WS monitors top N wallets (tier-limited)

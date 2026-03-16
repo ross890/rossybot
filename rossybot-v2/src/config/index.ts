@@ -95,7 +95,7 @@ export const TIER_CONFIGS: Record<CapitalTier, TierConfig> = {
       { hours: 12, minPnlPct: 0.25 },
     ],
     hardTimeHours: 48,
-    mcapMin: 200_000,
+    mcapMin: 30_000,
     mcapMax: 2_000_000,
     liquidityMin: 20_000,
     momentumWindow: '24h',

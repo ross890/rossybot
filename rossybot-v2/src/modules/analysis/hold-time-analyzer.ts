@@ -195,40 +195,42 @@ export class HoldTimeAnalyzer {
     const profitableAt48h = profitableAt(48 * 60);
 
     // === SHORT-TERM ALPHA SCORE (0–100) ===
-    // This is the key metric: does this wallet generate profit within our time windows?
+    // Optimized for QUICK FLIPS: wallets that buy and sell profitably within hours
     let score = 0;
 
-    // 1. Do they actually close trades quickly? (30 pts max)
-    //    We need >50% of trades closed within 48h to be useful
-    score += Math.min(pctClosedWithin48h * 40, 30);
+    // 1. Speed: do they close trades fast? (25 pts max)
+    //    Heavy bonus for trades closed within 4h (quick flips)
+    score += Math.min(pctClosedWithin4h * 35, 25);
 
-    // 2. Are their quick trades profitable? (35 pts max)
-    //    Profitability within 48h window is the #1 signal
-    score += profitableAt48h * 35;
+    // 2. Profitability within 4h window (30 pts max) — #1 signal for quick flips
+    score += profitableAt4h * 30;
 
-    // 3. Average PnL on closed trades (15 pts max)
-    //    Positive avg PnL within window = good
+    // 3. Profitability within 48h window (15 pts max) — secondary
+    score += profitableAt48h * 15;
+
+    // 4. Average PnL on closed trades (10 pts max)
     const avgPnlCapped = Math.min(Math.max(avgPnl, -0.5), 1.0);
-    score += Math.max((avgPnlCapped + 0.5) / 1.5 * 15, 0);
+    score += Math.max((avgPnlCapped + 0.5) / 1.5 * 10, 0);
 
-    // 4. Sample size confidence (10 pts max)
-    //    Need at least 3 round-trips to trust the data
+    // 5. Sample size confidence (10 pts max)
     score += Math.min(closed.length / 5, 1) * 10;
 
-    // 5. Bag-holding penalty (-20 pts max)
-    //    If >60% of their buys are still open (no sell), they hold too long
+    // 6. Bag-holding penalty (-25 pts max)
+    //    If >40% of their buys are still open, they hold too long for quick flips
     const totalTrades = closed.length + open.length;
     if (totalTrades > 0) {
       const openRatio = open.length / totalTrades;
-      if (openRatio > 0.6) {
-        score -= Math.min((openRatio - 0.6) * 50, 20);
+      if (openRatio > 0.4) {
+        score -= Math.min((openRatio - 0.4) * 50, 25);
       }
     }
 
-    // 6. Very long hold penalty (-10 pts)
-    //    If median hold > 24h, they're too slow for our strategy
-    if (medianHold > 24 * 60 && closed.length >= 3) {
-      score -= 10;
+    // 7. Slow hold penalty (-15 pts)
+    //    Median hold >12h = not a quick flipper
+    if (medianHold > 12 * 60 && closed.length >= 3) {
+      score -= 15;
+    } else if (medianHold > 4 * 60 && closed.length >= 3) {
+      score -= 5; // Mildly slow
     }
 
     score = Math.max(0, Math.min(100, score));
@@ -303,15 +305,30 @@ export class HoldTimeAnalyzer {
       // Need 3+ round-trips to judge — don't penalize new wallets
       if (profile.totalRoundTrips < 3) continue;
 
-      // DEACTIVATE: Score < 15 AND 5+ trades = proven bad fit
-      if (profile.shortTermAlphaScore < 15 && profile.totalRoundTrips >= 5) {
-        // Check if it's a seed wallet (don't deactivate seeds, just demote)
-        const walletRow = await getOne<{ source: string }>(
-          `SELECT source FROM alpha_wallets WHERE address = $1`, [profile.address],
-        );
+      const walletRow = await getOne<{ source: string; tier: string }>(
+        `SELECT source, tier FROM alpha_wallets WHERE address = $1`, [profile.address],
+      );
+      const isSeed = walletRow?.source === 'NANSEN_SEED';
 
-        if (walletRow?.source === 'NANSEN_SEED') {
-          // Demote seed wallets instead of deactivating
+      // === HARD CUTOFFS (quick-flip focus) ===
+
+      // 1. Median hold >12h with 3+ trips = too slow for our strategy → deactivate
+      const isBagHolder = profile.medianHoldTimeMins > 12 * 60 && profile.totalRoundTrips >= 3;
+
+      // 2. >40% of buys still open = holding too long → deactivate
+      const totalTrades = profile.totalRoundTrips + profile.openPositions;
+      const highOpenRatio = totalTrades > 3 && (profile.openPositions / totalTrades) > 0.40;
+
+      // 3. Score <25 with 3+ trips = bad fit
+      const lowScore = profile.shortTermAlphaScore < 25 && profile.totalRoundTrips >= 3;
+
+      // DEACTIVATE: any hard cutoff triggered (seeds get demoted instead)
+      if (isBagHolder || highOpenRatio || lowScore) {
+        const reason = isBagHolder ? 'median hold >12h'
+          : highOpenRatio ? `${(profile.openPositions / totalTrades * 100).toFixed(0)}% positions still open`
+          : `score ${profile.shortTermAlphaScore}/100`;
+
+        if (isSeed) {
           await query(
             `UPDATE alpha_wallets SET tier = 'B' WHERE address = $1`, [profile.address],
           );
@@ -320,9 +337,9 @@ export class HoldTimeAnalyzer {
             wallet: profile.address.slice(0, 8),
             label: profile.label,
             score: profile.shortTermAlphaScore,
-            avgHold: `${Math.round(profile.avgHoldTimeMins / 60)}h`,
-            pctProfitable48h: `${(profile.profitableAt48h * 100).toFixed(0)}%`,
-          }, 'Seed wallet DEMOTED — poor short-term alpha');
+            medianHold: `${Math.round(profile.medianHoldTimeMins / 60)}h`,
+            reason,
+          }, 'Seed wallet DEMOTED — not a quick flipper');
         } else {
           await query(
             `UPDATE alpha_wallets SET active = FALSE WHERE address = $1`, [profile.address],
@@ -332,18 +349,15 @@ export class HoldTimeAnalyzer {
             wallet: profile.address.slice(0, 8),
             label: profile.label,
             score: profile.shortTermAlphaScore,
-            avgHold: `${Math.round(profile.avgHoldTimeMins / 60)}h`,
-            pctProfitable48h: `${(profile.profitableAt48h * 100).toFixed(0)}%`,
-          }, 'Wallet DEACTIVATED — poor short-term alpha');
+            medianHold: `${Math.round(profile.medianHoldTimeMins / 60)}h`,
+            reason,
+          }, 'Wallet DEACTIVATED — not a quick flipper');
         }
         continue;
       }
 
-      // DEMOTE to Tier B: Score 15–30 with 3+ trades = mediocre fit
-      if (profile.shortTermAlphaScore < 30 && profile.totalRoundTrips >= 3) {
-        const walletRow = await getOne<{ tier: string }>(
-          `SELECT tier FROM alpha_wallets WHERE address = $1`, [profile.address],
-        );
+      // DEMOTE to Tier B: Score 25–40 with 3+ trades = mediocre fit
+      if (profile.shortTermAlphaScore < 40 && profile.totalRoundTrips >= 3) {
         if (walletRow?.tier === 'A') {
           await query(
             `UPDATE alpha_wallets SET tier = 'B' WHERE address = $1`, [profile.address],
@@ -352,7 +366,7 @@ export class HoldTimeAnalyzer {
           logger.info({
             wallet: profile.address.slice(0, 8),
             score: profile.shortTermAlphaScore,
-          }, 'Wallet demoted — below short-term alpha threshold');
+          }, 'Wallet demoted — below quick-flip alpha threshold');
         }
       }
     }

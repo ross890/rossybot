@@ -10,9 +10,69 @@ import { NansenClient, WalletDiscovery } from './modules/nansen/index.js';
 import { EntryEngine, type ValidatedSignal } from './modules/signals/index.js';
 import { scoreSignal, formatScoreForTelegram, type WalletEv } from './modules/signals/signal-scorer.js';
 import { ShadowTracker } from './modules/positions/index.js';
+import { LiveTracker } from './modules/positions/live-tracker.js';
 import { CapitalManager } from './modules/trading/capital-manager.js';
+import { SwapExecutor } from './modules/trading/swap-executor.js';
 import { TelegramService } from './modules/telegram/index.js';
-import { SignalType, type ParsedSignal } from './types/index.js';
+import { SignalType, type ParsedSignal, type PositionView } from './types/index.js';
+
+/** Convert ShadowPosition to common PositionView */
+function shadowToView(p: ReturnType<ShadowTracker['getOpenPositions']>[number]): PositionView {
+  return {
+    id: p.id,
+    token_address: p.token_address,
+    token_symbol: p.token_symbol,
+    entry_price: p.entry_price,
+    entry_sol: p.simulated_entry_sol,
+    entry_time: p.entry_time,
+    alpha_buy_time: p.alpha_buy_time,
+    status: p.status,
+    current_price: p.current_price,
+    peak_price: p.peak_price,
+    pnl_percent: p.pnl_percent,
+    pnl_sol: p.simulated_entry_sol * p.pnl_percent,
+    fees_paid_sol: 0,
+    net_pnl_sol: p.simulated_entry_sol * p.pnl_percent,
+    exit_reason: p.exit_reason,
+    closed_at: p.closed_at,
+    hold_time_mins: p.hold_time_mins,
+    partial_exits: p.partial_exits,
+    signal_wallets: p.signal_wallets,
+    capital_tier: p.capital_tier,
+  };
+}
+
+/** Convert Position to common PositionView */
+function liveToView(p: ReturnType<LiveTracker['getOpenPositions']>[number]): PositionView {
+  return {
+    id: p.id,
+    token_address: p.token_address,
+    token_symbol: p.token_symbol,
+    entry_price: p.entry_price,
+    entry_sol: p.entry_sol,
+    entry_time: p.entry_time,
+    alpha_buy_time: p.alpha_buy_time,
+    status: p.status,
+    current_price: p.current_price,
+    peak_price: p.peak_price,
+    pnl_percent: p.pnl_percent,
+    pnl_sol: p.pnl_sol,
+    fees_paid_sol: p.fees_paid_sol,
+    net_pnl_sol: p.net_pnl_sol,
+    exit_reason: p.exit_reason,
+    closed_at: p.closed_at,
+    hold_time_mins: p.hold_time_mins,
+    partial_exits: p.partial_exits.map((pe) => ({
+      time: (pe as Record<string, unknown>).time as Date,
+      pct: (pe as Record<string, unknown>).pct as number,
+      price: (pe as Record<string, unknown>).price as number,
+      reason: (pe as Record<string, unknown>).reason as string,
+    })),
+    signal_wallets: [p.signal_wallet],
+    capital_tier: p.capital_tier_at_entry,
+    entry_tx: p.entry_tx,
+  };
+}
 
 class RossyBotV2 {
   private wsManager: HeliusWebSocketManager;
@@ -21,11 +81,19 @@ class RossyBotV2 {
   private nansen: NansenClient;
   private walletDiscovery: WalletDiscovery;
   private entryEngine: EntryEngine;
-  private shadowTracker: ShadowTracker;
   private capitalManager: CapitalManager;
   private telegram: TelegramService;
   private walletAddresses: string[] = [];
   private dailySummaryInterval: ReturnType<typeof setInterval> | null = null;
+
+  // Position tracking — one or the other based on mode
+  private shadowTracker: ShadowTracker | null = null;
+  private liveTracker: LiveTracker | null = null;
+  private swapExecutor: SwapExecutor | null = null;
+
+  private get isLive(): boolean {
+    return !config.shadowMode && this.liveTracker !== null;
+  }
 
   constructor() {
     // Derive public key from private key (optional in shadow mode)
@@ -34,7 +102,6 @@ class RossyBotV2 {
       const keypair = Keypair.fromSecretKey(bs58.decode(config.wallet.privateKey));
       publicKey = keypair.publicKey.toBase58();
     } else {
-      // Shadow mode — use a dummy key for balance checks (will read 0 SOL = MICRO tier)
       publicKey = '11111111111111111111111111111111';
       console.log('No WALLET_PRIVATE_KEY set — running in shadow-only mode (MICRO tier, 0 SOL)');
     }
@@ -47,13 +114,36 @@ class RossyBotV2 {
     this.nansen = new NansenClient();
     this.walletDiscovery = new WalletDiscovery(this.nansen);
     this.entryEngine = new EntryEngine();
-    this.shadowTracker = new ShadowTracker();
     this.telegram = new TelegramService();
+
+    // Initialize position tracker based on mode
+    if (!config.shadowMode && config.wallet.privateKey) {
+      this.swapExecutor = new SwapExecutor();
+      this.liveTracker = new LiveTracker(this.swapExecutor);
+      logger.info('LIVE mode — Jupiter swap execution enabled');
+    } else {
+      this.shadowTracker = new ShadowTracker();
+      logger.info('SHADOW mode — simulated positions only');
+    }
+  }
+
+  // --- Unified position accessors ---
+  private getOpenPositions(): PositionView[] {
+    if (this.liveTracker) return this.liveTracker.getOpenPositions().map(liveToView);
+    return this.shadowTracker!.getOpenPositions().map(shadowToView);
+  }
+
+  private getOpenCount(): number {
+    return this.liveTracker?.getOpenCount() ?? this.shadowTracker!.getOpenCount();
+  }
+
+  private hasPosition(tokenMint: string): boolean {
+    return this.liveTracker?.hasPosition(tokenMint) ?? this.shadowTracker!.hasPosition(tokenMint);
   }
 
   async start(): Promise<void> {
     logger.info('=== ROSSYBOT V2 — Starting ===');
-    logger.info({ shadowMode: config.shadowMode }, 'Mode');
+    logger.info({ shadowMode: config.shadowMode, live: this.isLive }, 'Mode');
 
     // 1. Test database connection
     const dbOk = await testConnection();
@@ -93,8 +183,12 @@ class RossyBotV2 {
     // Give entry engine ALL tracked wallets for on-chain confluence checks
     this.entryEngine.updateAllTrackedWallets(allActiveWallets);
 
-    // 5. Load open shadow positions
-    await this.shadowTracker.loadOpenPositions();
+    // 5. Load open positions
+    if (this.liveTracker) {
+      await this.liveTracker.loadOpenPositions();
+    } else {
+      await this.shadowTracker!.loadOpenPositions();
+    }
 
     // 6. Wire up callbacks
     this.wireCallbacks();
@@ -102,8 +196,12 @@ class RossyBotV2 {
     // 7. Connect Helius WebSocket (THE CRITICAL STEP)
     await this.wsManager.connect(this.walletAddresses);
 
-    // 8. Start shadow position price monitoring
-    this.shadowTracker.start();
+    // 8. Start position price monitoring
+    if (this.liveTracker) {
+      this.liveTracker.start();
+    } else {
+      this.shadowTracker!.start();
+    }
 
     // 9. Start Nansen wallet discovery (scheduled every 4h + immediate first run)
     this.walletDiscovery.start();
@@ -142,8 +240,8 @@ class RossyBotV2 {
             walletAddress: signal.walletAddress,
             walletLabel: walletRow?.label || signal.walletAddress.slice(0, 8),
             tokenMint: signal.tokenMint,
-            tokenSymbol: signal.tokenMint.slice(0, 6), // Mint only — no symbol lookup yet
-            amountUsd: Math.abs(signal.solDelta) * 170, // Rough SOL→USD estimate
+            tokenSymbol: signal.tokenMint.slice(0, 6),
+            amountUsd: Math.abs(signal.solDelta) * 170,
             detectionLagMs: signal.detectionLagMs,
           });
 
@@ -186,10 +284,10 @@ class RossyBotV2 {
       }
     });
 
-    // --- Entry Engine → Shadow Tracker ---
+    // --- Entry Engine → Position Tracker ---
     this.entryEngine.setSignalCallback(async (signal: ValidatedSignal) => {
       try {
-        // Look up per-wallet EV stats from DB (needed for scoring regardless)
+        // Look up per-wallet EV stats from DB
         const { getMany: dbGetMany } = await import('./db/database.js');
         const walletStats = await dbGetMany<{
           address: string; our_total_trades: number; our_win_rate: number; our_avg_pnl_percent: number;
@@ -217,14 +315,13 @@ class RossyBotV2 {
         }, 'Signal scored');
 
         // Check if we can open a position
-        if (!this.capitalManager.canOpenPosition(this.shadowTracker.getOpenCount())) {
+        if (!this.capitalManager.canOpenPosition(this.getOpenCount())) {
           logger.info({
             reason: 'max positions or daily limit',
             score: score.total,
           }, 'Skipping signal — cannot open position');
 
-          // Send opportunity cost alert with comparison to current position
-          const openPositions = this.shadowTracker.getOpenPositions();
+          const openPositions = this.getOpenPositions();
           const weakest = openPositions.length > 0
             ? openPositions.reduce((a, b) => a.pnl_percent < b.pnl_percent ? a : b)
             : null;
@@ -240,13 +337,27 @@ class RossyBotV2 {
           return;
         }
 
-        if (this.shadowTracker.hasPosition(signal.tokenMint)) {
+        if (this.hasPosition(signal.tokenMint)) {
           logger.info({ token: signal.tokenMint.slice(0, 8) }, 'Skipping signal — already have position');
           return;
         }
 
         const positionSize = this.capitalManager.getPositionSize();
-        const pos = await this.shadowTracker.openPosition(signal, positionSize);
+        let posView: PositionView;
+
+        if (this.liveTracker) {
+          // LIVE: Execute real swap
+          const pos = await this.liveTracker.openPosition(signal, positionSize);
+          if (!pos) return; // Swap failed — already logged
+          posView = liveToView(pos);
+
+          // Refresh balance after trade
+          await this.capitalManager.refreshBalance();
+        } else {
+          // SHADOW: Simulated
+          const pos = await this.shadowTracker!.openPosition(signal, positionSize);
+          posView = shadowToView(pos);
+        }
 
         // Send Telegram alert
         const dex = signal.validation.dexData;
@@ -267,8 +378,8 @@ class RossyBotV2 {
             };
           }),
           signalScore: scoreDisplay,
-          sizeSol: positionSize,
-          price: pos.entry_price,
+          sizeSol: posView.entry_sol,
+          price: posView.entry_price,
           momentum24h: dex?.priceChange?.h24 || 0,
           volumeMultiplier: dex ? (dex.volume?.h24 || 0) / Math.max((dex.volume?.h24 || 1), 1) : 0,
           mcap: dex?.marketCap || dex?.fdv || 0,
@@ -279,6 +390,9 @@ class RossyBotV2 {
           profitTarget: signal.tierConfig.profitTarget,
           stopLoss: signal.tierConfig.stopLoss,
           hardTime: signal.tierConfig.hardTimeHours,
+          entryTx: posView.entry_tx,
+          feesSol: posView.fees_paid_sol,
+          isLive: this.isLive,
         });
       } catch (err) {
         logger.error({ err, token: signal.tokenMint?.slice(0, 8) }, 'Error in entry signal callback');
@@ -339,30 +453,40 @@ class RossyBotV2 {
       }
     });
 
-    // --- Shadow Tracker close callback ---
-    this.shadowTracker.setCloseCallback(async (pos) => {
+    // --- Position close callback (works for both trackers) ---
+    const handlePositionClose = async (posView: PositionView) => {
       try {
-        const pnl = pos.pnl_percent;
+        const pnl = posView.pnl_percent;
         if (pnl >= 0) {
           await this.telegram.sendProfitTargetAlert({
-            tokenSymbol: pos.token_symbol || pos.token_address.slice(0, 8),
+            tokenSymbol: posView.token_symbol || posView.token_address.slice(0, 8),
             pnlPercent: pnl,
-            entrySol: pos.simulated_entry_sol,
-            exitSol: pos.simulated_entry_sol * (1 + pnl),
-            netPnlSol: pos.simulated_entry_sol * pnl,
-            holdMins: pos.hold_time_mins || 0,
+            entrySol: posView.entry_sol,
+            exitSol: posView.entry_sol * (1 + pnl),
+            netPnlSol: posView.net_pnl_sol,
+            holdMins: posView.hold_time_mins || 0,
             capitalBefore: this.capitalManager.capital,
-            capitalAfter: this.capitalManager.capital + pos.simulated_entry_sol * pnl,
+            capitalAfter: this.capitalManager.capital + posView.net_pnl_sol,
+            feesSol: posView.fees_paid_sol,
+            entryTx: posView.entry_tx,
+            isLive: this.isLive,
           });
         } else {
-          this.capitalManager.recordLoss(pos.simulated_entry_sol * Math.abs(pnl));
+          this.capitalManager.recordLoss(Math.abs(posView.net_pnl_sol));
           await this.telegram.sendStopLossAlert({
-            tokenSymbol: pos.token_symbol || pos.token_address.slice(0, 8),
+            tokenSymbol: posView.token_symbol || posView.token_address.slice(0, 8),
             pnlPercent: pnl,
-            lossSol: pos.simulated_entry_sol * Math.abs(pnl),
-            holdMins: pos.hold_time_mins || 0,
-            reason: pos.exit_reason || 'Unknown',
+            lossSol: Math.abs(posView.net_pnl_sol),
+            holdMins: posView.hold_time_mins || 0,
+            reason: posView.exit_reason || 'Unknown',
+            feesSol: posView.fees_paid_sol,
+            isLive: this.isLive,
           });
+        }
+
+        // Refresh balance after close in live mode
+        if (this.isLive) {
+          await this.capitalManager.refreshBalance();
         }
 
         // Send detailed trade close log
@@ -374,26 +498,25 @@ class RossyBotV2 {
                   COALESCE(our_win_rate, 0) as our_win_rate,
                   COALESCE(our_avg_pnl_percent, 0) as our_avg_pnl_percent
              FROM alpha_wallets WHERE address = ANY($1)`,
-          [pos.signal_wallets],
+          [posView.signal_wallets],
         );
         const walletMap = new Map(walletRows.map((w) => [w.address, w]));
 
-        // Calculate detection lag from alpha_buy_time to entry_time
-        const detectionLagMs = pos.entry_time.getTime() - pos.alpha_buy_time.getTime();
+        const detectionLagMs = posView.entry_time.getTime() - posView.alpha_buy_time.getTime();
 
         await this.telegram.sendTradeCloseLog({
-          tokenSymbol: pos.token_symbol || pos.token_address.slice(0, 8),
-          tokenMint: pos.token_address,
+          tokenSymbol: posView.token_symbol || posView.token_address.slice(0, 8),
+          tokenMint: posView.token_address,
           pnlPercent: pnl,
-          pnlSol: pos.simulated_entry_sol * pnl,
-          entryPrice: pos.entry_price,
-          exitPrice: pos.current_price,
-          peakPrice: pos.peak_price,
-          sizeSol: pos.simulated_entry_sol,
-          holdMins: pos.hold_time_mins || 0,
-          exitReason: pos.exit_reason || 'Unknown',
-          tier: pos.capital_tier,
-          wallets: pos.signal_wallets.map((addr) => {
+          pnlSol: posView.pnl_sol,
+          entryPrice: posView.entry_price,
+          exitPrice: posView.current_price,
+          peakPrice: posView.peak_price,
+          sizeSol: posView.entry_sol,
+          holdMins: posView.hold_time_mins || 0,
+          exitReason: posView.exit_reason || 'Unknown',
+          tier: posView.capital_tier,
+          wallets: posView.signal_wallets.map((addr) => {
             const w = walletMap.get(addr);
             return {
               address: addr,
@@ -403,19 +526,62 @@ class RossyBotV2 {
               avgPnl: Number(w?.our_avg_pnl_percent || 0),
             };
           }),
-          entryTime: pos.entry_time.toISOString().replace('T', ' ').slice(0, 19) + ' UTC',
-          exitTime: (pos.closed_at || new Date()).toISOString().replace('T', ' ').slice(0, 19) + ' UTC',
+          entryTime: posView.entry_time.toISOString().replace('T', ' ').slice(0, 19) + ' UTC',
+          exitTime: (posView.closed_at || new Date()).toISOString().replace('T', ' ').slice(0, 19) + ' UTC',
           detectionLagMs: Math.max(0, detectionLagMs),
+          feesSol: posView.fees_paid_sol,
+          netPnlSol: posView.net_pnl_sol,
+          isLive: this.isLive,
         });
       } catch (err) {
-        logger.error({ err, token: pos.token_address?.slice(0, 8) }, 'Error in position close callback');
+        logger.error({ err, token: posView.token_address?.slice(0, 8) }, 'Error in position close callback');
       }
-    });
+    };
+
+    if (this.liveTracker) {
+      this.liveTracker.setCloseCallback((pos) => handlePositionClose(liveToView(pos)));
+      this.liveTracker.setAlphaExitCallback(async (pos, walletAddress, sellPct) => {
+        const { getOne: dbGetOne } = await import('./db/database.js');
+        const walletRow = await dbGetOne<{ label: string }>(
+          `SELECT label FROM alpha_wallets WHERE address = $1`, [walletAddress],
+        );
+        await this.telegram.sendAlphaExitAlert({
+          walletLabel: walletRow?.label || walletAddress.slice(0, 8),
+          sellPct,
+          tokenSymbol: pos.token_symbol || pos.token_address.slice(0, 8),
+          detectionLagMs: 0,
+          action: `SOLD 100% (${pos.capital_tier_at_entry})`,
+          pnlPercent: pos.pnl_percent,
+          pnlSol: pos.net_pnl_sol,
+          holdMins: pos.hold_time_mins || Math.round((Date.now() - pos.entry_time.getTime()) / 60000),
+        });
+      });
+      this.liveTracker.setSwapFailedCallback(async (tokenSymbol, error, type) => {
+        await this.telegram.send(`🚫 ${type} SWAP FAILED: $${tokenSymbol}\n└ ${error}`);
+      });
+    } else {
+      this.shadowTracker!.setCloseCallback((pos) => handlePositionClose(shadowToView(pos)));
+      this.shadowTracker!.setAlphaExitCallback(async (pos, walletAddress, sellPct) => {
+        const { getOne: dbGetOne } = await import('./db/database.js');
+        const walletRow = await dbGetOne<{ label: string }>(
+          `SELECT label FROM alpha_wallets WHERE address = $1`, [walletAddress],
+        );
+        await this.telegram.sendAlphaExitAlert({
+          walletLabel: walletRow?.label || walletAddress.slice(0, 8),
+          sellPct,
+          tokenSymbol: pos.token_symbol || pos.token_address.slice(0, 8),
+          detectionLagMs: 0,
+          action: `SOLD 100% (${pos.capital_tier} — SHADOW)`,
+          pnlPercent: pos.pnl_percent,
+          pnlSol: pos.simulated_entry_sol * pos.pnl_percent,
+          holdMins: pos.hold_time_mins || Math.round((Date.now() - pos.entry_time.getTime()) / 60000),
+        });
+      });
+    }
 
     // --- Wallet Discovery → Helius subscription ---
     this.walletDiscovery.setNewWalletCallback(async (address: string) => {
       try {
-        // Always add to entry engine's tracked list for on-chain confluence
         this.entryEngine.updateAllTrackedWallets(
           await this.walletDiscovery.getActiveWallets(),
         );
@@ -440,43 +606,77 @@ class RossyBotV2 {
       return {
         capitalSol: this.capitalManager.capital,
         tier: this.capitalManager.tier,
-        openPositions: this.shadowTracker.getOpenCount(),
+        openPositions: this.getOpenCount(),
         maxPositions: this.capitalManager.tierConfig.maxPositions,
         wsConnected: ws.connected,
         wsFallback: ws.fallbackMode,
-        dailyPnl: '0.00', // TODO: calculate from daily_stats
+        dailyPnl: '0.00',
+        isLive: this.isLive,
       };
     });
 
-    this.telegram.setPositionsCallback(() => this.shadowTracker.getOpenPositions());
+    this.telegram.setPositionsCallback(() => this.getOpenPositions());
     this.telegram.setWsHealthCallback(() => this.wsManager.getStatus());
     this.telegram.setNansenUsageCallback(() => this.nansen.usage);
     this.telegram.setDiscoveryCallback(() => this.walletDiscovery.runDiscovery());
     this.telegram.setPauseCallback(() => logger.info('Trading PAUSED via Telegram'));
     this.telegram.setResumeCallback(() => logger.info('Trading RESUMED via Telegram'));
+
+    // /kill command — live mode force close
+    if (this.liveTracker) {
+      this.telegram.setKillCallback(async (tokenIdentifier: string) => {
+        return this.liveTracker!.forceClose(tokenIdentifier);
+      });
+    }
+
+    // /holdtime command — run hold-time analysis on demand
+    this.telegram.setHoldTimeCallback(async () => {
+      const analyzer = this.walletDiscovery.getHoldTimeAnalyzer();
+      const profiles = await analyzer.analyzeAllWallets();
+      return profiles.map((p) => analyzer.formatProfileForTelegram(p));
+    });
+
+    // Hold-time enforcement alerts
+    this.walletDiscovery.setHoldTimeCallback(async (results) => {
+      if (results.deactivated.length > 0) {
+        await this.telegram.send(
+          `🚫 HOLD-TIME ENFORCEMENT\n` +
+          `├ Deactivated: ${results.deactivated.length} wallet(s) — proven bag-holders\n` +
+          `│  ${results.deactivated.map((a) => a.slice(0, 8)).join(', ')}\n` +
+          `└ These wallets don't profit within our 48h window`,
+        );
+      }
+      if (results.demoted.length > 0) {
+        await this.telegram.send(
+          `⚠️ HOLD-TIME DEMOTION\n` +
+          `├ Demoted to Tier B: ${results.demoted.length} wallet(s)\n` +
+          `│  ${results.demoted.map((a) => a.slice(0, 8)).join(', ')}\n` +
+          `└ Poor short-term alpha — deprioritized in ranking`,
+        );
+      }
+    });
   }
 
-  /** Handle sell signals from alpha wallets — triggers exit detection */
+  /** Handle sell signals from alpha wallets */
   private async handleSellSignal(signal: ParsedSignal): Promise<void> {
-    // Check if we hold a position in this token
-    const openPositions = this.shadowTracker.getOpenPositions();
+    const openPositions = this.getOpenPositions();
     const affected = openPositions.filter((p) => p.token_address === signal.tokenMint);
 
     if (affected.length === 0) return;
 
-    // This wallet sold a token we hold — trigger alpha exit logic
     logger.info({
       wallet: signal.walletAddress.slice(0, 8),
       token: signal.tokenMint.slice(0, 8),
       amount: signal.tokenAmount,
     }, 'Alpha wallet SELL detected on held token');
 
-    // Estimate sell percentage from the signal
-    // In production, this would use parseSellPercentage from the full tx
-    // For now, estimate from SOL delta
-    const estimatedSellPct = 0.5; // Conservative estimate
+    const estimatedSellPct = 0.5;
 
-    await this.shadowTracker.handleAlphaExit(signal.tokenMint, signal.walletAddress, estimatedSellPct);
+    if (this.liveTracker) {
+      await this.liveTracker.handleAlphaExit(signal.tokenMint, signal.walletAddress, estimatedSellPct);
+    } else {
+      await this.shadowTracker!.handleAlphaExit(signal.tokenMint, signal.walletAddress, estimatedSellPct);
+    }
 
     // Log to alpha_wallet_exits
     try {
@@ -486,7 +686,7 @@ class RossyBotV2 {
         `INSERT INTO alpha_wallet_exits (position_id, wallet_address, detected_at, detection_lag_ms, sell_percentage, tx_signature, our_action, detection_source)
          VALUES ($1, $2, $3, $4, $5, $6, $7, $8)`,
         [pos.id, signal.walletAddress, signal.detectedAt, signal.detectionLagMs, estimatedSellPct,
-         signal.txSignature, 'SHADOW_EXIT', signal.detectionSource],
+         signal.txSignature, this.isLive ? 'LIVE_EXIT' : 'SHADOW_EXIT', signal.detectionSource],
       );
     } catch (err) {
       logger.error({ err }, 'Failed to log alpha exit');
@@ -494,7 +694,6 @@ class RossyBotV2 {
   }
 
   private scheduleDailySummary(): void {
-    // Check every minute if it's midnight UTC
     this.dailySummaryInterval = setInterval(async () => {
       try {
         const now = new Date();
@@ -533,7 +732,6 @@ class RossyBotV2 {
 
   private async sendStartupDiagnostics(): Promise<void> {
     try {
-      // Get wallet info from DB with performance stats
       const walletRows = await (await import('./db/database.js')).getMany<{
         address: string; label: string; tier: string; helius_subscribed: boolean;
         source: string; nansen_roi_percent: number; nansen_pnl_usd: number;
@@ -552,18 +750,17 @@ class RossyBotV2 {
            CASE WHEN source = 'NANSEN_SEED' THEN 0 ELSE 1 END ASC,
            tier ASC, nansen_roi_percent DESC`);
 
-      // Get signal count for today
       const today = new Date().toISOString().split('T')[0];
       const signalRow = await (await import('./db/database.js')).getOne<{ count: string }>(
         `SELECT COUNT(*) as count FROM signal_events WHERE first_detected_at >= $1`, [today],
       );
 
-      // Get total trades
+      // Count from whichever table is active
+      const tradeTable = this.isLive ? 'positions' : 'shadow_positions';
       const tradeRow = await (await import('./db/database.js')).getOne<{ count: string }>(
-        `SELECT COUNT(*) as count FROM shadow_positions`,
+        `SELECT COUNT(*) as count FROM ${tradeTable}`,
       );
 
-      // Get latest discovery stats
       const discoveryRow = await (await import('./db/database.js')).getOne<{
         tokens_screened: number; wallets_added: number;
       }>(`SELECT tokens_screened, wallets_added FROM wallet_discovery_log ORDER BY run_at DESC LIMIT 1`);
@@ -577,7 +774,7 @@ class RossyBotV2 {
         capitalSol: this.capitalManager.capital,
         tier: this.capitalManager.tier,
         maxPositions: tierCfg.maxPositions,
-        openPositions: this.shadowTracker.getOpenCount(),
+        openPositions: this.getOpenCount(),
         wallets: walletRows.map((w) => ({
           address: w.address,
           label: w.label,
@@ -627,7 +824,8 @@ class RossyBotV2 {
     if (this.dailySummaryInterval) clearInterval(this.dailySummaryInterval);
     await this.wsManager.shutdown();
     this.fallbackPoller.stop();
-    this.shadowTracker.stop();
+    this.liveTracker?.stop();
+    this.shadowTracker?.stop();
     this.walletDiscovery.stop();
     await this.telegram.shutdown();
     const { pool } = await import('./db/database.js');

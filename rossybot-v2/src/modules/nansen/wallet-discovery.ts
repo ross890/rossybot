@@ -4,6 +4,7 @@ import { query, getMany } from '../../db/database.js';
 import { config, SEED_WALLETS, getTierConfig, getTierForCapital } from '../../config/index.js';
 import { CapitalTier, WalletSource, WalletTier } from '../../types/index.js';
 import { NansenClient } from './client.js';
+import { HoldTimeAnalyzer } from '../analysis/hold-time-analyzer.js';
 
 interface WalletCandidate {
   address: string;
@@ -16,11 +17,24 @@ interface WalletCandidate {
 
 export class WalletDiscovery {
   private nansen: NansenClient;
+  private holdTimeAnalyzer: HoldTimeAnalyzer;
   private discoveryInterval: ReturnType<typeof setInterval> | null = null;
   private onNewWallet: ((address: string) => void) | null = null;
+  private onHoldTimeResults: ((results: { deactivated: string[]; demoted: string[] }) => void) | null = null;
 
   constructor(nansen: NansenClient) {
     this.nansen = nansen;
+    this.holdTimeAnalyzer = new HoldTimeAnalyzer();
+  }
+
+  /** Set callback for hold-time enforcement results */
+  setHoldTimeCallback(cb: (results: { deactivated: string[]; demoted: string[] }) => void): void {
+    this.onHoldTimeResults = cb;
+  }
+
+  /** Get the hold-time analyzer for direct access (e.g., /holdtime command) */
+  getHoldTimeAnalyzer(): HoldTimeAnalyzer {
+    return this.holdTimeAnalyzer;
   }
 
   /** Set callback for when new wallets are discovered */
@@ -108,14 +122,28 @@ export class WalletDiscovery {
       const result = await this.discoverTopTraders();
       const walletsRemoved = await this.validateExistingWallets();
 
+      // Run hold-time analysis on all active wallets
+      // This scores wallets on short-term profitability within our exit windows
+      logger.info('Running hold-time analysis...');
+      const holdTimeResults = await this.holdTimeAnalyzer.enforceHoldTimeRequirements();
+      if (holdTimeResults.deactivated.length > 0 || holdTimeResults.demoted.length > 0) {
+        logger.info({
+          deactivated: holdTimeResults.deactivated.length,
+          demoted: holdTimeResults.demoted.length,
+        }, 'Hold-time enforcement applied');
+        this.onHoldTimeResults?.(holdTimeResults);
+      }
+
       const duration = Date.now() - start;
-      await this.logDiscovery(result.tokensScreened, result.candidates, result.added, walletsRemoved, duration);
+      await this.logDiscovery(result.tokensScreened, result.candidates, result.added,
+        walletsRemoved + holdTimeResults.deactivated.length, duration);
 
       logger.info({
         tokensScreened: result.tokensScreened,
         candidates: result.candidates,
         added: result.added,
-        removed: walletsRemoved,
+        removed: walletsRemoved + holdTimeResults.deactivated.length,
+        holdTimeDemoted: holdTimeResults.demoted.length,
         durationMs: duration,
       }, 'Discovery cycle complete');
     } catch (err: unknown) {
@@ -443,13 +471,16 @@ export class WalletDiscovery {
            CASE WHEN source = 'NANSEN_SEED' THEN 50 ELSE 0 END
            -- Tier A wallets get priority
            + CASE WHEN tier = 'A' THEN 30 ELSE 0 END
-           -- Nansen ROI (capped at 20 points)
-           + LEAST(COALESCE(nansen_roi_percent, 0) / 25, 20)
-           -- Our win rate contribution (up to 30 points, only if 3+ trades)
-           + CASE WHEN our_total_trades >= 3 THEN COALESCE(our_win_rate, 0) * 30 ELSE 0 END
-           -- Our avg PnL (up to 15 points)
-           + LEAST(GREATEST(COALESCE(our_avg_pnl_percent, 0) * 100, 0), 15)
-           -- Recent on-chain activity bonus (up to 20 points: 20 if active today, 0 if >7d ago)
+           -- SHORT-TERM ALPHA SCORE (0-100 → 0-40 pts) — biggest weight
+           -- This measures whether the wallet is profitable within OUR hold windows
+           + LEAST(COALESCE(short_term_alpha_score, 0) * 0.4, 40)
+           -- Nansen ROI (capped at 10 points, reduced from 20)
+           + LEAST(COALESCE(nansen_roi_percent, 0) / 25, 10)
+           -- Our win rate contribution (up to 20 points, only if 3+ trades)
+           + CASE WHEN our_total_trades >= 3 THEN COALESCE(our_win_rate, 0) * 20 ELSE 0 END
+           -- Our avg PnL (up to 10 points)
+           + LEAST(GREATEST(COALESCE(our_avg_pnl_percent, 0) * 100, 0), 10)
+           -- Recent on-chain activity bonus (up to 20 points)
            + CASE
                WHEN last_active_at IS NULL THEN 0
                WHEN last_active_at > NOW() - INTERVAL '1 day' THEN 20
@@ -459,6 +490,12 @@ export class WalletDiscovery {
              END
            -- Consecutive losses penalty
            - COALESCE(consecutive_losses, 0) * 10
+           -- Bag-holder penalty: high median hold time = bad fit
+           - CASE
+               WHEN COALESCE(median_hold_time_mins, 0) > 2880 AND COALESCE(round_trips_analyzed, 0) >= 3 THEN 20
+               WHEN COALESCE(median_hold_time_mins, 0) > 1440 AND COALESCE(round_trips_analyzed, 0) >= 3 THEN 10
+               ELSE 0
+             END
          ) as score
        FROM alpha_wallets WHERE active = TRUE
        ORDER BY score DESC`,

@@ -2,7 +2,7 @@ import TelegramBot from 'node-telegram-bot-api';
 import { config } from '../../config/index.js';
 import { logger } from '../../utils/logger.js';
 import { getMany, getOne, query } from '../../db/database.js';
-import type { ShadowPosition } from '../../types/index.js';
+import type { PositionView } from '../../types/index.js';
 
 export class TelegramService {
   private bot: TelegramBot;
@@ -14,9 +14,11 @@ export class TelegramService {
   private onResume: (() => void) | null = null;
   private onForceDiscovery: (() => void) | null = null;
   private getStatus: (() => Record<string, unknown>) | null = null;
-  private getPositions: (() => ShadowPosition[]) | null = null;
+  private getPositions: (() => PositionView[]) | null = null;
   private getWsHealth: (() => Record<string, unknown>) | null = null;
   private getNansenUsage: (() => Record<string, unknown>) | null = null;
+  private onKill: ((token: string) => Promise<{ success: boolean; token?: string; error?: string }>) | null = null;
+  private onHoldTimeAnalysis: (() => Promise<string[]>) | null = null;
 
   constructor() {
     this.bot = new TelegramBot(config.telegram.botToken, {
@@ -43,9 +45,11 @@ export class TelegramService {
   setResumeCallback(cb: () => void): void { this.onResume = cb; }
   setDiscoveryCallback(cb: () => void): void { this.onForceDiscovery = cb; }
   setStatusCallback(cb: () => Record<string, unknown>): void { this.getStatus = cb; }
-  setPositionsCallback(cb: () => ShadowPosition[]): void { this.getPositions = cb; }
+  setPositionsCallback(cb: () => PositionView[]): void { this.getPositions = cb; }
   setWsHealthCallback(cb: () => Record<string, unknown>): void { this.getWsHealth = cb; }
   setNansenUsageCallback(cb: () => Record<string, unknown>): void { this.getNansenUsage = cb; }
+  setKillCallback(cb: (token: string) => Promise<{ success: boolean; token?: string; error?: string }>): void { this.onKill = cb; }
+  setHoldTimeCallback(cb: () => Promise<string[]>): void { this.onHoldTimeAnalysis = cb; }
 
   get isPaused(): boolean { return this.paused; }
 
@@ -72,11 +76,14 @@ export class TelegramService {
     stopLoss: number;
     hardTime: number;
     signalScore?: string;
+    entryTx?: string;
+    feesSol?: number;
+    isLive?: boolean;
   }): Promise<void> {
     const walletLabels = data.wallets.map((w) => w.slice(0, 8)).join(' + ');
     const dexLink = `https://dexscreener.com/solana/${data.tokenMint}`;
+    const modeTag = data.isLive ? '' : ' (SHADOW)';
 
-    // Format per-wallet EV lines
     const evLines: string[] = [];
     if (data.walletEv && data.walletEv.length > 0) {
       for (const w of data.walletEv) {
@@ -91,7 +98,7 @@ export class TelegramService {
     }
 
     const msg = [
-      `🟢 ENTRY: $${data.tokenSymbol} [${data.tier}] (SHADOW)`,
+      `🟢 ENTRY: $${data.tokenSymbol} [${data.tier}]${modeTag}`,
       `├ Wallets: ${walletLabels} (${data.walletCount}/${data.totalMonitored} via Helius ✅)`,
       ...(evLines.length > 0 ? [`├ Wallet EV:`, ...evLines] : []),
       `├ Size: ${data.sizeSol.toFixed(2)} SOL @ $${data.price.toFixed(6)}`,
@@ -100,7 +107,9 @@ export class TelegramService {
       `├ Safety: ✅ | Helius lag: ${(data.detectionLagMs / 1000).toFixed(1)}s`,
       `├ Execution lag: ${this.formatLag(data.executionLagSecs)}`,
       ...(data.signalScore ? [data.signalScore] : []),
+      ...(data.feesSol ? [`├ Fees: ${data.feesSol.toFixed(4)} SOL`] : []),
       `├ Exit: TP +${(data.profitTarget * 100).toFixed(0)}%, SL ${(data.stopLoss * 100).toFixed(0)}%, alpha exit, ${data.hardTime}h max`,
+      ...(data.entryTx ? [`├ TX: https://solscan.io/tx/${data.entryTx}`] : []),
       `└ ${dexLink}`,
     ].join('\n');
 
@@ -158,10 +167,14 @@ export class TelegramService {
     holdMins: number;
     capitalBefore: number;
     capitalAfter: number;
+    feesSol?: number;
+    entryTx?: string;
+    isLive?: boolean;
   }): Promise<void> {
     const msg = [
       `💰 TARGET: $${data.tokenSymbol} +${(data.pnlPercent * 100).toFixed(0)}%`,
       `├ ${data.entrySol.toFixed(2)} SOL → ${data.exitSol.toFixed(3)} SOL | Net: +${data.netPnlSol.toFixed(3)} SOL`,
+      ...(data.feesSol ? [`├ Fees: ${data.feesSol.toFixed(4)} SOL`] : []),
       `├ Hold: ${this.formatHoldTime(data.holdMins)}`,
       `└ Capital: ${data.capitalBefore.toFixed(2)} → ${data.capitalAfter.toFixed(2)} SOL`,
     ].join('\n');
@@ -175,10 +188,13 @@ export class TelegramService {
     lossSol: number;
     holdMins: number;
     reason: string;
+    feesSol?: number;
+    isLive?: boolean;
   }): Promise<void> {
     const msg = [
       `🔴 EXIT: $${data.tokenSymbol} ${(data.pnlPercent * 100).toFixed(1)}%`,
       `├ Loss: ${data.lossSol.toFixed(3)} SOL`,
+      ...(data.feesSol ? [`├ Fees: ${data.feesSol.toFixed(4)} SOL`] : []),
       `├ Hold: ${this.formatHoldTime(data.holdMins)}`,
       `└ Reason: ${data.reason}`,
     ].join('\n');
@@ -263,7 +279,6 @@ export class TelegramService {
     await this.send(`⚠️ ${data.walletLabel} bought $${data.tokenSymbol} — skipped: ${data.reason}`);
   }
 
-  /** Notify on every individual wallet trade detection */
   async sendTradeDetected(data: {
     action: 'BUY' | 'SELL';
     walletAddress: string;
@@ -398,8 +413,8 @@ export class TelegramService {
         `📍 STATUS`,
         `├ Capital: ${(status.capitalSol as number || 0).toFixed(2)} SOL [${status.tier || 'MICRO'}]`,
         `├ Positions: ${status.openPositions || 0}/${status.maxPositions || 2}`,
+        `├ Mode: ${(status.isLive as boolean) ? '💰 LIVE' : '👻 SHADOW'}`,
         `├ Paused: ${this.paused ? 'YES' : 'NO'}`,
-        `├ Shadow mode: ${config.shadowMode ? 'YES' : 'NO'}`,
         `├ WebSocket: ${(status.wsConnected as boolean) ? '✅' : '❌'}${(status.wsFallback as boolean) ? ' (FALLBACK)' : ''}`,
         `└ Daily P&L: ${status.dailyPnl || '0.00'} SOL`,
       ].join('\n');
@@ -416,7 +431,8 @@ export class TelegramService {
       const lines = positions.map((p) => {
         const pnl = (p.pnl_percent * 100).toFixed(1);
         const holdMins = Math.round((Date.now() - p.entry_time.getTime()) / 60000);
-        return `${p.pnl_percent >= 0 ? '🟢' : '🔴'} $${p.token_symbol || p.token_address.slice(0, 8)} | ${pnl}% | ${this.formatHoldTime(holdMins)} | ${p.simulated_entry_sol.toFixed(2)} SOL`;
+        const feeLine = p.fees_paid_sol > 0 ? ` | fees ${p.fees_paid_sol.toFixed(4)}` : '';
+        return `${p.pnl_percent >= 0 ? '🟢' : '🔴'} $${p.token_symbol || p.token_address.slice(0, 8)} | ${pnl}% | ${this.formatHoldTime(holdMins)} | ${p.entry_sol.toFixed(2)} SOL${feeLine}`;
       });
       await this.bot.sendMessage(msg.chat.id, `📊 POSITIONS\n${lines.join('\n')}`);
     });
@@ -507,6 +523,7 @@ export class TelegramService {
       const status = this.getStatus?.() || {};
       await this.bot.sendMessage(msg.chat.id, [
         `🏥 SYSTEM HEALTH`,
+        `├ Mode: ${(status.isLive as boolean) ? '💰 LIVE' : '👻 SHADOW'}`,
         `├ WebSocket: ${(ws.connected as boolean) ? '✅ Connected' : '❌ Disconnected'}`,
         `├ Fallback: ${(ws.fallbackMode as boolean) ? '⚠️ ACTIVE' : '✅ Off'}`,
         `├ Subscribed: ${ws.subscribedWallets || 0} wallets`,
@@ -515,7 +532,6 @@ export class TelegramService {
         `├ Nansen: ${nansen.callsLastMinute || 0}/${nansen.maxPerMinute || 80}/min`,
         `├ Positions: ${status.openPositions || 0}/${status.maxPositions || 2}`,
         `├ Capital: ${(status.capitalSol as number || 0).toFixed(2)} SOL [${status.tier || 'MICRO'}]`,
-        `├ Shadow: ${config.shadowMode ? 'YES' : 'NO'}`,
         `└ Paused: ${this.paused ? 'YES' : 'NO'}`,
       ].join('\n'));
     });
@@ -542,31 +558,55 @@ export class TelegramService {
     this.bot.onText(/\/kill (.+)/, async (msg, match) => {
       if (msg.chat.id.toString() !== this.chatId) return;
       const token = match?.[1];
-      await this.bot.sendMessage(msg.chat.id, `🔪 Force close for ${token} — not implemented in shadow mode`);
+      if (!token) {
+        await this.bot.sendMessage(msg.chat.id, 'Usage: /kill <token_symbol_or_address>');
+        return;
+      }
+
+      if (!this.onKill) {
+        await this.bot.sendMessage(msg.chat.id, `🔪 Force close not available in shadow mode`);
+        return;
+      }
+
+      await this.bot.sendMessage(msg.chat.id, `🔪 Force closing $${token}...`);
+      try {
+        const result = await this.onKill(token);
+        if (result.success) {
+          await this.bot.sendMessage(msg.chat.id, `✅ Force closed $${result.token}`);
+        } else {
+          await this.bot.sendMessage(msg.chat.id, `❌ ${result.error}`);
+        }
+      } catch (err) {
+        await this.bot.sendMessage(msg.chat.id, `❌ Kill failed: ${err instanceof Error ? err.message : 'unknown error'}`);
+      }
     });
 
     this.bot.onText(/\/pnl/, async (msg) => {
       if (msg.chat.id.toString() !== this.chatId) return;
       try {
-        // Open positions from in-memory tracker
         const open = this.getPositions?.() || [];
         const openCount = open.length;
-        const unrealizedSol = open.reduce((s, p) => s + p.simulated_entry_sol * p.pnl_percent, 0);
+        const unrealizedSol = open.reduce((s, p) => s + p.entry_sol * p.pnl_percent, 0);
         const unrealizedPct = open.length > 0
           ? open.reduce((s, p) => s + p.pnl_percent, 0) / open.length * 100
           : 0;
 
-        // Closed positions from DB
+        // Query both tables for P&L data
+        const isLive = !config.shadowMode;
+        const tableName = isLive ? 'positions' : 'shadow_positions';
+        const solColumn = isLive ? 'entry_sol' : 'simulated_entry_sol';
+
         const closed = await getOne<Record<string, unknown>>(
           `SELECT
              COUNT(*) as total,
              COUNT(*) FILTER (WHERE pnl_percent > 0) as wins,
              COUNT(*) FILTER (WHERE pnl_percent <= 0) as losses,
-             COALESCE(SUM(simulated_entry_sol * pnl_percent), 0) as realized_sol,
+             COALESCE(SUM(${solColumn} * pnl_percent), 0) as realized_sol,
              COALESCE(AVG(pnl_percent), 0) as avg_pnl,
              COALESCE(AVG(hold_time_mins), 0) as avg_hold,
+             ${isLive ? 'COALESCE(SUM(fees_paid_sol), 0) as total_fees,' : ''}
              MIN(entry_time) as first_trade
-           FROM shadow_positions WHERE status = 'CLOSED'`,
+           FROM ${tableName} WHERE status = 'CLOSED'`,
         );
 
         const total = Number(closed?.total || 0);
@@ -575,6 +615,7 @@ export class TelegramService {
         const realizedSol = Number(closed?.realized_sol || 0);
         const avgPnl = Number(closed?.avg_pnl || 0);
         const avgHold = Number(closed?.avg_hold || 0);
+        const totalFees = isLive ? Number(closed?.total_fees || 0) : 0;
         const wr = total > 0 ? (wins / total * 100).toFixed(0) : 'N/A';
         const netSol = realizedSol + unrealizedSol;
         const firstTrade = closed?.first_trade ? new Date(closed.first_trade as string) : null;
@@ -582,18 +623,47 @@ export class TelegramService {
           ? firstTrade.toLocaleDateString('en-US', { month: 'short', day: 'numeric' })
           : 'N/A';
 
-        await this.bot.sendMessage(msg.chat.id, [
-          `📈 ${config.shadowMode ? 'SHADOW' : 'LIVE'} P&L`,
+        const lines = [
+          `📈 ${isLive ? 'LIVE' : 'SHADOW'} P&L`,
           `├ Open positions: ${openCount}`,
           `├ Unrealized: ${unrealizedSol >= 0 ? '+' : ''}${unrealizedSol.toFixed(3)} SOL (${unrealizedPct >= 0 ? '+' : ''}${unrealizedPct.toFixed(1)}% avg)`,
           `├ Realized: ${realizedSol >= 0 ? '+' : ''}${realizedSol.toFixed(3)} SOL (${total} trades)`,
           `├ Net: ${netSol >= 0 ? '+' : ''}${netSol.toFixed(3)} SOL`,
           `├ Win rate: ${wr}% (${wins}W / ${losses}L)`,
           `├ Avg PnL: ${(avgPnl * 100).toFixed(1)}% | Avg hold: ${this.formatHoldTime(avgHold)}`,
-          `└ Since: ${sinceStr}`,
-        ].join('\n'));
+        ];
+
+        if (totalFees > 0) {
+          lines.push(`├ Total fees: ${totalFees.toFixed(4)} SOL`);
+        }
+
+        lines.push(`└ Since: ${sinceStr}`);
+
+        await this.bot.sendMessage(msg.chat.id, lines.join('\n'));
       } catch (err) {
         await this.bot.sendMessage(msg.chat.id, '❌ Failed to load PnL data');
+      }
+    });
+
+    this.bot.onText(/\/holdtime/, async (msg) => {
+      if (msg.chat.id.toString() !== this.chatId) return;
+      if (!this.onHoldTimeAnalysis) {
+        await this.bot.sendMessage(msg.chat.id, '❌ Hold-time analysis not available');
+        return;
+      }
+      await this.bot.sendMessage(msg.chat.id, '🔍 Running hold-time analysis...');
+      try {
+        const lines = await this.onHoldTimeAnalysis();
+        if (lines.length === 0) {
+          await this.bot.sendMessage(msg.chat.id, '📭 No wallet trade data to analyze yet');
+          return;
+        }
+        const output = `📊 HOLD-TIME ANALYSIS\n\n${lines.join('\n\n')}`;
+        for (const chunk of this.chunkMessage(output)) {
+          await this.bot.sendMessage(msg.chat.id, chunk);
+        }
+      } catch (err) {
+        await this.bot.sendMessage(msg.chat.id, '❌ Hold-time analysis failed');
       }
     });
 
@@ -616,7 +686,6 @@ export class TelegramService {
           const result = s.validation_result as string;
           const details = s.validation_details as Record<string, unknown> || {};
 
-          // Extract the specific failure reason from validation details
           let reason = result.replace('FAILED_', '');
           if (result === 'FAILED_MCAP' && details.mcap) {
             const mcapDetail = details.mcap as Record<string, unknown>;
@@ -655,7 +724,6 @@ export class TelegramService {
     logger.info('Telegram bot commands registered');
   }
 
-  /** Detailed signal validation log — fires for every signal reaching confluence */
   async sendSignalLog(data: {
     tokenSymbol: string;
     tokenMint: string;
@@ -717,7 +785,6 @@ export class TelegramService {
     await this.send(msg);
   }
 
-  /** Detailed trade close log — fires on every position close */
   async sendTradeCloseLog(data: {
     tokenSymbol: string;
     tokenMint: string;
@@ -734,6 +801,9 @@ export class TelegramService {
     entryTime: string;
     exitTime: string;
     detectionLagMs: number;
+    feesSol?: number;
+    netPnlSol?: number;
+    isLive?: boolean;
   }): Promise<void> {
     const isWin = data.pnlPercent > 0;
     const icon = isWin ? '💰' : '💸';
@@ -754,7 +824,8 @@ export class TelegramService {
       `${icon} TRADE LOG | $${data.tokenSymbol} | ${pnlSign}${(data.pnlPercent * 100).toFixed(1)}% ${result}`,
       `├ Entry: ${data.sizeSol.toFixed(2)} SOL @ $${data.entryPrice.toFixed(8)}`,
       `├ Exit: $${data.exitPrice.toFixed(8)} | ${data.exitReason}`,
-      `├ Net: ${pnlSign}${data.pnlSol.toFixed(4)} SOL`,
+      `├ Net: ${pnlSign}${(data.netPnlSol ?? data.pnlSol).toFixed(4)} SOL`,
+      ...(data.feesSol ? [`├ Fees: ${data.feesSol.toFixed(4)} SOL`] : []),
       `├ Peak: +${peakPnl.toFixed(1)}% | Drawdown from peak: ${drawdownFromPeak.toFixed(1)}%`,
       `├ Hold: ${this.formatHoldTime(data.holdMins)} | Tier: ${data.tier}`,
       `├ Detection lag: ${(data.detectionLagMs / 1000).toFixed(1)}s`,
@@ -769,7 +840,7 @@ export class TelegramService {
 
   // --- Helpers ---
 
-  private async send(text: string): Promise<void> {
+  async send(text: string): Promise<void> {
     try {
       for (const chunk of this.chunkMessage(text)) {
         await this.bot.sendMessage(this.chatId, chunk, { parse_mode: undefined });

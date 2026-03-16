@@ -70,9 +70,9 @@ export class WalletDiscovery {
     return eligible.map((w) => w.address);
   }
 
-  /** Deactivate wallets below $10K PnL minimum (run on startup to clean existing data) */
+  /** Deactivate wallets below $1K PnL minimum (run on startup to clean existing data) */
   async enforceMinimumPnl(): Promise<number> {
-    const MIN_PNL_USD = 10_000;
+    const MIN_PNL_USD = 1_000;
     const result = await query(
       `UPDATE alpha_wallets SET active = FALSE
        WHERE active = TRUE
@@ -93,19 +93,22 @@ export class WalletDiscovery {
    * Keeps seed wallets and any wallet with proven alpha score >25.
    */
   async purgeWeakWallets(): Promise<number> {
+    const gracePeriod = new Date(Date.now() - STALE_WALLET_DAYS * 24 * 60 * 60 * 1000);
     const result = await query(
       `UPDATE alpha_wallets SET active = FALSE
        WHERE active = TRUE
          AND source != 'NANSEN_SEED'
          AND (
-           -- No trade data at all
-           (COALESCE(our_total_trades, 0) = 0 AND COALESCE(round_trips_analyzed, 0) = 0)
-           -- OR has data but poor alpha score
+           -- No trade data AND past grace period (give new wallets time to prove themselves)
+           (COALESCE(our_total_trades, 0) = 0 AND COALESCE(round_trips_analyzed, 0) = 0
+            AND discovered_at < $1)
+           -- OR has data but poor alpha score (proven bad)
            OR (COALESCE(round_trips_analyzed, 0) >= 3 AND COALESCE(short_term_alpha_score, 0) < 25)
            -- OR proven bag holder (median hold >12h with data)
            OR (COALESCE(median_hold_time_mins, 0) > 720 AND COALESCE(round_trips_analyzed, 0) >= 3)
          )
        RETURNING address`,
+      [gracePeriod],
     );
     const count = result.rowCount || 0;
     if (count > 0) {
@@ -220,9 +223,9 @@ export class WalletDiscovery {
     for (const token of tokensToProcess) {
       try {
         const leaders = await this.nansen.tokenPnlLeaderboard(token.address, {
-          pnlUsdMin: 100,
+          pnlUsdMin: 50,
           tradesMin: 1,
-          limit: 25,
+          limit: 50,
         });
 
         tokensProcessed++;
@@ -276,15 +279,15 @@ export class WalletDiscovery {
       });
     }
 
-    // Filter out wallets below $10K PnL minimum threshold
-    const MIN_PNL_USD = 10_000;
+    // Filter out wallets below PnL minimum — lowered to $1K for quick-flip micro traders
+    const MIN_PNL_USD = 1_000;
     const qualifiedCandidates = candidates.filter((c) => c.totalVolumeUsd >= MIN_PNL_USD);
     logger.info({
       total: candidates.length,
       qualified: qualifiedCandidates.length,
       filtered: candidates.length - qualifiedCandidates.length,
       minPnl: MIN_PNL_USD,
-    }, 'Applied $10K minimum PnL filter');
+    }, 'Applied $1K minimum PnL filter');
 
     qualifiedCandidates.sort((a, b) => b.score - a.score);
     let added = 0;
@@ -379,16 +382,16 @@ export class WalletDiscovery {
        RETURNING address`,
     );
 
-    // Deactivate wallets below $10K PnL minimum (skip seed wallets which may lack PnL data)
+    // Deactivate wallets below $1K PnL minimum (skip seed wallets which may lack PnL data)
     const pnlPurged = await query(
       `UPDATE alpha_wallets SET active = FALSE
        WHERE active = TRUE
          AND source != 'NANSEN_SEED'
-         AND COALESCE(nansen_pnl_usd, 0) < 10000
+         AND COALESCE(nansen_pnl_usd, 0) < 1000
        RETURNING address`,
     );
     if ((pnlPurged.rowCount || 0) > 0) {
-      logger.info({ count: pnlPurged.rowCount }, 'Deactivated wallets below $10K PnL minimum');
+      logger.info({ count: pnlPurged.rowCount }, 'Deactivated wallets below $1K PnL minimum');
     }
 
     // Check on-chain trade activity via Helius

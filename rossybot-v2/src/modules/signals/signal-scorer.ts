@@ -8,6 +8,8 @@ export interface WalletEv {
   nansenRoi: number;
   nansenTrades: number;
   nansenPnlUsd: number;
+  tier: string;           // 'A' (proven quick-flipper) or 'B' (standard)
+  shortTermAlpha: number; // 0-100 alpha score from hold-time analysis
 }
 
 export interface SignalScore {
@@ -55,7 +57,8 @@ export function scoreSignal(
 
 // --- Wallet Quality (0-35) ---
 // Uses our trade data when available, falls back to Nansen data for unproven wallets.
-// Hard floor: blended win rate must be >= 50% and blended avg PnL >= 25%.
+// Soft floor: wallets below quality thresholds get a penalty multiplier (not binary rejection).
+// Only truly terrible wallets (<30% WR AND <5% PnL) trigger hard rejection.
 function scoreWalletQuality(
   addresses: string[],
   evMap: Map<string, WalletEv>,
@@ -79,19 +82,31 @@ function scoreWalletQuality(
     const nansenEstWinRate = ev.nansenTrades > 0
       ? Math.min(0.85, 0.50 + Math.max(0, ev.nansenRoi) / 1000)
       : 0;
-    // Nansen avg PnL: use ROI as quality signal (best token ROI → estimated per-trade EV)
-    // ROI 150% → 15%, ROI 300% → 30%, ROI 500% → 50% (capped)
+
+    // Nansen avg PnL: sqrt curve instead of linear (roi/10 was too conservative)
+    // sqrt(27) * 3 = 15.6%, sqrt(100) * 3 = 30%, sqrt(500) * 3 = 50% (capped)
+    // This better reflects that even low-ROI Nansen wallets are profitable traders
     const nansenEstAvgPnl = ev.nansenRoi > 0
-      ? Math.min(50, ev.nansenRoi / 10)
+      ? Math.min(50, Math.sqrt(ev.nansenRoi) * 3)
       : 0;
 
     const blendedWinRate = ourWeight * ev.winRate + nansenWeight * nansenEstWinRate;
     const blendedAvgPnl = ourWeight * ev.avgPnl + nansenWeight * nansenEstAvgPnl;
 
-    // Hard floor: 45% win rate AND 15% avg PnL (blended)
-    // Lowered from 50%/25% — Nansen estimates are conservative, and early in live
-    // trading we need enough signal flow to build our own performance data
-    if (blendedWinRate >= 0.45 && blendedAvgPnl >= 15) {
+    // Soft floor: instead of binary pass/fail, apply a penalty multiplier.
+    // Wallets above threshold get 1.0 (no penalty).
+    // Wallets below get a proportional penalty, not outright rejection.
+    // Only truly terrible wallets (<30% WR AND <5% PnL) get hard-rejected.
+    let floorPenalty = 1.0;
+    if (blendedWinRate < 0.45) {
+      floorPenalty *= Math.max(0.3, blendedWinRate / 0.45);
+    }
+    if (blendedAvgPnl < 15) {
+      floorPenalty *= Math.max(0.3, blendedAvgPnl / 15);
+    }
+
+    // Hard reject only for genuinely bad wallets
+    if (!(blendedWinRate < 0.30 && blendedAvgPnl < 5)) {
       anyWalletPassesFloor = true;
     }
 
@@ -106,7 +121,22 @@ function scoreWalletQuality(
     // EV component (0-20): 0% = 5, 10% = 15, 20%+ = 20
     const evScore = Math.min(20, Math.max(0, 5 + blendedAvgPnl));
 
-    const walletScore = (wrScore + evScore) * confidence;
+    // Base score with confidence and soft floor
+    let walletScore = (wrScore + evScore) * confidence * floorPenalty;
+
+    // Tier A bonus: proven quick-flippers with >40 alpha score get +3
+    if (ev.tier === 'A' && ev.shortTermAlpha > 40) {
+      walletScore += 3;
+    }
+
+    // PnL USD bonus: wallets with significant realized PnL get a bump
+    // $50K+ → +2, $20K+ → +1 (Nansen verified profitable)
+    if (ev.nansenPnlUsd >= 50_000) {
+      walletScore += 2;
+    } else if (ev.nansenPnlUsd >= 20_000) {
+      walletScore += 1;
+    }
+
     bestScore = Math.max(bestScore, walletScore);
   }
 

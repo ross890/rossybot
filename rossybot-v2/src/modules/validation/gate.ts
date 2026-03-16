@@ -47,14 +47,14 @@ export async function validateToken(
   const liquidity = checkLiquidity(dexPair, tierCfg);
   if (!liquidity.passed) {
     logger.info({ mint: tokenMint.slice(0, 8), liquidity: dexPair.liquidity?.usd, min: tierCfg.liquidityMin }, 'Token REJECTED — insufficient liquidity');
-    return buildResult(ValidationResult.FAILED_MCAP, dexPair, start, { passed: false, reason: `Liquidity $${dexPair.liquidity?.usd || 0} below minimum $${tierCfg.liquidityMin}` });
+    return buildResult(ValidationResult.FAILED_LIQUIDITY, dexPair, start, { passed: false, reason: `Liquidity $${dexPair.liquidity?.usd || 0} below minimum $${tierCfg.liquidityMin}` });
   }
 
   // Enforce momentum gate — reject tokens dumping or overheated
   const momentum = checkMomentum(dexPair, tierCfg);
   if (!momentum.passed) {
     logger.info({ mint: tokenMint.slice(0, 8), h24: dexPair.priceChange?.h24 }, 'Token REJECTED — momentum out of range');
-    return buildResult(ValidationResult.FAILED_MCAP, dexPair, start, { passed: false, reason: `Momentum ${dexPair.priceChange?.h24}% outside ${tierCfg.momentumMin}-${tierCfg.momentumMax}%` });
+    return buildResult(ValidationResult.FAILED_MOMENTUM, dexPair, start, { passed: false, reason: `Momentum ${dexPair.priceChange?.h24}% outside ${tierCfg.momentumMin}-${tierCfg.momentumMax}%` });
   }
 
   // Token age (logged only)

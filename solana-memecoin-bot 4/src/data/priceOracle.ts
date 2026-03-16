@@ -86,9 +86,13 @@ export class PriceOracle {
       const SOL_MINT = 'So11111111111111111111111111111111111111112';
       const SOL_AMOUNT = 1_000_000_000; // 1 SOL in lamports
 
+      const JUPITER_API_URL = process.env.JUPITER_API_URL || 'https://api.jup.ag/swap/v1';
+      const headers: Record<string, string> = {};
+      if (process.env.JUPITER_API_KEY) headers['x-api-key'] = process.env.JUPITER_API_KEY;
+
       const response = await fetch(
-        `https://quote-api.jup.ag/v6/quote?inputMint=${SOL_MINT}&outputMint=${tokenAddress}&amount=${SOL_AMOUNT}&slippageBps=100`,
-        { signal: AbortSignal.timeout(CONFIG.JUPITER_QUOTE_TIMEOUT_MS) }
+        `${JUPITER_API_URL}/quote?inputMint=${SOL_MINT}&outputMint=${tokenAddress}&amount=${SOL_AMOUNT}&slippageBps=100`,
+        { signal: AbortSignal.timeout(CONFIG.JUPITER_QUOTE_TIMEOUT_MS), headers }
       );
 
       if (!response.ok) return null;

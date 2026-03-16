@@ -583,7 +583,7 @@ export class TelegramService {
           : 'N/A';
 
         await this.bot.sendMessage(msg.chat.id, [
-          `📈 SHADOW P&L`,
+          `📈 ${config.shadowMode ? 'SHADOW' : 'LIVE'} P&L`,
           `├ Open positions: ${openCount}`,
           `├ Unrealized: ${unrealizedSol >= 0 ? '+' : ''}${unrealizedSol.toFixed(3)} SOL (${unrealizedPct >= 0 ? '+' : ''}${unrealizedPct.toFixed(1)}% avg)`,
           `├ Realized: ${realizedSol >= 0 ? '+' : ''}${realizedSol.toFixed(3)} SOL (${total} trades)`,

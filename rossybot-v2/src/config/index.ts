@@ -92,7 +92,7 @@ export const TIER_CONFIGS: Record<CapitalTier, TierConfig> = {
     walletConfluenceRequired: 1,
     confluenceWindow: 30,
     timeKills: [
-      { hours: 1, minPnlPct: 0.05 },
+      { hours: 2, minPnlPct: -0.05 },
       { hours: 4, minPnlPct: 0.15 },
       { hours: 12, minPnlPct: 0.25 },
     ],

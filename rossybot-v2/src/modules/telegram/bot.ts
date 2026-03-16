@@ -19,6 +19,7 @@ export class TelegramService {
   private getNansenUsage: (() => Record<string, unknown>) | null = null;
   private onKill: ((token: string) => Promise<{ success: boolean; token?: string; error?: string }>) | null = null;
   private onHoldTimeAnalysis: (() => Promise<string[]>) | null = null;
+  private getPumpFunPositions: (() => Array<Record<string, unknown>>) | null = null;
 
   constructor() {
     this.bot = new TelegramBot(config.telegram.botToken, {
@@ -50,6 +51,7 @@ export class TelegramService {
   setNansenUsageCallback(cb: () => Record<string, unknown>): void { this.getNansenUsage = cb; }
   setKillCallback(cb: (token: string) => Promise<{ success: boolean; token?: string; error?: string }>): void { this.onKill = cb; }
   setHoldTimeCallback(cb: () => Promise<string[]>): void { this.onHoldTimeAnalysis = cb; }
+  setPumpFunPositionsCallback(cb: () => Array<Record<string, unknown>>): void { this.getPumpFunPositions = cb; }
 
   get isPaused(): boolean { return this.paused; }
 
@@ -718,6 +720,124 @@ export class TelegramService {
         }
       } catch (err) {
         await this.bot.sendMessage(msg.chat.id, '❌ Failed to load signals');
+      }
+    });
+
+    this.bot.onText(/\/pumpfun/, async (msg) => {
+      if (msg.chat.id.toString() !== this.chatId) return;
+      try {
+        // --- Open positions ---
+        const openPositions = this.getPumpFunPositions?.() || [];
+        const openLines = openPositions.length > 0
+          ? openPositions.map((p) => {
+              const holdMins = Math.round((Date.now() - new Date(p.entry_time as string).getTime()) / 60_000);
+              const curvePct = ((p.current_curve_fill_pct as number) * 100).toFixed(0);
+              const entryPct = ((p.curve_fill_pct_at_entry as number) * 100).toFixed(0);
+              const pnl = ((p.pnl_percent as number) * 100).toFixed(1);
+              const grad = p.graduated ? '🎓' : `📈${curvePct}%`;
+              return `│  ${(p.pnl_percent as number) >= 0 ? '🟢' : '🔴'} ${p.token_symbol || (p.token_address as string).slice(0, 8)} | ${pnl}% | ${this.formatHoldTime(holdMins)} | curve ${entryPct}%→${grad}`;
+            })
+          : ['│  (none)'];
+
+        // --- Closed stats from DB ---
+        const closed = await getOne<Record<string, unknown>>(
+          `SELECT
+             COUNT(*) as total,
+             COUNT(*) FILTER (WHERE pnl_percent > 0) as wins,
+             COUNT(*) FILTER (WHERE pnl_percent <= 0) as losses,
+             COALESCE(AVG(pnl_percent), 0) as avg_pnl,
+             COALESCE(AVG(hold_time_mins), 0) as avg_hold,
+             COUNT(*) FILTER (WHERE graduated = TRUE) as graduated_count,
+             COUNT(*) FILTER (WHERE graduated = FALSE) as not_graduated
+           FROM pumpfun_positions WHERE status = 'CLOSED'`,
+        );
+
+        const total = Number(closed?.total || 0);
+        const wins = Number(closed?.wins || 0);
+        const losses = Number(closed?.losses || 0);
+        const avgPnl = Number(closed?.avg_pnl || 0);
+        const avgHold = Number(closed?.avg_hold || 0);
+        const gradCount = Number(closed?.graduated_count || 0);
+        const notGrad = Number(closed?.not_graduated || 0);
+        const wr = total > 0 ? (wins / total * 100).toFixed(0) : 'N/A';
+        const gradRate = total > 0 ? (gradCount / total * 100).toFixed(0) : 'N/A';
+
+        // --- Exit reason breakdown ---
+        const exitReasons = await getMany<{ exit_reason: string; count: string }>(
+          `SELECT exit_reason, COUNT(*) as count
+           FROM pumpfun_positions WHERE status = 'CLOSED' AND exit_reason IS NOT NULL
+           GROUP BY exit_reason ORDER BY count DESC LIMIT 8`,
+        );
+        const exitLines = exitReasons.map((r) => `│  ${r.count}x ${r.exit_reason}`);
+
+        // --- Per-wallet performance on pump.fun ---
+        const walletPerf = await getMany<Record<string, unknown>>(
+          `SELECT w.label, w.address,
+                  COUNT(*) as trades,
+                  COUNT(*) FILTER (WHERE p.pnl_percent > 0) as wins,
+                  COALESCE(AVG(p.pnl_percent), 0) as avg_pnl,
+                  COUNT(*) FILTER (WHERE p.graduated = TRUE) as grads
+           FROM pumpfun_positions p, unnest(p.signal_wallets) sw
+           JOIN alpha_wallets w ON w.address = sw
+           WHERE p.status = 'CLOSED'
+           GROUP BY w.label, w.address
+           ORDER BY avg_pnl DESC LIMIT 10`,
+        );
+        const walletLines = walletPerf.length > 0
+          ? walletPerf.map((w) => {
+              const t = Number(w.trades);
+              const wn = Number(w.wins);
+              const wr2 = t > 0 ? (wn / t * 100).toFixed(0) : '0';
+              const pnl = (Number(w.avg_pnl) * 100).toFixed(1);
+              return `│  ${w.label || (w.address as string).slice(0, 8)} | ${t}t ${wr2}%W | avg ${pnl}% | ${w.grads} grad`;
+            })
+          : ['│  (no data yet)'];
+
+        // --- Recent signals (accepted + rejected) ---
+        const recentSignals = await getMany<Record<string, unknown>>(
+          `SELECT token_address, status, pnl_percent, graduated, hold_time_mins, exit_reason, entry_time
+           FROM pumpfun_positions ORDER BY entry_time DESC LIMIT 5`,
+        );
+        const recentLines = recentSignals.length > 0
+          ? recentSignals.map((s) => {
+              const ago = Math.round((Date.now() - new Date(s.entry_time as string).getTime()) / 60_000);
+              const pnl = ((s.pnl_percent as number) * 100).toFixed(1);
+              const icon = s.status === 'OPEN' ? '🔵' : (s.pnl_percent as number) >= 0 ? '🟢' : '🔴';
+              const grad = s.graduated ? '🎓' : '';
+              return `│  ${icon} ${(s.token_address as string).slice(0, 8)} | ${pnl}% | ${this.formatHoldTime(ago)} ago ${grad}${s.exit_reason ? ` | ${s.exit_reason}` : ''}`;
+            })
+          : ['│  (no trades yet)'];
+
+        const response = [
+          `🎰 PUMP.FUN DASHBOARD`,
+          ``,
+          `┌─ OPEN POSITIONS (${openPositions.length})`,
+          ...openLines,
+          `│`,
+          `├─ PERFORMANCE (${total} closed)`,
+          `│ Win rate: ${wr}% (${wins}W / ${losses}L)`,
+          `│ Avg PnL: ${(avgPnl * 100).toFixed(1)}%`,
+          `│ Avg hold: ${this.formatHoldTime(avgHold)}`,
+          `│ Graduation rate: ${gradRate}% (${gradCount} graduated / ${notGrad} stalled)`,
+          `│`,
+          `├─ EXIT REASONS`,
+          ...(exitLines.length > 0 ? exitLines : ['│  (no exits yet)']),
+          `│`,
+          `├─ WALLET PERFORMANCE (pump.fun)`,
+          ...walletLines,
+          `│`,
+          `├─ RECENT TRADES`,
+          ...recentLines,
+          `│`,
+          `└─ Use this data to tune: conviction threshold, stale kill timing, curve entry zone`,
+        ].join('\n');
+
+        for (const chunk of this.chunkMessage(response)) {
+          await this.bot.sendMessage(msg.chat.id, chunk);
+        }
+      } catch (err) {
+        logger.error({ err }, 'Failed to generate pump.fun stats');
+        await this.bot.sendMessage(msg.chat.id, '❌ Failed to load pump.fun stats');
       }
     });
 

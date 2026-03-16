@@ -31,6 +31,7 @@ export enum SignalType {
 export enum DetectionSource {
   HELIUS_WS = 'HELIUS_WS',
   HELIUS_RPC_FALLBACK = 'HELIUS_RPC_FALLBACK',
+  PUMPFUN_CURVE = 'PUMPFUN_CURVE',
 }
 
 export enum ValidationResult {
@@ -336,6 +337,46 @@ export interface ParsedSignal {
   detectedAt: Date;
   detectionLagMs: number;
   detectionSource: DetectionSource;
+  /** True if this transaction interacts with the pump.fun bonding curve program */
+  isPumpFun?: boolean;
+  /** Pump.fun bonding curve metadata (only present for pump.fun transactions) */
+  pumpFunData?: PumpFunSignalData;
+}
+
+// --- Pump.fun Types ---
+
+export interface PumpFunSignalData {
+  /** The bonding curve account address */
+  bondingCurveAddress: string;
+  /** SOL amount the wallet spent on the bonding curve */
+  solSpent: number;
+}
+
+export interface PumpFunConfig {
+  /** Pump.fun bonding curve program ID */
+  programId: string;
+  /** Position size multiplier vs standard tier size (0.3-0.5x) */
+  positionSizeMultiplier: number;
+  /** Time kill: close if no movement after this many minutes */
+  staleTimeKillMins: number;
+  /** Hard stop loss for pump.fun positions */
+  stopLoss: number;
+  /** Hard kill for pump.fun positions */
+  hardKill: number;
+  /** Profit target to sell into graduation liquidity spike */
+  graduationProfitTarget: number;
+  /** Percentage to sell at graduation (rest becomes standard V2 position) */
+  graduationSellPct: number;
+  /** Minimum SOL spent by alpha wallet to consider it a conviction buy */
+  minConvictionSol: number;
+  /** Minimum bonding curve velocity (SOL/min) to enter */
+  minCurveVelocity: number;
+  /** Max age in minutes for a pump.fun token to be eligible */
+  maxTokenAgeMins: number;
+  /** Max concurrent pump.fun positions */
+  maxPositions: number;
+  /** Slippage for bonding curve buys (higher than Jupiter) */
+  slippageBps: number;
 }
 
 // --- Common position view for Telegram/UI (works with both Shadow & Live) ---

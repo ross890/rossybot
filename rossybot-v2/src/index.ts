@@ -14,6 +14,7 @@ import { LiveTracker } from './modules/positions/live-tracker.js';
 import { CapitalManager } from './modules/trading/capital-manager.js';
 import { SwapExecutor } from './modules/trading/swap-executor.js';
 import { TelegramService } from './modules/telegram/index.js';
+import { PumpFunTracker, validatePumpFunSignal } from './modules/pumpfun/index.js';
 import { SignalType, type ParsedSignal, type PositionView } from './types/index.js';
 
 /** Convert ShadowPosition to common PositionView */
@@ -91,6 +92,9 @@ class RossyBotV2 {
   private liveTracker: LiveTracker | null = null;
   private swapExecutor: SwapExecutor | null = null;
 
+  // Pump.fun position tracking (runs alongside standard tracker)
+  private pumpFunTracker: PumpFunTracker;
+
   private get isLive(): boolean {
     return !config.shadowMode && this.liveTracker !== null;
   }
@@ -115,6 +119,7 @@ class RossyBotV2 {
     this.walletDiscovery = new WalletDiscovery(this.nansen);
     this.entryEngine = new EntryEngine();
     this.telegram = new TelegramService();
+    this.pumpFunTracker = new PumpFunTracker();
 
     // Initialize position tracker based on mode
     if (!config.shadowMode && config.wallet.privateKey) {
@@ -214,6 +219,10 @@ class RossyBotV2 {
       this.shadowTracker!.start();
     }
 
+    // 8b. Start pump.fun tracker
+    await this.pumpFunTracker.loadOpenPositions();
+    this.pumpFunTracker.start();
+
     // 9. Start Nansen wallet discovery (scheduled every 4h + immediate first run)
     this.walletDiscovery.start();
     this.walletDiscovery.runDiscovery().catch((err) =>
@@ -257,8 +266,16 @@ class RossyBotV2 {
           });
 
           if (signal.type === SignalType.BUY) {
-            await this.entryEngine.processBuySignal(signal, tierCfg);
+            if (signal.isPumpFun) {
+              await this.handlePumpFunBuy(signal);
+            } else {
+              await this.entryEngine.processBuySignal(signal, tierCfg);
+            }
           } else if (signal.type === SignalType.SELL) {
+            // Check both standard and pump.fun positions for sell signals
+            if (signal.isPumpFun) {
+              await this.pumpFunTracker.handleAlphaExit(signal.tokenMint, signal.walletAddress, 0.5);
+            }
             await this.handleSellSignal(signal);
           }
         }
@@ -630,6 +647,39 @@ class RossyBotV2 {
       });
     }
 
+    // --- Pump.fun tracker callbacks ---
+    this.pumpFunTracker.setCloseCallback(async (pos) => {
+      try {
+        const pnl = pos.pnl_percent;
+        const emoji = pnl >= 0 ? '🟢' : '🔴';
+        await this.telegram.send(
+          `🎰 PUMP.FUN CLOSED ${emoji}\n` +
+          `├ Token: ${pos.token_symbol || pos.token_address.slice(0, 8)}\n` +
+          `├ PnL: ${(pnl * 100).toFixed(1)}%\n` +
+          `├ Hold: ${pos.hold_time_mins}min\n` +
+          `├ Graduated: ${pos.graduated ? `YES (at ${pos.graduated_at?.toISOString().slice(11, 19)} UTC)` : 'NO'}\n` +
+          `├ Curve: ${(pos.curve_fill_pct_at_entry * 100).toFixed(0)}% → ${(pos.current_curve_fill_pct * 100).toFixed(0)}%\n` +
+          `└ Reason: ${pos.exit_reason}`,
+        );
+      } catch (err) {
+        logger.error({ err }, 'Error in pump.fun close callback');
+      }
+    });
+
+    this.pumpFunTracker.setGraduationCallback(async (pos) => {
+      try {
+        await this.telegram.send(
+          `🎓 GRADUATION: ${pos.token_symbol || pos.token_address.slice(0, 8)}\n` +
+          `├ Migrated to Raydium!\n` +
+          `├ Hold time: ${((Date.now() - pos.entry_time.getTime()) / 60_000).toFixed(0)}min\n` +
+          `├ Entry curve: ${(pos.curve_fill_pct_at_entry * 100).toFixed(0)}%\n` +
+          `└ Now tracking via DexScreener`,
+        );
+      } catch (err) {
+        logger.error({ err }, 'Error in pump.fun graduation callback');
+      }
+    });
+
     // --- Wallet Discovery → Helius subscription ---
     this.walletDiscovery.setNewWalletCallback(async (address: string) => {
       try {
@@ -667,6 +717,9 @@ class RossyBotV2 {
     });
 
     this.telegram.setPositionsCallback(() => this.getOpenPositions());
+    this.telegram.setPumpFunPositionsCallback(() =>
+      this.pumpFunTracker.getOpenPositions().map((p) => ({ ...p } as Record<string, unknown>)),
+    );
     this.telegram.setWsHealthCallback(() => this.wsManager.getStatus());
     this.telegram.setNansenUsageCallback(() => this.nansen.usage);
     this.telegram.setDiscoveryCallback(() => this.walletDiscovery.runDiscovery());
@@ -706,6 +759,100 @@ class RossyBotV2 {
         );
       }
     });
+  }
+
+  /** Handle pump.fun bonding curve buy from an alpha wallet */
+  private async handlePumpFunBuy(signal: ParsedSignal): Promise<void> {
+    try {
+      const cfg = config.pumpFun;
+      const mint = signal.tokenMint;
+
+      // Skip if we already have a pump.fun position on this token
+      if (this.pumpFunTracker.hasPosition(mint)) {
+        logger.info({ token: mint.slice(0, 8) }, 'Pump.fun skip — already holding');
+        return;
+      }
+
+      // Skip if we also have a standard position
+      if (this.hasPosition(mint)) {
+        logger.info({ token: mint.slice(0, 8) }, 'Pump.fun skip — standard position exists');
+        return;
+      }
+
+      // Max pump.fun positions check
+      if (this.pumpFunTracker.getOpenCount() >= cfg.maxPositions) {
+        logger.info({ open: this.pumpFunTracker.getOpenCount(), max: cfg.maxPositions },
+          'Pump.fun skip — max positions reached');
+        await this.telegram.send(
+          `🎰 PUMP.FUN signal blocked: $${signal.tokenMint.slice(0, 8)}\n` +
+          `└ ${this.pumpFunTracker.getOpenCount()}/${cfg.maxPositions} pump.fun slots full`,
+        );
+        return;
+      }
+
+      // Validate through pump.fun-specific gate
+      const validation = await validatePumpFunSignal(signal);
+
+      const walletRow = await (await import('./db/database.js')).getOne<{ label: string }>(
+        `SELECT label FROM alpha_wallets WHERE address = $1`, [signal.walletAddress],
+      );
+      const walletLabel = walletRow?.label || signal.walletAddress.slice(0, 8);
+
+      if (!validation.passed) {
+        logger.info({
+          token: mint.slice(0, 8),
+          reason: validation.failReason,
+          wallet: walletLabel,
+        }, `Pump.fun signal rejected: ${validation.failReason}`);
+
+        await this.telegram.send(
+          `🎰 PUMP.FUN rejected: ${mint.slice(0, 8)}\n` +
+          `├ Wallet: ${walletLabel}\n` +
+          `├ Reason: ${validation.failReason}\n` +
+          `├ Curve: ${(validation.curveFillPct * 100).toFixed(0)}% (${validation.solInCurve.toFixed(1)} SOL)\n` +
+          `└ SOL spent: ${Math.abs(signal.solDelta).toFixed(2)}`,
+        );
+        return;
+      }
+
+      // Calculate position size: standard tier size × pump.fun multiplier
+      const tierSize = this.capitalManager.getPositionSize();
+      const pumpSize = tierSize * cfg.positionSizeMultiplier;
+
+      // Open pump.fun position (shadow mode — always simulated for now)
+      const pos = await this.pumpFunTracker.openPosition({
+        tokenMint: mint,
+        tokenSymbol: signal.tokenMint.slice(0, 6),
+        bondingCurveAddress: signal.pumpFunData?.bondingCurveAddress || 'unknown',
+        solAmount: pumpSize,
+        curveFillPct: validation.curveFillPct,
+        solInCurve: validation.solInCurve,
+        alphaBuyTime: new Date(signal.blockTime * 1000),
+        signalWallets: [signal.walletAddress],
+        capitalTier: this.capitalManager.tier,
+      });
+
+      // Telegram alert
+      await this.telegram.send(
+        `🎰 PUMP.FUN ENTRY: ${mint.slice(0, 8)}\n` +
+        `├ Wallet: ${walletLabel}\n` +
+        `├ Size: ${pumpSize.toFixed(3)} SOL (${(cfg.positionSizeMultiplier * 100).toFixed(0)}% of standard)\n` +
+        `├ Curve: ${(validation.curveFillPct * 100).toFixed(0)}% filled (${validation.solInCurve.toFixed(1)} SOL)\n` +
+        `├ Alpha spent: ${Math.abs(signal.solDelta).toFixed(2)} SOL\n` +
+        `├ Detection lag: ${signal.detectionLagMs}ms\n` +
+        `├ Exits: stall ${cfg.staleTimeKillMins}min | SL ${(cfg.stopLoss * 100).toFixed(0)}% | hard 60min\n` +
+        `└ Mode: SHADOW`,
+      );
+
+      logger.info({
+        token: mint.slice(0, 8),
+        wallet: walletLabel,
+        size: pumpSize.toFixed(3),
+        curveFill: `${(validation.curveFillPct * 100).toFixed(0)}%`,
+      }, 'Pump.fun position opened');
+    } catch (err) {
+      logger.error({ err, token: signal.tokenMint?.slice(0, 8) }, 'Error in pump.fun buy handler');
+    }
   }
 
   /** Handle sell signals from alpha wallets */
@@ -877,6 +1024,7 @@ class RossyBotV2 {
     this.fallbackPoller.stop();
     this.liveTracker?.stop();
     this.shadowTracker?.stop();
+    this.pumpFunTracker.stop();
     this.walletDiscovery.stop();
     await this.telegram.shutdown();
     const { pool } = await import('./db/database.js');

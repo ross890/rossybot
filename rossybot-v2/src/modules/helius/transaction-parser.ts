@@ -3,6 +3,7 @@ import { logger } from '../../utils/logger.js';
 import { query } from '../../db/database.js';
 import { config } from '../../config/index.js';
 import { SignalType, DetectionSource, type ParsedSignal } from '../../types/index.js';
+import { detectPumpFunInteraction } from '../pumpfun/detector.js';
 
 // SOL mint constant — used to filter out pure SOL transfers
 const SOL_MINT = 'So11111111111111111111111111111111111111112';
@@ -96,7 +97,11 @@ export class TransactionParser {
         return signals;
       }
 
-      // Step 2: Detect token transfers by comparing pre/post balances
+      // Step 2: Detect pump.fun bonding curve interaction
+      const pumpFunCurve = detectPumpFunInteraction(accountKeys);
+      const isPumpFun = pumpFunCurve !== null;
+
+      // Step 3: Detect token transfers by comparing pre/post balances
       const preBalances = tx.meta.preTokenBalances || [];
       const postBalances = tx.meta.postTokenBalances || [];
       const preMap = this.buildBalanceMap(preBalances);
@@ -139,7 +144,14 @@ export class TransactionParser {
             solDelta,
             detectedAt: now,
             detectionLagMs,
-            detectionSource: source,
+            detectionSource: isPumpFun ? DetectionSource.PUMPFUN_CURVE : source,
+            isPumpFun,
+            ...(isPumpFun && pumpFunCurve ? {
+              pumpFunData: {
+                bondingCurveAddress: pumpFunCurve,
+                solSpent: Math.abs(solDelta),
+              },
+            } : {}),
           };
 
           signals.push(signal);

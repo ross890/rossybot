@@ -345,6 +345,7 @@ class RossyBotV2 {
         const walletStats = await dbGetMany<{
           address: string; label: string; our_total_trades: number; our_win_rate: number; our_avg_pnl_percent: number;
           nansen_roi_percent: number; nansen_trade_count: number; nansen_pnl_usd: number;
+          tier: string; short_term_alpha_score: number;
         }>(
           `SELECT address, COALESCE(label, '') as label,
                   COALESCE(our_total_trades, 0) as our_total_trades,
@@ -352,7 +353,9 @@ class RossyBotV2 {
                   COALESCE(our_avg_pnl_percent, 0) as our_avg_pnl_percent,
                   COALESCE(nansen_roi_percent, 0) as nansen_roi_percent,
                   COALESCE(nansen_trade_count, 0) as nansen_trade_count,
-                  COALESCE(nansen_pnl_usd, 0) as nansen_pnl_usd
+                  COALESCE(nansen_pnl_usd, 0) as nansen_pnl_usd,
+                  COALESCE(tier, 'B') as tier,
+                  COALESCE(short_term_alpha_score, 0) as short_term_alpha_score
              FROM alpha_wallets WHERE address = ANY($1)`,
           [signal.walletAddresses],
         );
@@ -363,6 +366,8 @@ class RossyBotV2 {
           nansenRoi: Number(w.nansen_roi_percent),
           nansenTrades: Number(w.nansen_trade_count),
           nansenPnlUsd: Number(w.nansen_pnl_usd),
+          tier: w.tier,
+          shortTermAlpha: Number(w.short_term_alpha_score),
         }]));
 
         // Score the signal
@@ -436,16 +441,16 @@ class RossyBotV2 {
           return;
         }
 
-        // Wallet quality floor — reject if no wallet meets blended 45% WR / 15% avg PnL
+        // Wallet quality hard floor — only rejects truly terrible wallets (<30% WR AND <5% PnL)
         if (score.walletRejected) {
           logger.info({
             token: signal.tokenMint.slice(0, 8),
             wallets: signal.walletAddresses.length,
-          }, 'Skipping signal — no wallet meets blended quality floor (45% WR / 15% avg PnL)');
+          }, 'Skipping signal — no wallet meets minimum quality floor (<30% WR and <5% PnL)');
 
           await this.telegram.send(
             `⛔ Wallet quality too low: ${signal.tokenSymbol || signal.tokenMint.slice(0, 8)}\n` +
-            `No wallet meets 45% WR / 15% avg PnL floor (blended with Nansen)\n` +
+            `No wallet meets minimum quality floor (blended <30% WR and <5% PnL)\n` +
             scoreDisplay,
           );
           return;

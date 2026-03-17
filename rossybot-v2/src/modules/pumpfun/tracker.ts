@@ -23,10 +23,12 @@ export interface PumpFunPosition {
   // Curve tracking
   curve_fill_pct_at_entry: number;
   current_curve_fill_pct: number;
+  sol_in_curve_at_entry: number;  // SOL in curve when we entered — baseline for stall detection
   last_curve_check_sol: number;
   // Price tracking (post-graduation)
   graduated: boolean;
   graduated_at: Date | null;
+  graduation_price: number; // Price at graduation — fixed baseline for PnL
   current_price: number;
   peak_price: number;
   pnl_percent: number;
@@ -44,6 +46,7 @@ export interface PumpFunPosition {
 
 export class PumpFunTracker {
   private positions: Map<string, PumpFunPosition> = new Map();
+  private pendingEntries: Set<string> = new Set(); // Dedup lock: token mints being processed
   private checkInterval: ReturnType<typeof setInterval> | null = null;
   private onPositionClosed: ((pos: PumpFunPosition) => void) | null = null;
   private onGraduation: ((pos: PumpFunPosition) => void) | null = null;
@@ -102,6 +105,31 @@ export class PumpFunTracker {
     signalWallets: string[];
     capitalTier: string;
   }): Promise<PumpFunPosition | null> {
+    // Dedup lock: prevent concurrent entries on the same token
+    if (this.pendingEntries.has(params.tokenMint)) {
+      logger.info({ token: params.tokenMint.slice(0, 8) }, 'Pump.fun skip — entry already in progress (dedup)');
+      return null;
+    }
+    this.pendingEntries.add(params.tokenMint);
+
+    try {
+      return await this._executeOpen(params);
+    } finally {
+      this.pendingEntries.delete(params.tokenMint);
+    }
+  }
+
+  private async _executeOpen(params: {
+    tokenMint: string;
+    tokenSymbol: string | null;
+    bondingCurveAddress: string;
+    solAmount: number;
+    curveFillPct: number;
+    solInCurve: number;
+    alphaBuyTime: Date;
+    signalWallets: string[];
+    capitalTier: string;
+  }): Promise<PumpFunPosition | null> {
     let entryTx: string | null = null;
     let feesSol = 0;
 
@@ -115,15 +143,31 @@ export class PumpFunTracker {
       }, 'Pump.fun LIVE BUY — executing swap');
 
       // Use pump.fun slippage (5%) since bonding curve tokens have higher slippage
-      const result = await this.swapExecutor.buyToken(
-        params.tokenMint,
-        params.solAmount,
-        0, // liquidityUsd=0 forces thinLiquiditySlippageBps in SwapExecutor
-      );
+      // Retry up to 2 times on transient failures (400s can be RPC/quote timing issues)
+      const MAX_BUY_RETRIES = 2;
+      let result: SwapResult | null = null;
 
-      if (!result.success) {
-        logger.error({ error: result.error, token: tokenName }, `Pump.fun BUY swap failed: ${result.error}`);
-        this.onSwapFailed?.(tokenName, result.error || 'Unknown error', 'BUY');
+      for (let attempt = 0; attempt <= MAX_BUY_RETRIES; attempt++) {
+        result = await this.swapExecutor.buyToken(
+          params.tokenMint,
+          params.solAmount,
+          0, // liquidityUsd=0 forces thinLiquiditySlippageBps in SwapExecutor
+        );
+
+        if (result.success) break;
+
+        // Don't retry on clearly terminal errors (insufficient balance, invalid token)
+        const err = result.error || '';
+        const isTerminal = err.includes('insufficient') || err.includes('Invalid') || err.includes('not found');
+        if (isTerminal || attempt === MAX_BUY_RETRIES) break;
+
+        logger.warn({ error: err, token: tokenName, attempt: attempt + 1 }, 'Pump.fun BUY retry');
+        await new Promise((r) => setTimeout(r, 1500)); // 1.5s backoff
+      }
+
+      if (!result || !result.success) {
+        logger.error({ error: result?.error, token: tokenName }, `Pump.fun BUY swap failed: ${result?.error}`);
+        this.onSwapFailed?.(tokenName, result?.error || 'Unknown error', 'BUY');
         return null;
       }
 
@@ -156,9 +200,11 @@ export class PumpFunTracker {
       status: PositionStatus.OPEN,
       curve_fill_pct_at_entry: params.curveFillPct,
       current_curve_fill_pct: params.curveFillPct,
+      sol_in_curve_at_entry: params.solInCurve,
       last_curve_check_sol: params.solInCurve,
       graduated: false,
       graduated_at: null,
+      graduation_price: 0,
       current_price: 0,
       peak_price: 0,
       pnl_percent: 0,
@@ -177,13 +223,14 @@ export class PumpFunTracker {
       `INSERT INTO pumpfun_positions (id, token_address, token_symbol, bonding_curve_address,
          entry_price_sol, entry_time, alpha_buy_time, signal_wallets, capital_tier,
          simulated_entry_sol, status, curve_fill_pct_at_entry, current_curve_fill_pct,
-         last_curve_check_sol, graduated, entry_tx, fees_paid_sol, net_pnl_sol)
-       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18)`,
+         sol_in_curve_at_entry, last_curve_check_sol, graduated, graduation_price, entry_tx, fees_paid_sol, net_pnl_sol)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20)`,
       [pos.id, pos.token_address, pos.token_symbol, pos.bonding_curve_address,
        pos.entry_price_sol, pos.entry_time, pos.alpha_buy_time, pos.signal_wallets,
        pos.capital_tier, pos.simulated_entry_sol, pos.status,
        pos.curve_fill_pct_at_entry, pos.current_curve_fill_pct,
-       pos.last_curve_check_sol, pos.graduated, pos.entry_tx, pos.fees_paid_sol, pos.net_pnl_sol],
+       pos.sol_in_curve_at_entry, pos.last_curve_check_sol, pos.graduated, pos.graduation_price,
+       pos.entry_tx, pos.fees_paid_sol, pos.net_pnl_sol],
     );
 
     logger.info({
@@ -226,13 +273,25 @@ export class PumpFunTracker {
     }
   }
 
+  // Track last graduation check time per position to throttle DexScreener API calls
+  private lastGradCheckAt: Map<string, number> = new Map();
+  private static readonly GRAD_CHECK_INTERVAL_MS = 30_000; // Check graduation every 30s, not 5s
+
   /** Check a pre-graduation position on the bonding curve */
   private async checkCurvePosition(pos: PumpFunPosition): Promise<void> {
     const holdMins = (Date.now() - pos.entry_time.getTime()) / 60_000;
     const cfg = config.pumpFun;
 
-    // 1. Check if token has graduated to Raydium
-    const graduation = await checkGraduation(pos.token_address);
+    // 1. Check if token has graduated — throttled to every 30s (DexScreener rate limit)
+    const now = Date.now();
+    const lastGradCheck = this.lastGradCheckAt.get(pos.id) || 0;
+    const shouldCheckGrad = (now - lastGradCheck) >= PumpFunTracker.GRAD_CHECK_INTERVAL_MS;
+
+    let graduation = { graduated: false } as { graduated: boolean; dexPairAddress?: string };
+    if (shouldCheckGrad) {
+      this.lastGradCheckAt.set(pos.id, now);
+      graduation = await checkGraduation(pos.token_address);
+    }
     if (graduation.graduated) {
       pos.graduated = true;
       pos.graduated_at = new Date();
@@ -250,6 +309,7 @@ export class PumpFunTracker {
       const pair = await fetchDexPair(pos.token_address);
       if (pair) {
         pos.current_price = getPriceUsd(pair);
+        pos.graduation_price = pos.current_price; // Lock in graduation price as PnL baseline
         pos.peak_price = pos.current_price;
       }
 
@@ -270,15 +330,16 @@ export class PumpFunTracker {
           pos.pnl_percent = (pos.current_curve_fill_pct / pos.curve_fill_pct_at_entry) - 1;
         }
 
-        // 3. Curve stall exit — if no meaningful SOL inflow for staleTimeKillMins
-        const solDelta = curveState.solBalance - prevSol;
-        if (holdMins >= cfg.staleTimeKillMins && solDelta <= 0.1) {
+        // 3. Curve stall exit — compare SOL growth since ENTRY (not last 5s check)
+        const solDeltaSinceEntry = curveState.solBalance - pos.sol_in_curve_at_entry;
+        const solDeltaSinceLastCheck = curveState.solBalance - prevSol;
+        if (holdMins >= cfg.staleTimeKillMins && solDeltaSinceEntry <= 0.5) {
           await this.closePosition(pos, `Curve stall (${holdMins.toFixed(0)}min, no momentum)`);
           return;
         }
 
-        // 3b. Early stall — if curve is going backwards (net sells) after 5 min, cut early
-        if (holdMins >= 5 && solDelta < -0.05) {
+        // 3b. Early stall — if curve is going backwards (net sells vs entry) after 5 min
+        if (holdMins >= 5 && solDeltaSinceEntry < -0.05) {
           await this.closePosition(pos, `Curve reversal (${holdMins.toFixed(0)}min, SOL leaving curve)`);
           return;
         }
@@ -311,10 +372,9 @@ export class PumpFunTracker {
     pos.current_price = price;
     if (price > pos.peak_price) pos.peak_price = price;
 
-    // Post-graduation PnL tracking
-    if (pos.peak_price > 0 && pos.graduated_at) {
-      const graduationPrice = pos.peak_price; // First price we saw at graduation
-      pos.pnl_percent = (price - graduationPrice) / graduationPrice;
+    // Post-graduation PnL tracking — use locked graduation_price, NOT peak_price
+    if (pos.graduation_price > 0 && pos.graduated_at) {
+      pos.pnl_percent = (price - pos.graduation_price) / pos.graduation_price;
     }
 
     const holdMins = (Date.now() - pos.entry_time.getTime()) / 60_000;
@@ -431,6 +491,7 @@ export class PumpFunTracker {
 
     this.onPositionClosed?.(pos);
     this.positions.delete(pos.id);
+    this.lastGradCheckAt.delete(pos.id);
 
     // Refresh wallet balance after sell
     if (this.swapExecutor && this.onBalanceRefresh) {
@@ -485,12 +546,12 @@ export class PumpFunTracker {
       await query(
         `UPDATE pumpfun_positions SET
            status = $1, current_curve_fill_pct = $2, last_curve_check_sol = $3,
-           graduated = $4, graduated_at = $5, current_price = $6, peak_price = $7,
-           pnl_percent = $8, exit_reason = $9, closed_at = $10, hold_time_mins = $11,
-           fees_paid_sol = $12, net_pnl_sol = $13
-         WHERE id = $14`,
+           graduated = $4, graduated_at = $5, graduation_price = $6, current_price = $7, peak_price = $8,
+           pnl_percent = $9, exit_reason = $10, closed_at = $11, hold_time_mins = $12,
+           fees_paid_sol = $13, net_pnl_sol = $14
+         WHERE id = $15`,
         [pos.status, pos.current_curve_fill_pct, pos.last_curve_check_sol,
-         pos.graduated, pos.graduated_at, pos.current_price, pos.peak_price,
+         pos.graduated, pos.graduated_at, pos.graduation_price, pos.current_price, pos.peak_price,
          pos.pnl_percent, pos.exit_reason, pos.closed_at, pos.hold_time_mins,
          pos.fees_paid_sol, pos.net_pnl_sol, pos.id],
       );
@@ -520,9 +581,11 @@ export class PumpFunTracker {
           status: PositionStatus.OPEN,
           curve_fill_pct_at_entry: Number(row.curve_fill_pct_at_entry),
           current_curve_fill_pct: Number(row.current_curve_fill_pct),
+          sol_in_curve_at_entry: Number(row.sol_in_curve_at_entry || row.last_curve_check_sol),
           last_curve_check_sol: Number(row.last_curve_check_sol),
           graduated: Boolean(row.graduated),
           graduated_at: row.graduated_at ? new Date(row.graduated_at as string) : null,
+          graduation_price: Number(row.graduation_price || 0),
           current_price: Number(row.current_price || 0),
           peak_price: Number(row.peak_price || 0),
           pnl_percent: Number(row.pnl_percent || 0),

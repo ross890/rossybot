@@ -45,16 +45,18 @@ export async function validatePumpFunSignal(
       { passed: false, reason: `Curve ${(curveFillPct * 100).toFixed(0)}% filled — too close to graduation` });
   }
 
-  // Reject if curve is too empty (<2%) and no momentum
-  if (curveFillPct < 0.02 && solInCurve < 1) {
-    logger.info({ mint: mint.slice(0, 8), solInCurve },
+  // Reject if curve is too empty (<2%) and no momentum — BUT allow if alpha is the first buyer
+  // with high conviction (spending ≥1 SOL). They ARE the momentum.
+  const solSpentAbs = Math.abs(signal.solDelta);
+  if (curveFillPct < 0.02 && solInCurve < 1 && solSpentAbs < 1.0) {
+    logger.info({ mint: mint.slice(0, 8), solInCurve, alphaSpent: solSpentAbs.toFixed(2) },
       'Pump.fun REJECTED — curve too early, no momentum');
     return buildFail('CURVE_TOO_EARLY', curveFillPct, solInCurve,
       { passed: false, reason: `Only ${solInCurve.toFixed(2)} SOL in curve — too early` });
   }
 
   // 2. Check alpha wallet conviction (did they spend a meaningful amount?)
-  const solSpent = Math.abs(signal.solDelta);
+  const solSpent = solSpentAbs;
   const convictionOk = solSpent >= cfg.minConvictionSol;
   const conviction: ValidationCheckResult = convictionOk
     ? { passed: true, reason: `${solSpent.toFixed(2)} SOL spent (min: ${cfg.minConvictionSol})` }

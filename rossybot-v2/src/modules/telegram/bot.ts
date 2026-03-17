@@ -342,6 +342,12 @@ export class TelegramService {
     pumpFunStaleTimeMins: number;
     pumpFunMinConviction: number;
     pumpFunConfluenceBonus: boolean;
+    pumpFunPositionSizeMultiplier: number;
+    pumpFunStopLoss: number;
+    pumpFunMaxPositions: number;
+    pumpFunMaxTokenAgeMins: number;
+    pumpFunSlippageBps: number;
+    minCapitalForStandardTrading: number;
     signalsToday: number;
     tradesAllTime: number;
     discoveryTokens: number;
@@ -359,7 +365,9 @@ export class TelegramService {
       return `│  ${status} [${w.tier}] ${w.address.slice(0, 6)}...${w.address.slice(-4)}${statsStr}`;
     }).join('\n');
 
-    const msg = [
+    const isPumpFunOnly = data.capitalSol < data.minCapitalForStandardTrading;
+
+    const msg: string[] = [
       `🤖 ROSSYBOT V2 — STARTUP DIAGNOSTICS`,
       ``,
       `┌─ SYSTEM`,
@@ -371,8 +379,8 @@ export class TelegramService {
       `├─ CAPITAL`,
       `│ Balance: ${data.capitalSol.toFixed(4)} SOL`,
       `│ Tier: ${data.tier}`,
-      `│ Max positions: ${data.maxPositions}`,
-      `│ Open positions: ${data.openPositions}`,
+      `│ Strategy: ${isPumpFunOnly ? 'PUMP.FUN CURVE SCALP ONLY' : 'FULL (Pump.fun + Raydium)'}`,
+      `│ ${isPumpFunOnly ? `Standard trading unlocks at: ${data.minCapitalForStandardTrading} SOL` : 'Standard trading: ✅ ACTIVE'}`,
       `│`,
       `├─ HELIUS (Real-time)`,
       `│ API key: ${data.heliusApiKey ? '✅ Set' : '❌ Missing'}`,
@@ -389,35 +397,66 @@ export class TelegramService {
       `├─ WALLETS MONITORED (${data.wallets.length})`,
       walletLines,
       `│`,
-      `├─ ENTRY RULES [${data.tier}]${data.shadowMode ? ' (shadow: relaxed)' : ''}`,
-      `│ Confluence: ${data.shadowMode ? '1 (shadow override)' : data.tierConfig.walletConfluence} wallets within ${data.tierConfig.confluenceWindow}min`,
-      `│ MCap range: ${data.tierConfig.mcapRange}`,
-      `│ Min liquidity: $${this.formatNum(data.tierConfig.liquidityMin)}`,
-      `│ Validation: RugCheck + DexScreener (<30s)${data.shadowMode ? ' (thresholds loosened)' : ''}`,
-      `│`,
-      `├─ EXIT RULES [${data.tier}]`,
-      `│ Profit target: +${(data.tierConfig.profitTarget * 100).toFixed(0)}%`,
-      `│ Stop loss: ${(data.tierConfig.stopLoss * 100).toFixed(0)}%`,
-      `│ Hard time: ${data.tierConfig.hardTime}h`,
-      `│ Partial exits: ${data.tierConfig.partialExits ? 'YES' : 'NO (fee-destructive at this tier)'}`,
-      `│ Alpha exit: sell on wallet sell >30%`,
-      `│`,
-      `├─ PUMP.FUN STRATEGY: CURVE SCALP`,
-      `│ Curve TP: ${(data.pumpFunCurveProfitTarget * 100).toFixed(0)}% fill`,
-      `│ Curve hard exit: ${(data.pumpFunCurveHardExit * 100).toFixed(0)}% fill (pre-graduation)`,
-      `│ Stall timer: ${data.pumpFunStaleTimeMins}min`,
-      `│ Min conviction: ${data.pumpFunMinConviction} SOL`,
-      `│ Confluence bonus: ${data.pumpFunConfluenceBonus ? 'YES' : 'NO'}`,
-      `│ Post-grad: IMMEDIATE EXIT`,
-      `│`,
+    ];
+
+    if (isPumpFunOnly) {
+      // Pump.fun curve scalp is our ONLY strategy at this capital level
+      msg.push(
+        `├─ STRATEGY: PUMP.FUN CURVE SCALP`,
+        `│ Position size: ${(data.capitalSol * 0.30 * data.pumpFunPositionSizeMultiplier).toFixed(4)} SOL (30% × ${(data.pumpFunPositionSizeMultiplier * 100).toFixed(0)}% multiplier)`,
+        `│ Max positions: ${data.pumpFunMaxPositions}`,
+        `│ Open positions: ${data.openPositions}`,
+        `│`,
+        `│ ── ENTRY`,
+        `│ Min conviction: ${data.pumpFunMinConviction} SOL (alpha wallet spend)`,
+        `│ Max token age: ${data.pumpFunMaxTokenAgeMins}min`,
+        `│ Confluence bonus: ${data.pumpFunConfluenceBonus ? 'YES (multi-wallet convergence)' : 'NO'}`,
+        `│ Slippage: ${(data.pumpFunSlippageBps / 100).toFixed(0)}%`,
+        `│`,
+        `│ ── EXIT`,
+        `│ Curve TP: ${(data.pumpFunCurveProfitTarget * 100).toFixed(0)}% fill`,
+        `│ Curve hard exit: ${(data.pumpFunCurveHardExit * 100).toFixed(0)}% fill (pre-graduation)`,
+        `│ Stop loss: ${(data.pumpFunStopLoss * 100).toFixed(0)}%`,
+        `│ Stall timer: ${data.pumpFunStaleTimeMins}min (no movement → exit)`,
+        `│ Post-graduation: IMMEDIATE 100% EXIT`,
+        `│`,
+      );
+    } else {
+      // Full strategy — show both standard entry/exit AND pump.fun
+      msg.push(
+        `├─ ENTRY RULES [${data.tier}]${data.shadowMode ? ' (shadow: relaxed)' : ''}`,
+        `│ Confluence: ${data.shadowMode ? '1 (shadow override)' : data.tierConfig.walletConfluence} wallets within ${data.tierConfig.confluenceWindow}min`,
+        `│ MCap range: ${data.tierConfig.mcapRange}`,
+        `│ Min liquidity: $${this.formatNum(data.tierConfig.liquidityMin)}`,
+        `│ Validation: RugCheck + DexScreener (<30s)${data.shadowMode ? ' (thresholds loosened)' : ''}`,
+        `│`,
+        `├─ EXIT RULES [${data.tier}]`,
+        `│ Profit target: +${(data.tierConfig.profitTarget * 100).toFixed(0)}%`,
+        `│ Stop loss: ${(data.tierConfig.stopLoss * 100).toFixed(0)}%`,
+        `│ Hard time: ${data.tierConfig.hardTime}h`,
+        `│ Partial exits: ${data.tierConfig.partialExits ? 'YES' : 'NO (fee-destructive at this tier)'}`,
+        `│ Alpha exit: sell on wallet sell >30%`,
+        `│`,
+        `├─ PUMP.FUN STRATEGY: CURVE SCALP`,
+        `│ Curve TP: ${(data.pumpFunCurveProfitTarget * 100).toFixed(0)}% fill`,
+        `│ Curve hard exit: ${(data.pumpFunCurveHardExit * 100).toFixed(0)}% fill (pre-graduation)`,
+        `│ Stall timer: ${data.pumpFunStaleTimeMins}min`,
+        `│ Min conviction: ${data.pumpFunMinConviction} SOL`,
+        `│ Confluence bonus: ${data.pumpFunConfluenceBonus ? 'YES' : 'NO'}`,
+        `│ Post-grad: IMMEDIATE EXIT`,
+        `│`,
+      );
+    }
+
+    msg.push(
       `├─ STATS`,
       `│ Signals today: ${data.signalsToday}`,
       `│ All-time trades: ${data.tradesAllTime}`,
       `│`,
       `└─ STATUS: ✅ RUNNING`,
-    ].join('\n');
+    );
 
-    await this.send(msg);
+    await this.send(msg.join('\n'));
   }
 
   // --- Command handlers ---

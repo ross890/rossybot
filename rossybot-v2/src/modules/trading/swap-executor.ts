@@ -50,7 +50,7 @@ export class SwapExecutor {
   }
 
   /** Sell token for SOL — sells all held tokens by default */
-  async sellToken(tokenMint: string, liquidityUsd: number, percentToSell = 100): Promise<SwapResult> {
+  async sellToken(tokenMint: string, liquidityUsd: number, percentToSell = 100, slippageBpsOverride?: number): Promise<SwapResult> {
     // Get token balance
     const tokenAccounts = await this.connection.getParsedTokenAccountsByOwner(
       this.keypair.publicKey,
@@ -72,9 +72,10 @@ export class SwapExecutor {
       return { success: false, txSignature: null, inputAmount: 0, outputAmount: 0, feesSol: 0, error: 'Zero token balance' };
     }
 
-    const slippageBps = liquidityUsd < 50_000
-      ? config.jupiter.thinLiquiditySlippageBps
-      : config.jupiter.defaultSlippageBps;
+    const slippageBps = slippageBpsOverride
+      ?? (liquidityUsd < 50_000
+        ? config.jupiter.thinLiquiditySlippageBps
+        : config.jupiter.defaultSlippageBps);
 
     return this.executeSwap({
       inputMint: tokenMint,

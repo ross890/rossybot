@@ -382,6 +382,14 @@ export class PumpFunTracker {
       ? (Date.now() - pos.graduated_at.getTime()) / 60_000
       : 0;
 
+    // Post-graduation cooldown: Jupiter can't route immediately after Raydium migration.
+    // Wait 90s before attempting any sells to avoid Custom:6001 errors.
+    const GRADUATION_COOLDOWN_SECS = 90;
+    if (pos.graduated_at && (Date.now() - pos.graduated_at.getTime()) < GRADUATION_COOLDOWN_SECS * 1000) {
+      await this.updatePosition(pos);
+      return;
+    }
+
     // Post-graduation: apply standard-ish exit rules but more aggressive
     // Profit target at graduation
     if (pos.pnl_percent >= config.pumpFun.graduationProfitTarget) {
@@ -419,11 +427,20 @@ export class PumpFunTracker {
       const tokenName = pos.token_symbol || pos.token_address.slice(0, 8);
       logger.info({ token: tokenName, reason }, 'Pump.fun LIVE SELL — executing swap');
 
-      // Use low liquidity estimate to get higher slippage tolerance for pump.fun tokens
+      // Use pump.fun slippage (5%) as base, escalate on retries:
+      // Retry 0: 500 bps (5%), Retry 1: 800 bps (8%), Retry 2: 1200 bps (12%)
+      const baseSlippage = config.pumpFun.slippageBps;
+      const retryCount = pos.sell_retry_count || 0;
+      const slippageBps = retryCount === 0
+        ? baseSlippage
+        : Math.min(baseSlippage + retryCount * 300, 1500); // Cap at 15%
+
       const pair = await fetchDexPair(pos.token_address);
       const liquidityUsd = pair?.liquidity?.usd || 0;
 
-      const result = await this.swapExecutor.sellToken(pos.token_address, liquidityUsd);
+      logger.info({ token: tokenName, slippageBps, retry: retryCount }, 'Pump.fun sell slippage');
+
+      const result = await this.swapExecutor.sellToken(pos.token_address, liquidityUsd, 100, slippageBps);
 
       if (!result.success) {
         const errorMsg = result.error || 'Unknown';
@@ -437,7 +454,7 @@ export class PumpFunTracker {
           // Fall through to close the position below
         } else {
           pos.sell_retry_count = (pos.sell_retry_count || 0) + 1;
-          const MAX_SELL_RETRIES = 3;
+          const MAX_SELL_RETRIES = 5;
 
           if (pos.sell_retry_count >= MAX_SELL_RETRIES) {
             logger.error({ token: tokenName, retries: pos.sell_retry_count, reason }, 'Pump.fun SELL failed after max retries — force closing');
@@ -446,7 +463,8 @@ export class PumpFunTracker {
             pos.pnl_percent = -1;
             // Fall through to close
           } else {
-            logger.error({ error: errorMsg, token: tokenName, retry: pos.sell_retry_count, reason }, 'Pump.fun SELL swap failed — will retry');
+            const nextSlippage = Math.min(config.pumpFun.slippageBps + pos.sell_retry_count * 300, 1500);
+            logger.error({ error: errorMsg, token: tokenName, retry: pos.sell_retry_count, nextSlippageBps: nextSlippage, reason }, 'Pump.fun SELL swap failed — will retry with higher slippage');
             // Only notify on first failure, not every retry
             if (pos.sell_retry_count === 1) {
               this.onSwapFailed?.(tokenName, errorMsg, 'SELL');

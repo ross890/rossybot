@@ -407,11 +407,20 @@ export class LiveTracker {
 
   /** Close position fully — executes sell swap */
   private async closePosition(pos: Position, reason: string): Promise<void> {
-    // Execute the actual sell swap
+    // Execute the actual sell swap with slippage escalation on retries
     const pair = await fetchDexPair(pos.token_address);
     const liquidityUsd = pair?.liquidity?.usd || 0;
 
-    const result = await this.swapExecutor.sellToken(pos.token_address, liquidityUsd);
+    // Base slippage from liquidity, escalate on retries: +200bps per retry, cap at 1200bps (12%)
+    const retryCount = pos.sell_retry_count || 0;
+    const baseSlippage = liquidityUsd < 50_000
+      ? config.jupiter.thinLiquiditySlippageBps
+      : config.jupiter.defaultSlippageBps;
+    const slippageBps = retryCount === 0
+      ? baseSlippage
+      : Math.min(baseSlippage + retryCount * 200, 1200);
+
+    const result = await this.swapExecutor.sellToken(pos.token_address, liquidityUsd, 100, slippageBps);
 
     if (!result.success) {
       const errorMsg = result.error || 'Unknown';
@@ -425,7 +434,7 @@ export class LiveTracker {
         // Fall through to close
       } else {
         pos.sell_retry_count = (pos.sell_retry_count || 0) + 1;
-        const MAX_SELL_RETRIES = 3;
+        const MAX_SELL_RETRIES = 5;
 
         if (pos.sell_retry_count >= MAX_SELL_RETRIES) {
           logger.error({ token: pos.token_symbol, retries: pos.sell_retry_count, reason }, 'EXIT sell failed after max retries — force closing');
@@ -434,7 +443,11 @@ export class LiveTracker {
           pos.pnl_percent = -1;
           // Fall through to close
         } else {
-          logger.error({ error: errorMsg, token: pos.token_symbol, retry: pos.sell_retry_count, reason }, 'EXIT sell failed — will retry');
+          const nextBase = liquidityUsd < 50_000
+            ? config.jupiter.thinLiquiditySlippageBps
+            : config.jupiter.defaultSlippageBps;
+          const nextSlippage = Math.min(nextBase + pos.sell_retry_count * 200, 1200);
+          logger.error({ error: errorMsg, token: pos.token_symbol, retry: pos.sell_retry_count, nextSlippageBps: nextSlippage, reason }, 'EXIT sell failed — will retry with higher slippage');
           if (pos.sell_retry_count === 1) {
             this.onSwapFailed?.(pos.token_symbol, errorMsg, 'SELL');
           }

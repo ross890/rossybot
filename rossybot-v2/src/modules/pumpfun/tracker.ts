@@ -195,17 +195,23 @@ export class PumpFunTracker {
           pos.pnl_percent = (pos.current_curve_fill_pct / pos.curve_fill_pct_at_entry) - 1;
         }
 
-        // 3. Curve stall exit — if no SOL inflow for staleTimeKillMins
+        // 3. Curve stall exit — if no meaningful SOL inflow for staleTimeKillMins
         const solDelta = curveState.solBalance - prevSol;
-        if (holdMins >= cfg.staleTimeKillMins && solDelta <= 0.05) {
+        if (holdMins >= cfg.staleTimeKillMins && solDelta <= 0.1) {
           await this.closePosition(pos, `Curve stall (${holdMins.toFixed(0)}min, no momentum)`);
+          return;
+        }
+
+        // 3b. Early stall — if curve is going backwards (net sells) after 5 min, cut early
+        if (holdMins >= 5 && solDelta < -0.05) {
+          await this.closePosition(pos, `Curve reversal (${holdMins.toFixed(0)}min, SOL leaving curve)`);
           return;
         }
       }
     }
 
-    // 4. Hard time kill — tighter than standard V2
-    if (holdMins >= 60) {
+    // 4. Hard time kill — aligned with maxTokenAgeMins config
+    if (holdMins >= cfg.maxTokenAgeMins) {
       await this.closePosition(pos, `Pump.fun hard time kill (${holdMins.toFixed(0)}min)`);
       return;
     }

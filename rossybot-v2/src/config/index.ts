@@ -76,15 +76,15 @@ export const config = {
   dailyLossLimitPct: 0.30, // 30%
   pumpFun: {
     programId: '6EF8rrecthR5Dkzon8Nwu78hRvfCKubJ14M5uBEwF6P',
-    positionSizeMultiplier: 0.4,       // 40% of normal tier sizing
-    staleTimeKillMins: 20,             // Exit if no movement in 20 min
-    stopLoss: -0.25,                   // 25% stop loss
-    hardKill: -0.35,                   // 35% hard kill
+    positionSizeMultiplier: 0.5,       // 50% of normal tier sizing (was 40% — pump.fun has 62% WR, reward it)
+    staleTimeKillMins: 12,             // Exit if no movement in 12 min (was 20 — winners move in <7min avg)
+    stopLoss: -0.20,                   // 20% stop loss (was 25% — tighter to prevent -50% gap-throughs)
+    hardKill: -0.25,                   // 25% hard kill (was 35% — losses were hitting -51%, too wide)
     graduationProfitTarget: 0.50,      // 50% TP on graduation
     graduationSellPct: 60,             // Sell 60% at graduation, hold 40%
-    minConvictionSol: 0.5,             // Alpha must spend ≥0.5 SOL
+    minConvictionSol: 0.3,             // Alpha must spend ≥0.3 SOL (was 0.5 — MICRO tier wallets spend less)
     minCurveVelocity: 0.1,            // 0.1 SOL/min curve velocity
-    maxTokenAgeMins: 60,               // Only tokens <1hr old
+    maxTokenAgeMins: 30,               // Only tokens <30min old (was 60 — if not graduating by 30min, unlikely)
     maxPositions: 3,                   // Max 3 pump.fun positions
     slippageBps: 500,                  // 5% slippage for bonding curve
   },
@@ -97,28 +97,28 @@ export const TIER_CONFIGS: Record<CapitalTier, TierConfig> = {
     tier: CapitalTier.MICRO,
     maxPositions: 4,
     walletsMonitored: 50,
-    positionSizePct: 0.25,
-    minPositionSol: 0.3,
+    positionSizePct: 0.30,            // 30% per position (was 25% — small capital needs more concentration)
+    minPositionSol: 0.003,            // 0.003 SOL min (was 0.3 — bot couldn't trade with 0.025 SOL balance)
     profitTarget: 0.50,
-    stopLoss: -0.20,
-    hardKill: -0.25,
+    stopLoss: -0.15,                  // 15% stop (was 20% — protect tiny capital more aggressively)
+    hardKill: -0.20,                  // 20% hard kill (was 25% — same reasoning)
     partialExitsEnabled: false,
     walletConfluenceRequired: 1,
     confluenceWindow: 30,
     timeKills: [
-      { hours: 2, minPnlPct: -0.05 },
-      { hours: 4, minPnlPct: 0.15 },
-      { hours: 12, minPnlPct: 0.25 },
+      { hours: 1, minPnlPct: -0.05 },  // Cut losers at 1h (was 2h — memecoins resolve fast)
+      { hours: 2, minPnlPct: 0.10 },   // Must be +10% by 2h (was 4h/+15% — tighter)
+      { hours: 6, minPnlPct: 0.20 },   // Must be +20% by 6h (was 12h/+25% — don't hold overnight)
     ],
-    hardTimeHours: 48,
+    hardTimeHours: 12,                // 12h hard cap (was 48h — memecoins are fast, don't hold bags)
     mcapMin: 30_000,
     mcapMax: 10_000_000,
-    liquidityMin: 10_000,
+    liquidityMin: 5_000,              // $5K min (was $10K — micro-cap tokens often have lower liq)
     momentumWindow: '24h',
     momentumMin: -50,
     momentumMax: 300,
     volumeMultiplierMin: 1,
-    tokenMaxAgeDays: 30,
+    tokenMaxAgeDays: 14,              // 14 days max age (was 30 — stale tokens less interesting)
     minSignalScore: 35,
   },
   [CapitalTier.SMALL]: {

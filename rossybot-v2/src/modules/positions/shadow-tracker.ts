@@ -1,7 +1,7 @@
 import { v4 as uuid } from 'uuid';
 import { logger } from '../../utils/logger.js';
 import { query, getMany, getOne } from '../../db/database.js';
-import { config } from '../../config/index.js';
+import { config, TIER_CONFIGS } from '../../config/index.js';
 import { CapitalTier, PositionStatus, type TierConfig, type ShadowPosition } from '../../types/index.js';
 import { fetchDexPair, getPriceUsd } from '../validation/dexscreener.js';
 import type { ValidatedSignal } from '../signals/entry-engine.js';
@@ -159,26 +159,26 @@ export class ShadowTracker {
     const pnl = pos.pnl_percent;
     const holdMins = (Date.now() - pos.entry_time.getTime()) / (1000 * 60);
 
-    // Hard time kill: 48 hours
-    if (holdMins >= 48 * 60) {
-      await this.closePosition(pos, 'Hard time kill (48h)');
+    // Hard time kill: use tier config instead of hardcoded 48h
+    const tierCfg = TIER_CONFIGS[tier];
+    if (holdMins >= tierCfg.hardTimeHours * 60) {
+      await this.closePosition(pos, `Hard time kill (${tierCfg.hardTimeHours}h)`);
       return;
     }
 
-    // --- MICRO/SMALL exit rules ---
+    // --- MICRO/SMALL exit rules (now driven by tier config) ---
     if (tier === CapitalTier.MICRO || tier === CapitalTier.SMALL) {
-      const profitTarget = tier === CapitalTier.MICRO ? 0.50 : 0.40;
-      const stopLoss = -0.20;
-      const hardKill = -0.25;
+      if (pnl <= tierCfg.hardKill) { await this.closePosition(pos, `Hard kill (${(pnl * 100).toFixed(1)}%)`); return; }
+      if (pnl <= tierCfg.stopLoss) { await this.closePosition(pos, `Stop loss (${(pnl * 100).toFixed(1)}%)`); return; }
+      if (pnl >= tierCfg.profitTarget) { await this.closePosition(pos, `Profit target (${(pnl * 100).toFixed(1)}%)`); return; }
 
-      if (pnl <= hardKill) { await this.closePosition(pos, `Hard kill (${(pnl * 100).toFixed(1)}%)`); return; }
-      if (pnl <= stopLoss) { await this.closePosition(pos, `Stop loss (${(pnl * 100).toFixed(1)}%)`); return; }
-      if (pnl >= profitTarget) { await this.closePosition(pos, `Profit target (${(pnl * 100).toFixed(1)}%)`); return; }
-
-      // Time kills
-      if (holdMins >= 60 && pnl < 0.05) { await this.closePosition(pos, 'Time kill 1h (<5%)'); return; }
-      if (holdMins >= 240 && pnl < 0.15) { await this.closePosition(pos, 'Time kill 4h (<15%)'); return; }
-      if (holdMins >= 720 && pnl < 0.25) { await this.closePosition(pos, 'Time kill 12h (<25%)'); return; }
+      // Time kills from tier config
+      for (const tk of tierCfg.timeKills) {
+        if (holdMins >= tk.hours * 60 && pnl < tk.minPnlPct) {
+          await this.closePosition(pos, `Time kill ${tk.hours}h (<${(tk.minPnlPct * 100).toFixed(0)}%)`);
+          return;
+        }
+      }
       return;
     }
 

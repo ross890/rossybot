@@ -117,6 +117,7 @@ export class LiveTracker {
       exit_reason: null,
       partial_exits: [],
       closed_at: null,
+      sell_retry_count: 0,
       hold_time_mins: null,
     };
 
@@ -413,10 +414,33 @@ export class LiveTracker {
     const result = await this.swapExecutor.sellToken(pos.token_address, liquidityUsd);
 
     if (!result.success) {
-      logger.error({ error: result.error, token: pos.token_symbol, reason }, 'EXIT sell failed — position stuck');
-      this.onSwapFailed?.(pos.token_symbol, result.error || 'Unknown', 'SELL');
-      // Don't mark as closed if sell failed — will retry on next price check
-      return;
+      const errorMsg = result.error || 'Unknown';
+      const isNoBalance = errorMsg.includes('No token balance') || errorMsg.includes('amount is zero');
+
+      if (isNoBalance) {
+        // Tokens are gone — force close as total loss
+        logger.warn({ token: pos.token_symbol, reason }, 'EXIT sell — no token balance, force closing as loss');
+        pos.net_pnl_sol = -pos.entry_sol - pos.fees_paid_sol;
+        pos.pnl_percent = -1;
+        // Fall through to close
+      } else {
+        pos.sell_retry_count = (pos.sell_retry_count || 0) + 1;
+        const MAX_SELL_RETRIES = 3;
+
+        if (pos.sell_retry_count >= MAX_SELL_RETRIES) {
+          logger.error({ token: pos.token_symbol, retries: pos.sell_retry_count, reason }, 'EXIT sell failed after max retries — force closing');
+          this.onSwapFailed?.(pos.token_symbol, `${errorMsg} (gave up after ${MAX_SELL_RETRIES} retries)`, 'SELL');
+          pos.net_pnl_sol = -pos.entry_sol - pos.fees_paid_sol;
+          pos.pnl_percent = -1;
+          // Fall through to close
+        } else {
+          logger.error({ error: errorMsg, token: pos.token_symbol, retry: pos.sell_retry_count, reason }, 'EXIT sell failed — will retry');
+          if (pos.sell_retry_count === 1) {
+            this.onSwapFailed?.(pos.token_symbol, errorMsg, 'SELL');
+          }
+          return;
+        }
+      }
     }
 
     pos.status = PositionStatus.CLOSED;
@@ -539,6 +563,7 @@ export class LiveTracker {
         partial_exits: (row.partial_exits as Record<string, unknown>[]) || [],
         closed_at: null,
         hold_time_mins: null,
+        sell_retry_count: 0,
       };
       this.positions.set(pos.id, pos);
     }

@@ -108,6 +108,11 @@ class RossyBotV2 {
   // Pump.fun confluence tracking: multiple alpha wallets buying the same token
   private pumpFunConfluence: Map<string, { wallets: Set<string>; totalSol: number; firstSeen: number }> = new Map();
 
+  // Pump.fun rejection cache: skip re-evaluation of tokens rejected for curve-range reasons
+  // Key: tokenMint, Value: { reason, expiry timestamp }
+  private pumpFunRejectionCache: Map<string, { reason: string; expiresAt: number }> = new Map();
+  private static readonly PUMP_FUN_REJECTION_TTL_MS = 5 * 60_000; // 5 minutes
+
   // PumpPortal — real-time pump.fun trade stream for alpha wallet discovery
   private pumpPortal: PumpPortalClient;
   private pumpFunAlphaDiscovery: PumpFunAlphaDiscovery;
@@ -315,6 +320,20 @@ class RossyBotV2 {
       }
     }, 5 * 60 * 1000); // every 5 min
 
+    // Clean up expired pump.fun rejection cache entries every 5 min
+    setInterval(() => {
+      const now = Date.now();
+      let cleaned = 0;
+      for (const [mint, entry] of this.pumpFunRejectionCache) {
+        if (entry.expiresAt <= now) {
+          this.pumpFunRejectionCache.delete(mint);
+          cleaned++;
+        }
+      }
+      if (cleaned > 0) {
+        logger.debug({ cleaned, remaining: this.pumpFunRejectionCache.size }, 'Pump.fun rejection cache cleanup');
+      }
+    }, 5 * 60 * 1000);
 
     // 9. Start Nansen wallet discovery (scheduled every 4h + immediate first run)
     this.walletDiscovery.start();
@@ -969,6 +988,13 @@ class RossyBotV2 {
         return;
       }
 
+      // Skip tokens recently rejected for curve-range reasons (avoid re-fetching RPC + Telegram spam)
+      const cached = this.pumpFunRejectionCache.get(mint);
+      if (cached && cached.expiresAt > Date.now()) {
+        logger.debug({ token: mint.slice(0, 8), reason: cached.reason }, 'Pump.fun skip — cached rejection');
+        return;
+      }
+
       // Max pump.fun positions check
       if (this.pumpFunTracker.getOpenCount() >= cfg.maxPositions) {
         logger.info({ open: this.pumpFunTracker.getOpenCount(), max: cfg.maxPositions },
@@ -1021,15 +1047,27 @@ class RossyBotV2 {
           token: mint.slice(0, 8),
           reason: validation.failReason,
           wallet: walletLabel,
+          curveFill: `${(validation.curveFillPct * 100).toFixed(0)}%`,
         }, `Pump.fun signal rejected: ${validation.failReason}`);
 
-        await this.telegram.send(
-          `🎰 PUMP.FUN rejected: ${mint.slice(0, 8)}\n` +
-          `├ Wallet: ${walletLabel}\n` +
-          `├ Reason: ${validation.failReason}\n` +
-          `├ Curve: ${(validation.curveFillPct * 100).toFixed(0)}% (${validation.solInCurve.toFixed(1)} SOL)\n` +
-          `└ SOL spent: ${solSpent.toFixed(2)}`,
-        );
+        // Cache curve-range rejections to avoid re-fetching RPC for every signal on the same token
+        const curveRangeReasons = ['CURVE_TOO_EARLY', 'CURVE_NEARLY_GRADUATED'];
+        if (curveRangeReasons.includes(validation.failReason || '')) {
+          this.pumpFunRejectionCache.set(mint, {
+            reason: validation.failReason!,
+            expiresAt: Date.now() + RossyBot.PUMP_FUN_REJECTION_TTL_MS,
+          });
+          // No Telegram message for curve-range rejections — these are noise, not actionable
+        } else {
+          // Other rejections (LOW_CONVICTION, etc.) still get Telegram alerts
+          await this.telegram.send(
+            `🎰 PUMP.FUN rejected: ${mint.slice(0, 8)}\n` +
+            `├ Wallet: ${walletLabel}\n` +
+            `├ Reason: ${validation.failReason}\n` +
+            `├ Curve: ${(validation.curveFillPct * 100).toFixed(0)}% (${validation.solInCurve.toFixed(1)} SOL)\n` +
+            `└ SOL spent: ${solSpent.toFixed(2)}`,
+          );
+        }
         return;
       }
 
@@ -1253,6 +1291,12 @@ class RossyBotV2 {
         pumpFunStaleTimeMins: config.pumpFun.staleTimeKillMins,
         pumpFunMinConviction: config.pumpFun.minConvictionSol,
         pumpFunConfluenceBonus: config.pumpFun.confluenceBonus,
+        pumpFunPositionSizeMultiplier: config.pumpFun.positionSizeMultiplier,
+        pumpFunStopLoss: config.pumpFun.stopLoss,
+        pumpFunMaxPositions: config.pumpFun.maxPositions,
+        pumpFunMaxTokenAgeMins: config.pumpFun.maxTokenAgeMins,
+        pumpFunSlippageBps: config.pumpFun.slippageBps,
+        minCapitalForStandardTrading: config.minCapitalForStandardTrading,
         signalsToday: parseInt(signalRow?.count || '0'),
         tradesAllTime: parseInt(tradeRow?.count || '0'),
         discoveryTokens: discoveryRow?.tokens_screened || 0,

@@ -45,6 +45,11 @@ interface TransactionResult {
 
 export class TransactionParser {
   private subscribedWallets: Set<string>;
+  // Per-wallet noise tracking: suppress repeated no-signal log spam
+  private walletSkipCounts: Map<string, number> = new Map();
+  private walletLastSkipLog: Map<string, number> = new Map();
+  private walletSignalCounts: Map<string, number> = new Map();
+  private static readonly SKIP_LOG_INTERVAL_MS = 60_000; // Log skipped TXs at most once per 60s per wallet
 
   constructor(walletAddresses: string[]) {
     this.subscribedWallets = new Set(walletAddresses);
@@ -60,6 +65,24 @@ export class TransactionParser {
 
   removeWallet(address: string): void {
     this.subscribedWallets.delete(address);
+  }
+
+  /** Get per-wallet noise stats: how many TXs were skipped vs. produced signals */
+  getWalletNoiseStats(): Array<{ wallet: string; skipped: number; signals: number; ratio: number }> {
+    const stats: Array<{ wallet: string; skipped: number; signals: number; ratio: number }> = [];
+    const allWallets = new Set([...this.walletSkipCounts.keys(), ...this.walletSignalCounts.keys()]);
+    for (const wallet of allWallets) {
+      const skipped = this.walletSkipCounts.get(wallet) || 0;
+      const signals = this.walletSignalCounts.get(wallet) || 0;
+      const total = skipped + signals;
+      stats.push({
+        wallet: wallet.slice(0, 8),
+        skipped,
+        signals,
+        ratio: total > 0 ? signals / total : 0,
+      });
+    }
+    return stats.sort((a, b) => a.ratio - b.ratio); // Noisiest first
   }
 
   async parse(
@@ -164,7 +187,7 @@ export class TransactionParser {
           const postSol = walletIdx >= 0 ? (tx.meta.postBalances[walletIdx] || 0) / 1e9 : 0;
           const solDelta = postSol - preSol;
 
-          logger.info({
+          logger.debug({
             sig: signature.slice(0, 12),
             wallet: wallet.slice(0, 8),
             preTokenBalanceCount: preBalances.length,
@@ -174,10 +197,11 @@ export class TransactionParser {
             walletIdx,
           }, 'Pump.fun fallback: checking SOL delta for Token2022 signal');
 
-          if (allTxMints.size > 0 || (Math.abs(solDelta) > 0.01 && preBalances.length === 0 && postBalances.length === 0)) {
+          if (allTxMints.size > 0 || (Math.abs(solDelta) > 0.1 && preBalances.length === 0 && postBalances.length === 0)) {
             // Token2022 TXs may have completely empty token balances in RPC response.
             // If SOL delta is significant and we know it's pump.fun, still generate a signal.
-            // For the mint, try the bonding curve's associated token or use the curve address as fallback.
+            // Require >0.1 SOL delta for empty-balance fallback to avoid false positives
+            // from DeFi interactions that merely mention the pump.fun program.
 
             // Only generate signal if there's a meaningful SOL change (not just fees)
             if (Math.abs(solDelta) > 0.005) {
@@ -320,6 +344,9 @@ export class TransactionParser {
       }
 
       if (signals.length > 0) {
+        for (const w of involvedWallets) {
+          this.walletSignalCounts.set(w, (this.walletSignalCounts.get(w) || 0) + 1);
+        }
         logger.info({
           wallets: involvedWallets.map((w) => w.slice(0, 8)),
           signals: signals.map((s) => ({
@@ -330,7 +357,17 @@ export class TransactionParser {
           })),
         }, 'Parsed transaction signals');
       } else if (involvedWallets.length > 0) {
-        console.log(`⏭️ TX ${signature.slice(0, 12)}... | wallet ${involvedWallets[0].slice(0, 8)} | no token transfers (SOL-only or program interaction)`);
+        // Rate-limit no-signal logs: at most once per 60s per wallet to avoid flooding
+        const wallet = involvedWallets[0];
+        const skipCount = (this.walletSkipCounts.get(wallet) || 0) + 1;
+        this.walletSkipCounts.set(wallet, skipCount);
+        const now = Date.now();
+        const lastLog = this.walletLastSkipLog.get(wallet) || 0;
+        if (now - lastLog >= TransactionParser.SKIP_LOG_INTERVAL_MS) {
+          this.walletLastSkipLog.set(wallet, now);
+          const signals = this.walletSignalCounts.get(wallet) || 0;
+          console.log(`⏭️ wallet ${wallet.slice(0, 8)} | ${skipCount} skipped TXs (${signals} signals) | no token transfers`);
+        }
       }
     } catch (err) {
       logger.error({ err }, 'Failed to parse transaction');

@@ -327,6 +327,10 @@ async function migrate() {
   await pool.query(`ALTER TABLE pumpfun_positions ADD COLUMN IF NOT EXISTS fees_paid_sol DECIMAL DEFAULT 0`);
   await pool.query(`ALTER TABLE pumpfun_positions ADD COLUMN IF NOT EXISTS net_pnl_sol DECIMAL DEFAULT 0`);
 
+  // --- Add graduation_price and sol_in_curve_at_entry columns ---
+  await pool.query(`ALTER TABLE pumpfun_positions ADD COLUMN IF NOT EXISTS graduation_price DECIMAL DEFAULT 0`);
+  await pool.query(`ALTER TABLE pumpfun_positions ADD COLUMN IF NOT EXISTS sol_in_curve_at_entry DECIMAL DEFAULT 0`);
+
   console.log('✅ All migrations complete');
   await pool.end();
 }

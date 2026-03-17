@@ -79,15 +79,15 @@ export const config = {
   minCapitalForStandardTrading: 5.0, // 5 SOL
   pumpFun: {
     programId: '6EF8rrecthR5Dkzon8Nwu78hRvfCKubJ14M5uBEwF6P',
-    positionSizeMultiplier: 0.5,       // 50% of normal tier sizing (was 40% — pump.fun has 62% WR, reward it)
-    staleTimeKillMins: 12,             // Exit if no movement in 12 min (was 20 — winners move in <7min avg)
-    stopLoss: -0.20,                   // 20% stop loss (was 25% — tighter to prevent -50% gap-throughs)
-    hardKill: -0.25,                   // 25% hard kill (was 35% — losses were hitting -51%, too wide)
+    positionSizeMultiplier: 0.5,       // 50% of normal tier sizing
+    staleTimeKillMins: 12,             // Exit if no movement in 12 min (winners move in <7min avg)
+    stopLoss: -0.20,                   // 20% stop loss
+    hardKill: -0.25,                   // 25% hard kill
     graduationProfitTarget: 0.50,      // 50% TP on graduation
     graduationSellPct: 60,             // Sell 60% at graduation, hold 40%
-    minConvictionSol: 0.3,             // Alpha must spend ≥0.3 SOL (was 0.5 — MICRO tier wallets spend less)
+    minConvictionSol: 0.5,             // Alpha must spend ≥0.5 SOL (was 0.3 — too many low-quality signals)
     minCurveVelocity: 0.1,            // 0.1 SOL/min curve velocity
-    maxTokenAgeMins: 30,               // Only tokens <30min old (was 60 — if not graduating by 30min, unlikely)
+    maxTokenAgeMins: 30,               // Only tokens <30min old
     maxPositions: 3,                   // Max 3 pump.fun positions
     slippageBps: 500,                  // 5% slippage for bonding curve
   },

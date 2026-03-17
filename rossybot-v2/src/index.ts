@@ -383,7 +383,7 @@ class RossyBotV2 {
           } else if (signal.type === SignalType.SELL) {
             // Check both standard and pump.fun positions for sell signals
             if (signal.isPumpFun) {
-              await this.pumpFunTracker.handleAlphaExit(signal.tokenMint, signal.walletAddress, 0.5);
+              await this.pumpFunTracker.handleAlphaExit(signal.tokenMint, signal.walletAddress, signal.solDelta);
             }
             await this.handleSellSignal(signal);
           }

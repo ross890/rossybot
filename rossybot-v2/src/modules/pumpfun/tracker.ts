@@ -255,14 +255,31 @@ export class PumpFunTracker {
   }
 
   /** Handle alpha wallet sell on the bonding curve */
-  async handleAlphaExit(tokenMint: string, walletAddress: string, sellPct: number): Promise<void> {
+  async handleAlphaExit(tokenMint: string, walletAddress: string, solReceived: number): Promise<void> {
     for (const pos of this.positions.values()) {
       if (pos.token_address !== tokenMint || pos.status === PositionStatus.CLOSED) continue;
 
-      // Any alpha sell >20% on pump.fun = full exit (pre-graduation liquidity is thin)
-      if (sellPct >= 0.20) {
-        await this.closePosition(pos, `Alpha exit on curve: ${walletAddress.slice(0, 8)} sold ${(sellPct * 100).toFixed(0)}%`);
+      // Only react to sells from wallets that triggered OUR entry.
+      // Random alpha wallets selling the same token shouldn't cause panic exits.
+      const isSignalWallet = pos.signal_wallets.some(
+        (w) => w.toLowerCase() === walletAddress.toLowerCase(),
+      );
+      if (!isSignalWallet) {
+        logger.info({ token: pos.token_symbol || tokenMint.slice(0, 8), wallet: walletAddress.slice(0, 8), solReceived: solReceived.toFixed(2) },
+          'Pump.fun alpha sell ignored — not our signal wallet');
+        continue;
       }
+
+      // Use SOL received to gauge sell significance.
+      // Small take-profits (<1 SOL) are normal — only exit on significant dumps.
+      const absSol = Math.abs(solReceived);
+      if (absSol < 1.0) {
+        logger.info({ token: pos.token_symbol || tokenMint.slice(0, 8), wallet: walletAddress.slice(0, 8), solReceived: absSol.toFixed(2) },
+          'Pump.fun signal wallet took small profit — holding');
+        continue;
+      }
+
+      await this.closePosition(pos, `Alpha exit on curve: ${walletAddress.slice(0, 8)} dumped ${absSol.toFixed(1)} SOL`);
     }
   }
 

@@ -7,6 +7,7 @@ import { detectPumpFunInteraction } from '../pumpfun/detector.js';
 
 // SOL mint constant — used to filter out pure SOL transfers
 const SOL_MINT = 'So11111111111111111111111111111111111111112';
+const PUMP_FUN_PROGRAM = config.pumpFun.programId;
 
 interface TokenBalanceEntry {
   accountIndex: number;
@@ -150,6 +151,7 @@ export class TransactionParser {
         // but this IS a pump.fun TX with token balance changes, infer the trade from SOL delta.
         // The signer wallet spent/received SOL, and the token mint is in the balance entries.
         if (allMints.size === 0 && isPumpFun) {
+          // Gather ALL token mints from the TX (not just this wallet's)
           const allTxMints = new Set([
             ...preBalances.map((b) => b.mint),
             ...postBalances.map((b) => b.mint),
@@ -157,16 +159,58 @@ export class TransactionParser {
           // Remove SOL mint and find the actual token being traded
           allTxMints.delete(SOL_MINT);
 
-          if (allTxMints.size > 0) {
-            const walletIdx = accountKeys.findIndex((k) => k.pubkey === wallet);
-            const preSol = walletIdx >= 0 ? (tx.meta.preBalances[walletIdx] || 0) / 1e9 : 0;
-            const postSol = walletIdx >= 0 ? (tx.meta.postBalances[walletIdx] || 0) / 1e9 : 0;
-            const solDelta = postSol - preSol;
+          const walletIdx = accountKeys.findIndex((k) => k.pubkey === wallet);
+          const preSol = walletIdx >= 0 ? (tx.meta.preBalances[walletIdx] || 0) / 1e9 : 0;
+          const postSol = walletIdx >= 0 ? (tx.meta.postBalances[walletIdx] || 0) / 1e9 : 0;
+          const solDelta = postSol - preSol;
+
+          logger.info({
+            sig: signature.slice(0, 12),
+            wallet: wallet.slice(0, 8),
+            preTokenBalanceCount: preBalances.length,
+            postTokenBalanceCount: postBalances.length,
+            txMints: allTxMints.size,
+            solDelta: solDelta.toFixed(6),
+            walletIdx,
+          }, 'Pump.fun fallback: checking SOL delta for Token2022 signal');
+
+          if (allTxMints.size > 0 || (Math.abs(solDelta) > 0.01 && preBalances.length === 0 && postBalances.length === 0)) {
+            // Token2022 TXs may have completely empty token balances in RPC response.
+            // If SOL delta is significant and we know it's pump.fun, still generate a signal.
+            // For the mint, try the bonding curve's associated token or use the curve address as fallback.
 
             // Only generate signal if there's a meaningful SOL change (not just fees)
             if (Math.abs(solDelta) > 0.005) {
               const type = solDelta < 0 ? SignalType.BUY : SignalType.SELL;
-              const mint = allTxMints.values().next().value!;
+
+              // Resolve token mint: from token balances if available, otherwise try to extract
+              // from the transaction's account keys (writable non-signers that aren't the program or curve)
+              let mint = allTxMints.size > 0 ? allTxMints.values().next().value! : null;
+              if (!mint) {
+                // Token2022 pump.fun TXs: the mint is typically a writable account in the TX
+                // that isn't the wallet, program, or bonding curve. Look through innerInstructions
+                // or fall back to account keys heuristic.
+                const knownAddrs = new Set([wallet, PUMP_FUN_PROGRAM, pumpFunCurve || '', SOL_MINT]);
+                for (const key of accountKeys) {
+                  if (!knownAddrs.has(key.pubkey) && !key.signer && key.writable) {
+                    // Candidate — could be mint, ATA, or other account
+                    // Skip known system programs
+                    if (!key.pubkey.startsWith('11111') && !key.pubkey.startsWith('Token')) {
+                      mint = key.pubkey;
+                      break;
+                    }
+                  }
+                }
+              }
+
+              if (!mint) {
+                logger.warn({
+                  sig: signature.slice(0, 12),
+                  wallet: wallet.slice(0, 8),
+                  solDelta: solDelta.toFixed(4),
+                }, 'Pump.fun fallback: could not resolve token mint — skipping');
+                continue;
+              }
 
               // Estimate token amount from the balance entries
               let tokenAmount = 0;

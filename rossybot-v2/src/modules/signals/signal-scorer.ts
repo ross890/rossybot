@@ -211,37 +211,40 @@ function scoreMomentum(dex: DexScreenerPair | null): number {
 }
 
 // --- MCap Sweet Spot (0-20) ---
-// Micro cap ideal range: $50K-$500K. Too low = risky, too high = limited upside
+// Micro cap ideal range: $30K-$500K — aligned with MICRO tier mcapMin of $30K
 function scoreMcapFit(dex: DexScreenerPair | null): number {
   if (!dex) return 0; // No data = no free points
 
   const mcap = dex.marketCap || dex.fdv || 0;
   if (mcap <= 0) return 0;
 
-  // Sweet spot curve: peaks at $100K-$300K for micro tier
-  if (mcap < 50_000) return 5;        // Too micro, risky
-  if (mcap < 100_000) return 12;      // Getting interesting
+  // Sweet spot curve: peaks at $30K-$300K for micro tier
+  // $30K-$100K is where the biggest moves happen (2-10x potential)
+  if (mcap < 30_000) return 5;        // Below tier minimum, risky
+  if (mcap < 100_000) return 18;      // Early micro — high upside (was 12 at $50K-$100K)
   if (mcap <= 300_000) return 20;     // Sweet spot
-  if (mcap <= 500_000) return 18;     // Still good
-  if (mcap <= 1_000_000) return 14;   // Decent
-  if (mcap <= 2_000_000) return 10;   // Less upside
-  if (mcap <= 5_000_000) return 6;    // Marginal
-  return 3;                            // Low upside for micro capital
+  if (mcap <= 500_000) return 16;     // Still good
+  if (mcap <= 1_000_000) return 12;   // Decent
+  if (mcap <= 2_000_000) return 8;    // Less upside
+  if (mcap <= 5_000_000) return 5;    // Marginal
+  return 2;                            // Low upside for micro capital
 }
 
 // --- Liquidity Ratio (0-10) ---
 // Enough liquidity relative to position = lower slippage risk
+// Adjusted for MICRO tier — trading with <1 SOL, lower liq is acceptable
 function scoreLiquidity(dex: DexScreenerPair | null): number {
   if (!dex) return 0; // No data = no free points
 
   const liq = dex.liquidity?.usd || 0;
   if (liq <= 0) return 0;
 
-  // $20K+ liq is comfortable for 0.5 SOL positions
+  // At MICRO tier (0.003-0.3 SOL positions), even $5K liq is fine
   if (liq >= 100_000) return 10;
-  if (liq >= 50_000) return 8;
-  if (liq >= 20_000) return 6;
-  if (liq >= 10_000) return 4;
+  if (liq >= 50_000) return 9;
+  if (liq >= 20_000) return 8;
+  if (liq >= 10_000) return 7;
+  if (liq >= 5_000) return 5;         // $5K is new liquidityMin — give decent score
   return 2;
 }
 

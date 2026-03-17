@@ -410,9 +410,23 @@ export class PumpFunTracker {
 
     // Post-graduation cooldown: Jupiter can't route immediately after Raydium migration.
     // Wait 90s before attempting any sells to avoid Custom:6001 errors.
-    const GRADUATION_COOLDOWN_SECS = 90;
-    if (pos.graduated_at && (Date.now() - pos.graduated_at.getTime()) < GRADUATION_COOLDOWN_SECS * 1000) {
+    // BUT: if price crashes past hard kill during cooldown, close immediately when cooldown expires.
+    const GRADUATION_COOLDOWN_SECS = 30; // Reduced from 90s — Jupiter routes within ~15-20s post-migration
+    const inCooldown = pos.graduated_at && (Date.now() - pos.graduated_at.getTime()) < GRADUATION_COOLDOWN_SECS * 1000;
+    if (inCooldown) {
+      // Still track PnL — if hard kill breached, mark for immediate sell on cooldown exit
+      if (pos.pnl_percent <= config.pumpFun.hardKill) {
+        pos.exit_reason = `Post-grad hard kill (${(pos.pnl_percent * 100).toFixed(1)}%) — queued during cooldown`;
+        logger.warn({ token: pos.token_address.slice(0, 8), pnl: (pos.pnl_percent * 100).toFixed(1) },
+          'Graduation cooldown: hard kill breached, will sell at cooldown end');
+      }
       await this.updatePosition(pos);
+      return;
+    }
+
+    // If a sell was queued during cooldown, execute it now
+    if (pos.exit_reason && pos.exit_reason.includes('queued during cooldown')) {
+      await this.closePosition(pos, pos.exit_reason.replace(' — queued during cooldown', ''));
       return;
     }
 

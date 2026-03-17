@@ -20,13 +20,19 @@ export interface PumpPortalTrade {
 
 export interface PumpPortalEvents {
   trade: (trade: PumpPortalTrade) => void;
+  newToken: (trade: PumpPortalTrade) => void;
   connected: () => void;
   disconnected: () => void;
 }
 
 /**
  * PumpPortal WebSocket client — streams real-time pump.fun bonding curve trades.
- * Single connection, subscribes to new token events to capture all trades.
+ *
+ * Strategy for alpha discovery:
+ * 1. subscribeNewToken → receive creation events for new mints
+ * 2. For each new mint, auto-subscribe to its trades via subscribeTokenTrade
+ * 3. Now we receive all buy/sell activity on new tokens → feed into alpha discovery
+ * 4. Cap tracked tokens and evict after graduation/staleness to control memory
  */
 export class PumpPortalClient {
   private ws: WebSocket | null = null;
@@ -34,7 +40,19 @@ export class PumpPortalClient {
   private intentionalClose = false;
   private listeners = new Map<string, Set<Function>>();
   private tradeCount = 0;
+  private createCount = 0;
   private lastTradeAt = 0;
+
+  // Track subscribed tokens to avoid duplicates and manage memory
+  private subscribedTokens: Map<string, number> = new Map(); // mint → subscribe timestamp
+  private static readonly MAX_SUBSCRIBED_TOKENS = 500;
+  private static readonly TOKEN_EVICT_AGE_MS = 30 * 60 * 1000; // 30 min — most pump.fun tokens resolve by then
+  private evictInterval: ReturnType<typeof setInterval> | null = null;
+
+  // Batch token subscriptions to reduce WS message rate
+  private pendingTokenSubs: string[] = [];
+  private subBatchTimer: ReturnType<typeof setTimeout> | null = null;
+  private static readonly SUB_BATCH_INTERVAL_MS = 2_000; // Batch every 2s
 
   private static readonly WS_URL = 'wss://pumpportal.fun/api/data';
   private static readonly MAX_RECONNECT_DELAY = 60_000;
@@ -53,8 +71,20 @@ export class PumpPortalClient {
     return this.ws?.readyState === WebSocket.OPEN;
   }
 
-  get stats(): { tradeCount: number; lastTradeAt: number; connected: boolean } {
-    return { tradeCount: this.tradeCount, lastTradeAt: this.lastTradeAt, connected: this.connected };
+  get stats(): {
+    tradeCount: number;
+    createCount: number;
+    lastTradeAt: number;
+    connected: boolean;
+    subscribedTokens: number;
+  } {
+    return {
+      tradeCount: this.tradeCount,
+      createCount: this.createCount,
+      lastTradeAt: this.lastTradeAt,
+      connected: this.connected,
+      subscribedTokens: this.subscribedTokens.size,
+    };
   }
 
   async connect(): Promise<void> {
@@ -68,17 +98,21 @@ export class PumpPortalClient {
         this.reconnectAttempt = 0;
         logger.info('PumpPortal WebSocket connected');
 
-        // Subscribe to ALL new token creation events — this captures every trade on new tokens
+        // Subscribe to new token creation events — we'll auto-subscribe to their trades
         this.ws!.send(JSON.stringify({ method: 'subscribeNewToken' }));
+
+        // Start token eviction loop
+        this.evictInterval = setInterval(() => this.evictStaleTokens(), 60_000);
 
         this.emit('connected');
         resolve();
       });
 
-      this.ws.on('message', (data) => this.handleMessage(data));
+      this.ws.on('message', (data: WebSocket.Data) => this.handleMessage(data));
 
-      this.ws.on('close', (code, reason) => {
+      this.ws.on('close', (code: number, reason: Buffer) => {
         logger.warn({ code, reason: reason.toString() }, 'PumpPortal WebSocket closed');
+        this.clearTimers();
         this.emit('disconnected');
         if (!this.intentionalClose) this.scheduleReconnect();
       });
@@ -95,27 +129,50 @@ export class PumpPortalClient {
   /** Subscribe to trades on specific tokens (for tracking tokens we're interested in) */
   subscribeTokenTrades(mints: string[]): void {
     if (!this.connected || mints.length === 0) return;
-    this.ws!.send(JSON.stringify({ method: 'subscribeTokenTrade', keys: mints }));
+    for (const mint of mints) {
+      if (this.subscribedTokens.has(mint)) continue;
+      this.subscribedTokens.set(mint, Date.now());
+      this.pendingTokenSubs.push(mint);
+    }
+    this.flushPendingSubs();
   }
 
   /** Subscribe to trades by specific accounts (for tracking alpha wallets) */
   subscribeAccountTrades(accounts: string[]): void {
     if (!this.connected || accounts.length === 0) return;
     this.ws!.send(JSON.stringify({ method: 'subscribeAccountTrade', keys: accounts }));
+    logger.info({ count: accounts.length }, 'PumpPortal: subscribed to account trades');
   }
 
   disconnect(): void {
     this.intentionalClose = true;
+    this.clearTimers();
     this.ws?.close();
     this.ws = null;
+  }
+
+  private clearTimers(): void {
+    if (this.evictInterval) { clearInterval(this.evictInterval); this.evictInterval = null; }
+    if (this.subBatchTimer) { clearTimeout(this.subBatchTimer); this.subBatchTimer = null; }
   }
 
   private handleMessage(data: WebSocket.Data): void {
     try {
       const msg = JSON.parse(data.toString()) as PumpPortalTrade;
 
-      // Skip creation events and non-trade messages
-      if (!msg.txType || !msg.traderPublicKey || !msg.mint) return;
+      // Skip non-trade messages (subscription confirmations, etc.)
+      if (!msg.txType || !msg.mint) return;
+
+      if (msg.txType === 'create') {
+        this.createCount++;
+        // New token created — auto-subscribe to its trades for alpha discovery
+        this.autoSubscribeToken(msg.mint);
+        this.emit('newToken', msg);
+        return;
+      }
+
+      // Buy or sell trade
+      if (!msg.traderPublicKey) return;
 
       this.tradeCount++;
       this.lastTradeAt = Date.now();
@@ -123,6 +180,72 @@ export class PumpPortalClient {
       this.emit('trade', msg);
     } catch {
       // Ignore parse errors (subscription confirmations, etc.)
+    }
+  }
+
+  /**
+   * Auto-subscribe to trades on a newly created token.
+   * This is the key to alpha discovery: by watching trades on new tokens,
+   * we can identify wallets with consistently profitable entries.
+   */
+  private autoSubscribeToken(mint: string): void {
+    if (this.subscribedTokens.has(mint)) return;
+
+    // Cap subscriptions — evict oldest if needed
+    if (this.subscribedTokens.size >= PumpPortalClient.MAX_SUBSCRIBED_TOKENS) {
+      this.evictOldestToken();
+    }
+
+    this.subscribedTokens.set(mint, Date.now());
+    this.pendingTokenSubs.push(mint);
+    this.flushPendingSubs();
+  }
+
+  /** Batch pending token subscriptions to reduce WS message rate */
+  private flushPendingSubs(): void {
+    if (this.subBatchTimer) return; // Already scheduled
+    this.subBatchTimer = setTimeout(() => {
+      this.subBatchTimer = null;
+      if (this.pendingTokenSubs.length === 0 || !this.connected) return;
+
+      const batch = this.pendingTokenSubs.splice(0);
+      this.ws!.send(JSON.stringify({ method: 'subscribeTokenTrade', keys: batch }));
+
+      if (this.createCount <= 5 || this.createCount % 50 === 0) {
+        logger.info({
+          batchSize: batch.length,
+          totalTokens: this.subscribedTokens.size,
+          totalTrades: this.tradeCount,
+        }, 'PumpPortal: subscribed to token trades batch');
+      }
+    }, PumpPortalClient.SUB_BATCH_INTERVAL_MS);
+  }
+
+  private evictStaleTokens(): void {
+    const now = Date.now();
+    let evicted = 0;
+    for (const [mint, timestamp] of this.subscribedTokens) {
+      if (now - timestamp > PumpPortalClient.TOKEN_EVICT_AGE_MS) {
+        this.subscribedTokens.delete(mint);
+        evicted++;
+      }
+    }
+    if (evicted > 0) {
+      logger.debug({ evicted, remaining: this.subscribedTokens.size }, 'PumpPortal: evicted stale token subscriptions');
+    }
+  }
+
+  private evictOldestToken(): void {
+    let oldestMint: string | null = null;
+    let oldestTime = Infinity;
+    for (const [mint, timestamp] of this.subscribedTokens) {
+      if (timestamp < oldestTime) {
+        oldestTime = timestamp;
+        oldestMint = mint;
+      }
+    }
+    if (oldestMint) {
+      this.subscribedTokens.delete(oldestMint);
     }
   }
 

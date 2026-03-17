@@ -279,6 +279,7 @@ class RossyBotV2 {
       // Auto-subscribe new pump.fun alpha wallets to Helius WS
       this.txParser.addWallet(address);
       this.wsManager.addWallet(address);
+      logger.info({ address: address.slice(0, 8) }, 'PumpPortal alpha discovered — added to Helius WS');
     });
     this.pumpFunAlphaDiscovery.start();
 
@@ -291,6 +292,23 @@ class RossyBotV2 {
     this.pumpPortal.connect().catch((err) =>
       logger.error({ err }, 'PumpPortal connection failed — alpha discovery will not run'),
     );
+
+    // Log PumpPortal + alpha discovery stats periodically
+    setInterval(() => {
+      const ppStats = this.pumpPortal.stats;
+      const adStats = this.pumpFunAlphaDiscovery.getStats();
+      if (ppStats.tradeCount > 0 || ppStats.createCount > 0) {
+        logger.info({
+          connected: ppStats.connected,
+          trades: ppStats.tradeCount,
+          creates: ppStats.createCount,
+          tokens: ppStats.subscribedTokens,
+          tracked: adStats.tracked,
+          promoted: adStats.promoted,
+        }, 'PumpPortal alpha discovery stats');
+      }
+    }, 5 * 60 * 1000); // every 5 min
+
 
     // 9. Start Nansen wallet discovery (scheduled every 4h + immediate first run)
     this.walletDiscovery.start();
@@ -341,6 +359,11 @@ class RossyBotV2 {
           if (signal.type === SignalType.BUY) {
             if (signal.isPumpFun) {
               await this.handlePumpFunBuy(signal);
+              // Also subscribe PumpPortal to this token's trades — alpha discovery
+              // sees who else is trading the same tokens our alphas trade
+              if (this.pumpPortal.connected) {
+                this.pumpPortal.subscribeTokenTrades([signal.tokenMint]);
+              }
             } else if (!isPumpFunOnly) {
               // Gate standard V2 entries behind capital threshold
               // Below threshold, only pump.fun trades execute — faster compounding with small capital

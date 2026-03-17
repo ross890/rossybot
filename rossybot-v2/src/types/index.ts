@@ -365,10 +365,14 @@ export interface PumpFunConfig {
   stopLoss: number;
   /** Hard kill for pump.fun positions */
   hardKill: number;
-  /** Profit target to sell into graduation liquidity spike */
-  graduationProfitTarget: number;
-  /** Percentage to sell at graduation (rest becomes standard V2 position) */
+  /** Curve profit target — sell when curve reaches this fill % (e.g. 0.75 = 75%) */
+  curveProfitTarget: number;
+  /** Curve hard exit — force-exit at this fill % to avoid graduation (e.g. 0.85 = 85%) */
+  curveHardExit: number;
+  /** Percentage to sell on any graduation event (100 = sell everything) */
   graduationSellPct: number;
+  /** Track multi-wallet convergence for position sizing */
+  confluenceBonus: boolean;
   /** Minimum SOL spent by alpha wallet to consider it a conviction buy */
   minConvictionSol: number;
   /** Minimum bonding curve velocity (SOL/min) to enter */

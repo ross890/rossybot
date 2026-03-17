@@ -105,6 +105,9 @@ class RossyBotV2 {
   // Throttle "slots full" Telegram messages — at most once per 2 minutes
   private lastSlotsFullMsgAt = 0;
 
+  // Pump.fun confluence tracking: multiple alpha wallets buying the same token
+  private pumpFunConfluence: Map<string, { wallets: Set<string>; totalSol: number; firstSeen: number }> = new Map();
+
   // PumpPortal — real-time pump.fun trade stream for alpha wallet discovery
   private pumpPortal: PumpPortalClient;
   private pumpFunAlphaDiscovery: PumpFunAlphaDiscovery;
@@ -930,15 +933,27 @@ class RossyBotV2 {
     });
   }
 
-  /** Handle pump.fun bonding curve buy from an alpha wallet */
+  /** Handle pump.fun bonding curve buy from an alpha wallet — CURVE SCALP STRATEGY */
   private async handlePumpFunBuy(signal: ParsedSignal): Promise<void> {
     try {
       const cfg = config.pumpFun;
       const mint = signal.tokenMint;
+      const solSpent = Math.abs(signal.solDelta);
+
+      // Track confluence: accumulate alpha wallets buying the same token
+      const now = Date.now();
+      let confluence = this.pumpFunConfluence.get(mint);
+      if (!confluence || (now - confluence.firstSeen) > 5 * 60_000) {
+        // Fresh confluence window (5 min) or expired
+        confluence = { wallets: new Set(), totalSol: 0, firstSeen: now };
+        this.pumpFunConfluence.set(mint, confluence);
+      }
+      confluence.wallets.add(signal.walletAddress);
+      confluence.totalSol += solSpent;
 
       // Skip if we already have a pump.fun position on this token
       if (this.pumpFunTracker.hasPosition(mint)) {
-        logger.info({ token: mint.slice(0, 8) }, 'Pump.fun skip — already holding');
+        logger.info({ token: mint.slice(0, 8), confluence: confluence.wallets.size }, 'Pump.fun skip — already holding');
         return;
       }
 
@@ -958,10 +973,9 @@ class RossyBotV2 {
       if (this.pumpFunTracker.getOpenCount() >= cfg.maxPositions) {
         logger.info({ open: this.pumpFunTracker.getOpenCount(), max: cfg.maxPositions },
           'Pump.fun skip — max positions reached');
-        // Throttle "slots full" messages to once per 2 minutes to avoid Telegram spam
-        const now = Date.now();
-        if (now - this.lastSlotsFullMsgAt >= 120_000) {
-          this.lastSlotsFullMsgAt = now;
+        const slotNow = Date.now();
+        if (slotNow - this.lastSlotsFullMsgAt >= 120_000) {
+          this.lastSlotsFullMsgAt = slotNow;
           await this.telegram.send(
             `🎰 PUMP.FUN signal blocked: $${signal.tokenMint.slice(0, 8)}\n` +
             `└ ${this.pumpFunTracker.getOpenCount()}/${cfg.maxPositions} pump.fun slots full`,
@@ -993,7 +1007,7 @@ class RossyBotV2 {
             `🎰 PUMP.FUN rejected: ${mint.slice(0, 8)}\n` +
             `├ Wallet: ${walletLabel}\n` +
             `├ Reason: WALLET_QUALITY (WR ${(wr * 100).toFixed(0)}%, ${consLosses} consecutive losses)\n` +
-            `└ SOL spent: ${Math.abs(signal.solDelta).toFixed(2)}`,
+            `└ SOL spent: ${solSpent.toFixed(2)}`,
           );
           return;
         }
@@ -1014,16 +1028,25 @@ class RossyBotV2 {
           `├ Wallet: ${walletLabel}\n` +
           `├ Reason: ${validation.failReason}\n` +
           `├ Curve: ${(validation.curveFillPct * 100).toFixed(0)}% (${validation.solInCurve.toFixed(1)} SOL)\n` +
-          `└ SOL spent: ${Math.abs(signal.solDelta).toFixed(2)}`,
+          `└ SOL spent: ${solSpent.toFixed(2)}`,
         );
         return;
       }
 
       // Calculate position size: standard tier size × pump.fun multiplier
+      // Confluence bonus: if 2+ alpha wallets bought same token, size up
       const tierSize = this.capitalManager.getPositionSize();
-      const pumpSize = tierSize * cfg.positionSizeMultiplier;
+      let pumpSize = tierSize * cfg.positionSizeMultiplier;
+      const confluenceCount = confluence.wallets.size;
+      if (cfg.confluenceBonus && confluenceCount >= 2) {
+        // 2 wallets: 1.25x, 3+: 1.5x (capped)
+        const confluenceMultiplier = Math.min(1 + (confluenceCount - 1) * 0.25, 1.5);
+        pumpSize = pumpSize * confluenceMultiplier;
+        logger.info({ token: mint.slice(0, 8), confluenceCount, totalSol: confluence.totalSol.toFixed(2), multiplier: confluenceMultiplier },
+          'Pump.fun confluence detected — sizing up');
+      }
 
-      // Open pump.fun position (live or shadow depending on SwapExecutor availability)
+      // Open pump.fun position
       const pos = await this.pumpFunTracker.openPosition({
         tokenMint: mint,
         tokenSymbol: signal.tokenMint.slice(0, 6),
@@ -1032,12 +1055,11 @@ class RossyBotV2 {
         curveFillPct: validation.curveFillPct,
         solInCurve: validation.solInCurve,
         alphaBuyTime: new Date(signal.blockTime * 1000),
-        signalWallets: [signal.walletAddress],
+        signalWallets: Array.from(confluence.wallets),
         capitalTier: this.capitalManager.tier,
       });
 
       if (!pos) {
-        // Swap failed — already logged by tracker
         await this.telegram.send(
           `🎰 PUMP.FUN BUY FAILED: ${mint.slice(0, 8)}\n` +
           `├ Wallet: ${walletLabel}\n` +
@@ -1048,18 +1070,18 @@ class RossyBotV2 {
       }
 
       const mode = this.pumpFunTracker.isLive ? 'LIVE' : 'SHADOW';
+      const confluenceTag = confluenceCount >= 2 ? ` (${confluenceCount} wallets, ${confluence.totalSol.toFixed(1)} SOL total)` : '';
 
-      // Telegram alert
+      // Telegram alert — curve scalp strategy
       await this.telegram.send(
-        `🎰 PUMP.FUN ENTRY: ${mint.slice(0, 8)}\n` +
-        `├ Wallet: ${walletLabel}\n` +
-        `├ Size: ${pumpSize.toFixed(4)} SOL (${(cfg.positionSizeMultiplier * 100).toFixed(0)}% of standard)\n` +
-        `├ Curve: ${(validation.curveFillPct * 100).toFixed(0)}% filled (${validation.solInCurve.toFixed(1)} SOL)\n` +
-        `├ Alpha spent: ${Math.abs(signal.solDelta).toFixed(2)} SOL\n` +
-        `├ Detection lag: ${signal.detectionLagMs}ms\n` +
+        `🎰 CURVE SCALP ENTRY: ${mint.slice(0, 8)}\n` +
+        `├ Wallet: ${walletLabel}${confluenceTag}\n` +
+        `├ Size: ${pumpSize.toFixed(4)} SOL\n` +
+        `├ Curve: ${(validation.curveFillPct * 100).toFixed(0)}% → TP at ${(cfg.curveProfitTarget * 100).toFixed(0)}% | exit at ${(cfg.curveHardExit * 100).toFixed(0)}%\n` +
+        `├ Alpha spent: ${solSpent.toFixed(2)} SOL\n` +
         `├ Exits: stall ${cfg.staleTimeKillMins}min | SL ${(cfg.stopLoss * 100).toFixed(0)}% | hard ${cfg.maxTokenAgeMins}min\n` +
         (pos.entry_tx ? `├ TX: ${pos.entry_tx.slice(0, 16)}...\n` : '') +
-        `└ Mode: ${mode}`,
+        `└ Mode: ${mode} | Strategy: PRE-GRAD SCALP`,
       );
 
       logger.info({
@@ -1226,6 +1248,11 @@ class RossyBotV2 {
           liquidityMin: tierCfg.liquidityMin,
           partialExits: tierCfg.partialExitsEnabled,
         },
+        pumpFunCurveProfitTarget: config.pumpFun.curveProfitTarget,
+        pumpFunCurveHardExit: config.pumpFun.curveHardExit,
+        pumpFunStaleTimeMins: config.pumpFun.staleTimeKillMins,
+        pumpFunMinConviction: config.pumpFun.minConvictionSol,
+        pumpFunConfluenceBonus: config.pumpFun.confluenceBonus,
         signalsToday: parseInt(signalRow?.count || '0'),
         tradesAllTime: parseInt(tradeRow?.count || '0'),
         discoveryTokens: discoveryRow?.tokens_screened || 0,

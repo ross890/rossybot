@@ -153,6 +153,7 @@ export interface Position {
   partial_exits: Record<string, unknown>[];
   closed_at: Date | null;
   hold_time_mins: number | null;
+  sell_retry_count: number;
 }
 
 export interface AlphaWalletExit {

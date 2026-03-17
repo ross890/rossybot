@@ -308,29 +308,8 @@ class RossyBotV2 {
                FROM alpha_wallets WHERE address = $1`, [signal.walletAddress],
           );
 
-          // Suppress Telegram noise: skip BUY/SELL notifications for wallets
-          // with 2+ trades and poor stats (won't pass scoring anyway)
-          // Catches: <40% WR, <5% avg PnL, OR coin-flip wallets (≤55% WR AND ≤10% PnL)
-          const trades = Number(walletRow?.our_total_trades || 0);
-          const winRate = Number(walletRow?.our_win_rate || 0);
-          const avgPnl = Number(walletRow?.our_avg_pnl_percent || 0);
-          const isProvenWeak = trades >= 2 && (
-            winRate < 0.40 || avgPnl < 0.05 ||
-            (winRate <= 0.55 && avgPnl <= 0.10)  // coin-flip + low EV = noise
-          );
-
-          if (!isProvenWeak) {
-            const tokenSymbol = await this.resolveSymbol(signal.tokenMint);
-            await this.telegram.sendTradeDetected({
-              action: signal.type === SignalType.BUY ? 'BUY' : 'SELL',
-              walletAddress: signal.walletAddress,
-              walletLabel: walletRow?.label || signal.walletAddress.slice(0, 8),
-              tokenMint: signal.tokenMint,
-              tokenSymbol,
-              amountUsd: Math.abs(signal.solDelta) * 170,
-              detectionLagMs: signal.detectionLagMs,
-            });
-          }
+          // Raw BUY/SELL detection messages removed from Telegram — too noisy.
+          // Data is still recorded via wallet_transactions table and signal processing below.
 
           // Route signals: pumpfun_only wallets skip standard pipeline
           const isPumpFunOnly = walletRow?.pumpfun_only === true;

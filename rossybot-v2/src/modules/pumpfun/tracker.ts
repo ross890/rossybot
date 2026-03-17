@@ -38,6 +38,8 @@ export interface PumpFunPosition {
   entry_tx: string | null;
   fees_paid_sol: number;
   net_pnl_sol: number;
+  // Retry tracking
+  sell_retry_count: number;
 }
 
 export class PumpFunTracker {
@@ -166,6 +168,7 @@ export class PumpFunTracker {
       entry_tx: entryTx,
       fees_paid_sol: feesSol,
       net_pnl_sol: -feesSol, // Start negative due to entry fees
+      sell_retry_count: 0,
     };
 
     this.positions.set(pos.id, pos);
@@ -363,10 +366,34 @@ export class PumpFunTracker {
       const result = await this.swapExecutor.sellToken(pos.token_address, liquidityUsd);
 
       if (!result.success) {
-        logger.error({ error: result.error, token: tokenName, reason }, 'Pump.fun SELL swap failed — position stuck');
-        this.onSwapFailed?.(tokenName, result.error || 'Unknown', 'SELL');
-        // Don't mark as closed if sell failed — will retry on next check
-        return;
+        const errorMsg = result.error || 'Unknown';
+        const isNoBalance = errorMsg.includes('No token balance') || errorMsg.includes('amount is zero');
+
+        if (isNoBalance) {
+          // Tokens are gone (already sold, transferred, or rugged) — force close as total loss
+          logger.warn({ token: tokenName, reason }, 'Pump.fun SELL — no token balance, force closing as loss');
+          pos.net_pnl_sol = -pos.entry_price_sol - pos.fees_paid_sol;
+          pos.pnl_percent = -1;
+          // Fall through to close the position below
+        } else {
+          pos.sell_retry_count = (pos.sell_retry_count || 0) + 1;
+          const MAX_SELL_RETRIES = 3;
+
+          if (pos.sell_retry_count >= MAX_SELL_RETRIES) {
+            logger.error({ token: tokenName, retries: pos.sell_retry_count, reason }, 'Pump.fun SELL failed after max retries — force closing');
+            this.onSwapFailed?.(tokenName, `${errorMsg} (gave up after ${MAX_SELL_RETRIES} retries)`, 'SELL');
+            pos.net_pnl_sol = -pos.entry_price_sol - pos.fees_paid_sol;
+            pos.pnl_percent = -1;
+            // Fall through to close
+          } else {
+            logger.error({ error: errorMsg, token: tokenName, retry: pos.sell_retry_count, reason }, 'Pump.fun SELL swap failed — will retry');
+            // Only notify on first failure, not every retry
+            if (pos.sell_retry_count === 1) {
+              this.onSwapFailed?.(tokenName, errorMsg, 'SELL');
+            }
+            return;
+          }
+        }
       }
 
       // Calculate actual P&L from SOL received
@@ -505,6 +532,7 @@ export class PumpFunTracker {
           entry_tx: (row.entry_tx as string) || null,
           fees_paid_sol: Number(row.fees_paid_sol || 0),
           net_pnl_sol: Number(row.net_pnl_sol || 0),
+          sell_retry_count: 0,
         };
         this.positions.set(pos.id, pos);
       }

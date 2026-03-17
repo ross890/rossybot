@@ -14,7 +14,7 @@ import { LiveTracker } from './modules/positions/live-tracker.js';
 import { CapitalManager } from './modules/trading/capital-manager.js';
 import { SwapExecutor } from './modules/trading/swap-executor.js';
 import { TelegramService } from './modules/telegram/index.js';
-import { PumpFunTracker, validatePumpFunSignal } from './modules/pumpfun/index.js';
+import { PumpFunTracker, validatePumpFunSignal, PumpPortalClient, PumpFunAlphaDiscovery } from './modules/pumpfun/index.js';
 import { fetchDexPair } from './modules/validation/dexscreener.js';
 import { SignalType, type ParsedSignal, type PositionView } from './types/index.js';
 
@@ -102,6 +102,10 @@ class RossyBotV2 {
   // Pump.fun position tracking (runs alongside standard tracker)
   private pumpFunTracker: PumpFunTracker;
 
+  // PumpPortal — real-time pump.fun trade stream for alpha wallet discovery
+  private pumpPortal: PumpPortalClient;
+  private pumpFunAlphaDiscovery: PumpFunAlphaDiscovery;
+
   private get isLive(): boolean {
     return !config.shadowMode && this.liveTracker !== null;
   }
@@ -127,6 +131,8 @@ class RossyBotV2 {
     this.entryEngine = new EntryEngine();
     this.telegram = new TelegramService();
     this.pumpFunTracker = new PumpFunTracker();
+    this.pumpPortal = new PumpPortalClient();
+    this.pumpFunAlphaDiscovery = new PumpFunAlphaDiscovery();
 
     // Initialize position tracker based on mode
     if (!config.shadowMode && config.wallet.privateKey) {
@@ -267,6 +273,24 @@ class RossyBotV2 {
     // 8b. Start pump.fun tracker
     await this.pumpFunTracker.loadOpenPositions();
     this.pumpFunTracker.start();
+
+    // 8c. Start PumpPortal — real-time pump.fun trade stream for alpha wallet discovery
+    this.pumpFunAlphaDiscovery.setNewAlphaCallback((address) => {
+      // Auto-subscribe new pump.fun alpha wallets to Helius WS
+      this.txParser.addWallet(address);
+      this.wsManager.addWallet(address);
+    });
+    this.pumpFunAlphaDiscovery.start();
+
+    this.pumpPortal.on('trade', (trade) => {
+      this.pumpFunAlphaDiscovery.processTrade(trade).catch((err) =>
+        logger.error({ err }, 'PumpPortal alpha discovery error'),
+      );
+    });
+
+    this.pumpPortal.connect().catch((err) =>
+      logger.error({ err }, 'PumpPortal connection failed — alpha discovery will not run'),
+    );
 
     // 9. Start Nansen wallet discovery (scheduled every 4h + immediate first run)
     this.walletDiscovery.start();
@@ -1165,6 +1189,8 @@ class RossyBotV2 {
     this.liveTracker?.stop();
     this.shadowTracker?.stop();
     this.pumpFunTracker.stop();
+    this.pumpFunAlphaDiscovery.stop();
+    this.pumpPortal.disconnect();
     this.walletDiscovery.stop();
     await this.telegram.shutdown();
     const { pool } = await import('./db/database.js');

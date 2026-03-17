@@ -55,28 +55,31 @@ export async function fetchCurveState(
 }
 
 /**
- * Check if a token has graduated from pump.fun to Raydium.
- * Graduation happens when the bonding curve fills to ~85 SOL and liquidity migrates.
- * After graduation, the token will appear on DexScreener/Jupiter.
+ * Check if a token has graduated from pump.fun's bonding curve to a DEX.
+ * Since March 2025, pump.fun migrates graduated tokens to PumpSwap (their own AMM)
+ * instead of Raydium. We check for both PumpSwap and Raydium pairs on DexScreener.
  */
 export async function checkGraduation(tokenMint: string): Promise<{
   graduated: boolean;
   dexPairAddress?: string;
 }> {
   try {
-    // Check DexScreener — if the token has a Raydium pair, it graduated
     const resp = await axios.get(
       `${config.dexScreener.baseUrl}/tokens/${tokenMint}`,
       { timeout: 5000 },
     );
 
     const pairs = resp.data?.pairs || [];
-    const raydiumPair = pairs.find((p: { dexId: string }) =>
+
+    // Check PumpSwap first (current default), then Raydium (legacy)
+    const dexPair = pairs.find((p: { dexId: string }) =>
+      p.dexId === 'pumpswap' || p.dexId === 'pump_swap' || p.dexId === 'pumpfun',
+    ) || pairs.find((p: { dexId: string }) =>
       p.dexId === 'raydium',
     );
 
-    if (raydiumPair) {
-      return { graduated: true, dexPairAddress: raydiumPair.pairAddress };
+    if (dexPair) {
+      return { graduated: true, dexPairAddress: dexPair.pairAddress };
     }
 
     return { graduated: false };

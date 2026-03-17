@@ -394,21 +394,21 @@ export class PumpFunTracker {
             return;
           }
         }
+      } else {
+        // Calculate actual P&L from SOL received
+        const solReceived = result.outputAmount / 1e9;
+        pos.fees_paid_sol += result.feesSol;
+        pos.net_pnl_sol = solReceived - pos.entry_price_sol - pos.fees_paid_sol;
+        pos.pnl_percent = pos.entry_price_sol > 0 ? (solReceived - pos.entry_price_sol) / pos.entry_price_sol : 0;
+
+        logger.info({
+          token: tokenName,
+          solReceived: solReceived.toFixed(6),
+          pnl: `${(pos.pnl_percent * 100).toFixed(1)}%`,
+          netPnl: `${pos.net_pnl_sol.toFixed(6)} SOL`,
+          tx: result.txSignature?.slice(0, 16),
+        }, 'Pump.fun LIVE SELL executed');
       }
-
-      // Calculate actual P&L from SOL received
-      const solReceived = result.outputAmount / 1e9;
-      pos.fees_paid_sol += result.feesSol;
-      pos.net_pnl_sol = solReceived - pos.entry_price_sol - pos.fees_paid_sol;
-      pos.pnl_percent = pos.entry_price_sol > 0 ? (solReceived - pos.entry_price_sol) / pos.entry_price_sol : 0;
-
-      logger.info({
-        token: tokenName,
-        solReceived: solReceived.toFixed(6),
-        pnl: `${(pos.pnl_percent * 100).toFixed(1)}%`,
-        netPnl: `${pos.net_pnl_sol.toFixed(6)} SOL`,
-        tx: result.txSignature?.slice(0, 16),
-      }, 'Pump.fun LIVE SELL executed');
     }
 
     pos.status = PositionStatus.CLOSED;

@@ -101,6 +101,14 @@ export class TransactionParser {
       const pumpFunCurve = detectPumpFunInteraction(accountKeys);
       const isPumpFun = pumpFunCurve !== null;
 
+      if (isPumpFun) {
+        logger.info({
+          sig: signature.slice(0, 12),
+          wallets: involvedWallets.map((w) => w.slice(0, 8)),
+          curve: pumpFunCurve?.slice(0, 12),
+        }, 'Pump.fun interaction detected in TX');
+      }
+
       // Step 3: Detect token transfers by comparing pre/post balances
       const preBalances = tx.meta.preTokenBalances || [];
       const postBalances = tx.meta.postTokenBalances || [];
@@ -113,6 +121,21 @@ export class TransactionParser {
           ...preBalances.filter((b) => b.owner === wallet).map((b) => b.mint),
           ...postBalances.filter((b) => b.owner === wallet).map((b) => b.mint),
         ]);
+
+        // Debug: if pump.fun TX but no token mints for this wallet, log raw balances
+        if (isPumpFun && allMints.size === 0) {
+          const allOwners = new Set([
+            ...preBalances.map((b) => b.owner),
+            ...postBalances.map((b) => b.owner),
+          ]);
+          logger.warn({
+            sig: signature.slice(0, 12),
+            wallet: wallet.slice(0, 8),
+            tokenBalanceCount: preBalances.length + postBalances.length,
+            owners: Array.from(allOwners).map((o) => o.slice(0, 8)),
+            mints: [...new Set([...preBalances.map((b) => b.mint), ...postBalances.map((b) => b.mint)])].map((m) => m.slice(0, 8)),
+          }, 'Pump.fun TX but no token balance match for wallet — possible Token2022 owner mismatch');
+        }
 
         if (allMints.size === 0) continue; // No token activity for this wallet
 

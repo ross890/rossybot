@@ -102,6 +102,9 @@ class RossyBotV2 {
   // Pump.fun position tracking (runs alongside standard tracker)
   private pumpFunTracker: PumpFunTracker;
 
+  // Throttle "slots full" Telegram messages — at most once per 2 minutes
+  private lastSlotsFullMsgAt = 0;
+
   // PumpPortal — real-time pump.fun trade stream for alpha wallet discovery
   private pumpPortal: PumpPortalClient;
   private pumpFunAlphaDiscovery: PumpFunAlphaDiscovery;
@@ -955,20 +958,49 @@ class RossyBotV2 {
       if (this.pumpFunTracker.getOpenCount() >= cfg.maxPositions) {
         logger.info({ open: this.pumpFunTracker.getOpenCount(), max: cfg.maxPositions },
           'Pump.fun skip — max positions reached');
-        await this.telegram.send(
-          `🎰 PUMP.FUN signal blocked: $${signal.tokenMint.slice(0, 8)}\n` +
-          `└ ${this.pumpFunTracker.getOpenCount()}/${cfg.maxPositions} pump.fun slots full`,
-        );
+        // Throttle "slots full" messages to once per 2 minutes to avoid Telegram spam
+        const now = Date.now();
+        if (now - this.lastSlotsFullMsgAt >= 120_000) {
+          this.lastSlotsFullMsgAt = now;
+          await this.telegram.send(
+            `🎰 PUMP.FUN signal blocked: $${signal.tokenMint.slice(0, 8)}\n` +
+            `└ ${this.pumpFunTracker.getOpenCount()}/${cfg.maxPositions} pump.fun slots full`,
+          );
+        }
         return;
+      }
+
+      // Wallet quality gate: check track record before burning a slot
+      const walletRow = await (await import('./db/database.js')).getOne<{
+        label: string; our_total_trades: number; our_win_rate: number;
+        our_avg_pnl_percent: number; consecutive_losses: number;
+      }>(
+        `SELECT label, our_total_trades, our_win_rate, our_avg_pnl_percent, consecutive_losses
+         FROM alpha_wallets WHERE address = $1`, [signal.walletAddress],
+      );
+      const walletLabel = walletRow?.label || signal.walletAddress.slice(0, 8);
+
+      // Skip wallets with proven bad track records (3+ trades, <25% WR or 3+ consecutive losses)
+      if (walletRow && walletRow.our_total_trades >= 3) {
+        const wr = walletRow.our_win_rate;
+        const consLosses = walletRow.consecutive_losses || 0;
+        if (wr < 0.25 || consLosses >= 3) {
+          logger.info({
+            token: mint.slice(0, 8), wallet: walletLabel,
+            winRate: `${(wr * 100).toFixed(0)}%`, consLosses,
+          }, 'Pump.fun REJECTED — wallet quality too low');
+          await this.telegram.send(
+            `🎰 PUMP.FUN rejected: ${mint.slice(0, 8)}\n` +
+            `├ Wallet: ${walletLabel}\n` +
+            `├ Reason: WALLET_QUALITY (WR ${(wr * 100).toFixed(0)}%, ${consLosses} consecutive losses)\n` +
+            `└ SOL spent: ${Math.abs(signal.solDelta).toFixed(2)}`,
+          );
+          return;
+        }
       }
 
       // Validate through pump.fun-specific gate
       const validation = await validatePumpFunSignal(signal);
-
-      const walletRow = await (await import('./db/database.js')).getOne<{ label: string }>(
-        `SELECT label FROM alpha_wallets WHERE address = $1`, [signal.walletAddress],
-      );
-      const walletLabel = walletRow?.label || signal.walletAddress.slice(0, 8);
 
       if (!validation.passed) {
         logger.info({

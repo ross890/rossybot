@@ -48,6 +48,7 @@ export class PumpFunTracker {
   private positions: Map<string, PumpFunPosition> = new Map();
   private pendingEntries: Set<string> = new Set(); // Dedup lock: token mints being processed
   private checkInterval: ReturnType<typeof setInterval> | null = null;
+  private balanceScanInterval: ReturnType<typeof setInterval> | null = null;
   private onPositionClosed: ((pos: PumpFunPosition) => void) | null = null;
   private onGraduation: ((pos: PumpFunPosition) => void) | null = null;
   private onSwapFailed: ((tokenSymbol: string, error: string, type: 'BUY' | 'SELL') => void) | null = null;
@@ -84,13 +85,21 @@ export class PumpFunTracker {
   start(): void {
     // Check every 5 seconds (faster than standard 10s — pump.fun moves fast)
     this.checkInterval = setInterval(() => this.checkPositions(), 5000);
-    logger.info(`Pump.fun position tracker started (check every 5s, mode: ${this.isLive ? 'LIVE' : 'SHADOW'})`);
+    // Scan wallet balances every 60s to detect manual sells and free up slots
+    if (this.swapExecutor) {
+      this.balanceScanInterval = setInterval(() => this.scanWalletBalances(), 60_000);
+    }
+    logger.info(`Pump.fun position tracker started (check every 5s, balance scan every 60s, mode: ${this.isLive ? 'LIVE' : 'SHADOW'})`);
   }
 
   stop(): void {
     if (this.checkInterval) {
       clearInterval(this.checkInterval);
       this.checkInterval = null;
+    }
+    if (this.balanceScanInterval) {
+      clearInterval(this.balanceScanInterval);
+      this.balanceScanInterval = null;
     }
   }
 
@@ -419,6 +428,43 @@ export class PumpFunTracker {
     }
 
     await this.updatePosition(pos);
+  }
+
+  /** Scan wallet for tokens we think we hold — auto-drop if balance is 0 */
+  private async scanWalletBalances(): Promise<void> {
+    if (!this.swapExecutor) return;
+
+    const openPositions = Array.from(this.positions.values()).filter(
+      (p) => p.status !== PositionStatus.CLOSED,
+    );
+    if (openPositions.length === 0) return;
+
+    for (const pos of openPositions) {
+      try {
+        const balance = await this.swapExecutor.getTokenBalance(pos.token_address);
+        if (balance > 0) continue;
+
+        // Token is gone from wallet — manual sell detected
+        const tokenName = pos.token_symbol || pos.token_address.slice(0, 8);
+        logger.info({
+          id: pos.id.slice(0, 8),
+          token: tokenName,
+          holdMins: Math.round((Date.now() - pos.entry_time.getTime()) / 60_000),
+        }, 'Pump.fun balance scan: token gone from wallet — auto-dropping');
+
+        pos.status = PositionStatus.CLOSED;
+        pos.exit_reason = 'Manual sell detected (balance scan)';
+        pos.closed_at = new Date();
+        pos.hold_time_mins = Math.round((pos.closed_at.getTime() - pos.entry_time.getTime()) / 60_000);
+
+        await this.updatePosition(pos);
+        this.onPositionClosed?.(pos);
+        this.positions.delete(pos.id);
+        this.lastGradCheckAt.delete(pos.id);
+      } catch (err) {
+        logger.error({ err, token: pos.token_symbol }, 'Pump.fun balance scan failed for position');
+      }
+    }
   }
 
   private async closePosition(pos: PumpFunPosition, reason: string): Promise<void> {

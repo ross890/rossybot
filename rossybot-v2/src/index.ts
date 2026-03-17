@@ -132,7 +132,9 @@ class RossyBotV2 {
     if (!config.shadowMode && config.wallet.privateKey) {
       this.swapExecutor = new SwapExecutor();
       this.liveTracker = new LiveTracker(this.swapExecutor);
-      logger.info('LIVE mode — Jupiter swap execution enabled');
+      // Wire pump.fun tracker for live trading too
+      this.pumpFunTracker.setSwapExecutor(this.swapExecutor);
+      logger.info('LIVE mode — Jupiter swap execution enabled (standard + pump.fun)');
     } else {
       this.shadowTracker = new ShadowTracker();
       logger.info('SHADOW mode — simulated positions only');
@@ -337,7 +339,17 @@ class RossyBotV2 {
             if (signal.isPumpFun) {
               await this.handlePumpFunBuy(signal);
             } else if (!isPumpFunOnly) {
-              await this.entryEngine.processBuySignal(signal, tierCfg);
+              // Gate standard V2 entries behind capital threshold
+              // Below threshold, only pump.fun trades execute — faster compounding with small capital
+              if (this.capitalManager.capital < config.minCapitalForStandardTrading) {
+                logger.info({
+                  token: signal.tokenMint.slice(0, 8),
+                  capital: this.capitalManager.capital.toFixed(4),
+                  threshold: config.minCapitalForStandardTrading,
+                }, 'Standard V2 signal skipped — capital below threshold (pump.fun only mode)');
+              } else {
+                await this.entryEngine.processBuySignal(signal, tierCfg);
+              }
             }
           } else if (signal.type === SignalType.SELL) {
             // Check both standard and pump.fun positions for sell signals
@@ -742,15 +754,35 @@ class RossyBotV2 {
     }
 
     // --- Pump.fun tracker callbacks ---
+    // Wire balance refresh so capital manager stays in sync after pump.fun trades
+    this.pumpFunTracker.setBalanceRefreshCallback(async () => {
+      await this.capitalManager.refreshBalance();
+    });
+
+    // Wire swap failure notifications
+    this.pumpFunTracker.setSwapFailedCallback(async (tokenSymbol, error, type) => {
+      await this.telegram.send(
+        `⚠️ PUMP.FUN ${type} SWAP FAILED\n` +
+        `├ Token: ${tokenSymbol}\n` +
+        `└ Error: ${error}`,
+      );
+    });
+
     this.pumpFunTracker.setCloseCallback(async (pos) => {
       this.blockedTokens.add(pos.token_address);
       try {
         const pnl = pos.pnl_percent;
         const emoji = pnl >= 0 ? '🟢' : '🔴';
+        const mode = this.pumpFunTracker.isLive ? 'LIVE' : 'SHADOW';
+        const liveDetails = this.pumpFunTracker.isLive
+          ? `├ Net PnL: ${pos.net_pnl_sol.toFixed(6)} SOL\n` +
+            `├ Fees: ${pos.fees_paid_sol.toFixed(6)} SOL\n`
+          : '';
         await this.telegram.send(
-          `🎰 PUMP.FUN CLOSED ${emoji}\n` +
+          `🎰 PUMP.FUN CLOSED ${emoji} [${mode}]\n` +
           `├ Token: ${pos.token_symbol || pos.token_address.slice(0, 8)}\n` +
           `├ PnL: ${(pnl * 100).toFixed(1)}%\n` +
+          liveDetails +
           `├ Hold: ${pos.hold_time_mins}min\n` +
           `├ Graduated: ${pos.graduated ? `YES (at ${pos.graduated_at?.toISOString().slice(11, 19)} UTC)` : 'NO'}\n` +
           `├ Curve: ${(pos.curve_fill_pct_at_entry * 100).toFixed(0)}% → ${(pos.current_curve_fill_pct * 100).toFixed(0)}%\n` +
@@ -825,7 +857,10 @@ class RossyBotV2 {
     // /drop command — remove from tracking without selling (for manually-sold tokens)
     if (this.liveTracker) {
       this.telegram.setKillCallback(async (tokenIdentifier: string) => {
-        return this.liveTracker!.forceClose(tokenIdentifier);
+        // Try standard positions first, then pump.fun
+        const standardResult = await this.liveTracker!.forceClose(tokenIdentifier);
+        if (standardResult.success) return standardResult;
+        return this.pumpFunTracker.forceClose(tokenIdentifier);
       });
       this.telegram.setDropCallback(async (tokenIdentifier: string) => {
         return this.liveTracker!.forceRemove(tokenIdentifier);
@@ -930,7 +965,7 @@ class RossyBotV2 {
       const tierSize = this.capitalManager.getPositionSize();
       const pumpSize = tierSize * cfg.positionSizeMultiplier;
 
-      // Open pump.fun position (shadow mode — always simulated for now)
+      // Open pump.fun position (live or shadow depending on SwapExecutor availability)
       const pos = await this.pumpFunTracker.openPosition({
         tokenMint: mint,
         tokenSymbol: signal.tokenMint.slice(0, 6),
@@ -943,23 +978,38 @@ class RossyBotV2 {
         capitalTier: this.capitalManager.tier,
       });
 
+      if (!pos) {
+        // Swap failed — already logged by tracker
+        await this.telegram.send(
+          `🎰 PUMP.FUN BUY FAILED: ${mint.slice(0, 8)}\n` +
+          `├ Wallet: ${walletLabel}\n` +
+          `├ Size: ${pumpSize.toFixed(4)} SOL\n` +
+          `└ Swap execution failed — check logs`,
+        );
+        return;
+      }
+
+      const mode = this.pumpFunTracker.isLive ? 'LIVE' : 'SHADOW';
+
       // Telegram alert
       await this.telegram.send(
         `🎰 PUMP.FUN ENTRY: ${mint.slice(0, 8)}\n` +
         `├ Wallet: ${walletLabel}\n` +
-        `├ Size: ${pumpSize.toFixed(3)} SOL (${(cfg.positionSizeMultiplier * 100).toFixed(0)}% of standard)\n` +
+        `├ Size: ${pumpSize.toFixed(4)} SOL (${(cfg.positionSizeMultiplier * 100).toFixed(0)}% of standard)\n` +
         `├ Curve: ${(validation.curveFillPct * 100).toFixed(0)}% filled (${validation.solInCurve.toFixed(1)} SOL)\n` +
         `├ Alpha spent: ${Math.abs(signal.solDelta).toFixed(2)} SOL\n` +
         `├ Detection lag: ${signal.detectionLagMs}ms\n` +
-        `├ Exits: stall ${cfg.staleTimeKillMins}min | SL ${(cfg.stopLoss * 100).toFixed(0)}% | hard 60min\n` +
-        `└ Mode: SHADOW`,
+        `├ Exits: stall ${cfg.staleTimeKillMins}min | SL ${(cfg.stopLoss * 100).toFixed(0)}% | hard ${cfg.maxTokenAgeMins}min\n` +
+        (pos.entry_tx ? `├ TX: ${pos.entry_tx.slice(0, 16)}...\n` : '') +
+        `└ Mode: ${mode}`,
       );
 
       logger.info({
         token: mint.slice(0, 8),
         wallet: walletLabel,
-        size: pumpSize.toFixed(3),
+        size: pumpSize.toFixed(4),
         curveFill: `${(validation.curveFillPct * 100).toFixed(0)}%`,
+        mode,
       }, 'Pump.fun position opened');
     } catch (err) {
       logger.error({ err, token: signal.tokenMint?.slice(0, 8) }, 'Error in pump.fun buy handler');

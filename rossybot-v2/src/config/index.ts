@@ -74,6 +74,9 @@ export const config = {
     baseUrl: 'https://api.rugcheck.xyz/v1',
   },
   dailyLossLimitPct: 0.30, // 30%
+  // Minimum SOL balance before standard V2 (migrated/Raydium) trading unlocks.
+  // Below this, only pump.fun bonding curve trades are executed — faster compounding with small capital.
+  minCapitalForStandardTrading: 5.0, // 5 SOL
   pumpFun: {
     programId: '6EF8rrecthR5Dkzon8Nwu78hRvfCKubJ14M5uBEwF6P',
     positionSizeMultiplier: 0.5,       // 50% of normal tier sizing (was 40% — pump.fun has 62% WR, reward it)

@@ -322,6 +322,11 @@ async function migrate() {
   await pool.query(`CREATE INDEX IF NOT EXISTS idx_pumpfun_positions_status ON pumpfun_positions(status)`);
   await pool.query(`CREATE INDEX IF NOT EXISTS idx_pumpfun_positions_token ON pumpfun_positions(token_address)`);
 
+  // --- Add live trading columns to pumpfun_positions ---
+  await pool.query(`ALTER TABLE pumpfun_positions ADD COLUMN IF NOT EXISTS entry_tx TEXT`);
+  await pool.query(`ALTER TABLE pumpfun_positions ADD COLUMN IF NOT EXISTS fees_paid_sol DECIMAL DEFAULT 0`);
+  await pool.query(`ALTER TABLE pumpfun_positions ADD COLUMN IF NOT EXISTS net_pnl_sol DECIMAL DEFAULT 0`);
+
   console.log('✅ All migrations complete');
   await pool.end();
 }

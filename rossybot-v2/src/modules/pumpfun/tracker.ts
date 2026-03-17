@@ -6,6 +6,7 @@ import { PositionStatus } from '../../types/index.js';
 import { checkGraduation } from './detector.js';
 import { fetchCurveState, estimateCurveFillPct } from './detector.js';
 import { fetchDexPair, getPriceUsd } from '../validation/dexscreener.js';
+import type { SwapExecutor, SwapResult } from '../trading/swap-executor.js';
 
 export interface PumpFunPosition {
   id: string;
@@ -33,6 +34,10 @@ export interface PumpFunPosition {
   exit_reason: string | null;
   closed_at: Date | null;
   hold_time_mins: number | null;
+  // Live trading fields
+  entry_tx: string | null;
+  fees_paid_sol: number;
+  net_pnl_sol: number;
 }
 
 export class PumpFunTracker {
@@ -40,6 +45,20 @@ export class PumpFunTracker {
   private checkInterval: ReturnType<typeof setInterval> | null = null;
   private onPositionClosed: ((pos: PumpFunPosition) => void) | null = null;
   private onGraduation: ((pos: PumpFunPosition) => void) | null = null;
+  private onSwapFailed: ((tokenSymbol: string, error: string, type: 'BUY' | 'SELL') => void) | null = null;
+  private onBalanceRefresh: (() => Promise<void>) | null = null;
+
+  // Live trading: when set, executes real swaps via Jupiter
+  private swapExecutor: SwapExecutor | null = null;
+
+  get isLive(): boolean {
+    return this.swapExecutor !== null;
+  }
+
+  setSwapExecutor(executor: SwapExecutor): void {
+    this.swapExecutor = executor;
+    logger.info('Pump.fun tracker: LIVE trading enabled via SwapExecutor');
+  }
 
   setCloseCallback(cb: (pos: PumpFunPosition) => void): void {
     this.onPositionClosed = cb;
@@ -49,10 +68,18 @@ export class PumpFunTracker {
     this.onGraduation = cb;
   }
 
+  setSwapFailedCallback(cb: (tokenSymbol: string, error: string, type: 'BUY' | 'SELL') => void): void {
+    this.onSwapFailed = cb;
+  }
+
+  setBalanceRefreshCallback(cb: () => Promise<void>): void {
+    this.onBalanceRefresh = cb;
+  }
+
   start(): void {
     // Check every 5 seconds (faster than standard 10s — pump.fun moves fast)
     this.checkInterval = setInterval(() => this.checkPositions(), 5000);
-    logger.info('Pump.fun position tracker started (check every 5s)');
+    logger.info(`Pump.fun position tracker started (check every 5s, mode: ${this.isLive ? 'LIVE' : 'SHADOW'})`);
   }
 
   stop(): void {
@@ -72,7 +99,47 @@ export class PumpFunTracker {
     alphaBuyTime: Date;
     signalWallets: string[];
     capitalTier: string;
-  }): Promise<PumpFunPosition> {
+  }): Promise<PumpFunPosition | null> {
+    let entryTx: string | null = null;
+    let feesSol = 0;
+
+    // LIVE MODE: execute real buy swap
+    if (this.swapExecutor) {
+      const tokenName = params.tokenSymbol || params.tokenMint.slice(0, 8);
+      logger.info({
+        token: tokenName,
+        sizeSol: params.solAmount,
+        curveFill: `${(params.curveFillPct * 100).toFixed(0)}%`,
+      }, 'Pump.fun LIVE BUY — executing swap');
+
+      // Use pump.fun slippage (5%) since bonding curve tokens have higher slippage
+      const result = await this.swapExecutor.buyToken(
+        params.tokenMint,
+        params.solAmount,
+        0, // liquidityUsd=0 forces thinLiquiditySlippageBps in SwapExecutor
+      );
+
+      if (!result.success) {
+        logger.error({ error: result.error, token: tokenName }, `Pump.fun BUY swap failed: ${result.error}`);
+        this.onSwapFailed?.(tokenName, result.error || 'Unknown error', 'BUY');
+        return null;
+      }
+
+      entryTx = result.txSignature;
+      feesSol = result.feesSol;
+
+      logger.info({
+        token: tokenName,
+        tx: result.txSignature?.slice(0, 16),
+        fees: feesSol.toFixed(6),
+      }, 'Pump.fun LIVE BUY executed');
+
+      // Refresh wallet balance after buy
+      if (this.onBalanceRefresh) {
+        try { await this.onBalanceRefresh(); } catch { /* ignore */ }
+      }
+    }
+
     const pos: PumpFunPosition = {
       id: uuid(),
       token_address: params.tokenMint,
@@ -96,6 +163,9 @@ export class PumpFunTracker {
       exit_reason: null,
       closed_at: null,
       hold_time_mins: null,
+      entry_tx: entryTx,
+      fees_paid_sol: feesSol,
+      net_pnl_sol: -feesSol, // Start negative due to entry fees
     };
 
     this.positions.set(pos.id, pos);
@@ -104,20 +174,22 @@ export class PumpFunTracker {
       `INSERT INTO pumpfun_positions (id, token_address, token_symbol, bonding_curve_address,
          entry_price_sol, entry_time, alpha_buy_time, signal_wallets, capital_tier,
          simulated_entry_sol, status, curve_fill_pct_at_entry, current_curve_fill_pct,
-         last_curve_check_sol, graduated)
-       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15)`,
+         last_curve_check_sol, graduated, entry_tx, fees_paid_sol, net_pnl_sol)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18)`,
       [pos.id, pos.token_address, pos.token_symbol, pos.bonding_curve_address,
        pos.entry_price_sol, pos.entry_time, pos.alpha_buy_time, pos.signal_wallets,
        pos.capital_tier, pos.simulated_entry_sol, pos.status,
        pos.curve_fill_pct_at_entry, pos.current_curve_fill_pct,
-       pos.last_curve_check_sol, pos.graduated],
+       pos.last_curve_check_sol, pos.graduated, pos.entry_tx, pos.fees_paid_sol, pos.net_pnl_sol],
     );
 
     logger.info({
       id: pos.id.slice(0, 8),
       token: pos.token_symbol || pos.token_address.slice(0, 8),
       curveFill: `${(pos.curve_fill_pct_at_entry * 100).toFixed(0)}%`,
-      sol: pos.simulated_entry_sol.toFixed(2),
+      sol: pos.simulated_entry_sol.toFixed(4),
+      mode: this.isLive ? 'LIVE' : 'SHADOW',
+      tx: entryTx?.slice(0, 16) || 'n/a',
     }, 'Pump.fun position opened');
 
     return pos;
@@ -236,8 +308,7 @@ export class PumpFunTracker {
     pos.current_price = price;
     if (price > pos.peak_price) pos.peak_price = price;
 
-    // Post-graduation PnL is harder to track in shadow mode without actual token balance
-    // Use price change from graduation as proxy
+    // Post-graduation PnL tracking
     if (pos.peak_price > 0 && pos.graduated_at) {
       const graduationPrice = pos.peak_price; // First price we saw at graduation
       pos.pnl_percent = (price - graduationPrice) / graduationPrice;
@@ -280,6 +351,39 @@ export class PumpFunTracker {
   }
 
   private async closePosition(pos: PumpFunPosition, reason: string): Promise<void> {
+    // LIVE MODE: execute real sell swap
+    if (this.swapExecutor) {
+      const tokenName = pos.token_symbol || pos.token_address.slice(0, 8);
+      logger.info({ token: tokenName, reason }, 'Pump.fun LIVE SELL — executing swap');
+
+      // Use low liquidity estimate to get higher slippage tolerance for pump.fun tokens
+      const pair = await fetchDexPair(pos.token_address);
+      const liquidityUsd = pair?.liquidity?.usd || 0;
+
+      const result = await this.swapExecutor.sellToken(pos.token_address, liquidityUsd);
+
+      if (!result.success) {
+        logger.error({ error: result.error, token: tokenName, reason }, 'Pump.fun SELL swap failed — position stuck');
+        this.onSwapFailed?.(tokenName, result.error || 'Unknown', 'SELL');
+        // Don't mark as closed if sell failed — will retry on next check
+        return;
+      }
+
+      // Calculate actual P&L from SOL received
+      const solReceived = result.outputAmount / 1e9;
+      pos.fees_paid_sol += result.feesSol;
+      pos.net_pnl_sol = solReceived - pos.entry_price_sol - pos.fees_paid_sol;
+      pos.pnl_percent = pos.entry_price_sol > 0 ? (solReceived - pos.entry_price_sol) / pos.entry_price_sol : 0;
+
+      logger.info({
+        token: tokenName,
+        solReceived: solReceived.toFixed(6),
+        pnl: `${(pos.pnl_percent * 100).toFixed(1)}%`,
+        netPnl: `${pos.net_pnl_sol.toFixed(6)} SOL`,
+        tx: result.txSignature?.slice(0, 16),
+      }, 'Pump.fun LIVE SELL executed');
+    }
+
     pos.status = PositionStatus.CLOSED;
     pos.exit_reason = reason;
     pos.closed_at = new Date();
@@ -294,11 +398,33 @@ export class PumpFunTracker {
       pnl: `${(pos.pnl_percent * 100).toFixed(1)}%`,
       holdMins: pos.hold_time_mins,
       graduated: pos.graduated,
+      mode: this.isLive ? 'LIVE' : 'SHADOW',
       reason,
     }, 'Pump.fun position CLOSED');
 
     this.onPositionClosed?.(pos);
     this.positions.delete(pos.id);
+
+    // Refresh wallet balance after sell
+    if (this.swapExecutor && this.onBalanceRefresh) {
+      try { await this.onBalanceRefresh(); } catch { /* ignore */ }
+    }
+  }
+
+  /** Force close a pump.fun position by token (for /kill command) */
+  async forceClose(tokenIdentifier: string): Promise<{ success: boolean; token?: string; error?: string }> {
+    const match = Array.from(this.positions.values()).find((p) =>
+      p.status !== PositionStatus.CLOSED &&
+      (p.token_symbol?.toLowerCase() === tokenIdentifier.toLowerCase() ||
+       p.token_address.toLowerCase().startsWith(tokenIdentifier.toLowerCase())),
+    );
+
+    if (!match) {
+      return { success: false, error: `No open pump.fun position found for "${tokenIdentifier}"` };
+    }
+
+    await this.closePosition(match, 'Force close (/kill)');
+    return { success: true, token: match.token_symbol || match.token_address.slice(0, 8) };
   }
 
   private async updateWalletStats(pos: PumpFunPosition): Promise<void> {
@@ -333,11 +459,13 @@ export class PumpFunTracker {
         `UPDATE pumpfun_positions SET
            status = $1, current_curve_fill_pct = $2, last_curve_check_sol = $3,
            graduated = $4, graduated_at = $5, current_price = $6, peak_price = $7,
-           pnl_percent = $8, exit_reason = $9, closed_at = $10, hold_time_mins = $11
-         WHERE id = $12`,
+           pnl_percent = $8, exit_reason = $9, closed_at = $10, hold_time_mins = $11,
+           fees_paid_sol = $12, net_pnl_sol = $13
+         WHERE id = $14`,
         [pos.status, pos.current_curve_fill_pct, pos.last_curve_check_sol,
          pos.graduated, pos.graduated_at, pos.current_price, pos.peak_price,
-         pos.pnl_percent, pos.exit_reason, pos.closed_at, pos.hold_time_mins, pos.id],
+         pos.pnl_percent, pos.exit_reason, pos.closed_at, pos.hold_time_mins,
+         pos.fees_paid_sol, pos.net_pnl_sol, pos.id],
       );
     } catch (err) {
       logger.error({ err, posId: pos.id.slice(0, 8) }, 'Failed to update pump.fun position');
@@ -374,11 +502,14 @@ export class PumpFunTracker {
           exit_reason: null,
           closed_at: null,
           hold_time_mins: null,
+          entry_tx: (row.entry_tx as string) || null,
+          fees_paid_sol: Number(row.fees_paid_sol || 0),
+          net_pnl_sol: Number(row.net_pnl_sol || 0),
         };
         this.positions.set(pos.id, pos);
       }
 
-      logger.info({ count: this.positions.size }, 'Loaded open pump.fun positions');
+      logger.info({ count: this.positions.size, mode: this.isLive ? 'LIVE' : 'SHADOW' }, 'Loaded open pump.fun positions');
     } catch {
       // Table may not exist yet
       logger.info('No pump.fun positions table found (will be created on first migration)');

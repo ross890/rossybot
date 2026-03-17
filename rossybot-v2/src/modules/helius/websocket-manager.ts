@@ -40,6 +40,7 @@ export class HeliusWebSocketManager extends EventEmitter {
   private recentSignatures: Set<string> = new Set();
   // Track in-flight tx fetches to avoid overwhelming RPC
   private activeFetches = 0;
+  private filteredTxCount = 0; // TXs skipped by log pre-filter (no token activity)
   private static readonly MAX_CONCURRENT_FETCHES = 5;
 
   get connected(): boolean {
@@ -185,6 +186,23 @@ export class HeliusWebSocketManager extends EventEmitter {
         // Dedup: skip if we've already seen this signature
         if (this.recentSignatures.has(signature)) return;
         this.recentSignatures.add(signature);
+
+        // Pre-filter: check log messages for token-related activity before expensive RPC fetch.
+        // logsNotification includes program log messages — if none mention token programs or
+        // pump.fun, the TX is almost certainly a SOL-only interaction (staking, DeFi, etc.)
+        const logs: string[] = logResult?.value?.logs || [];
+        const hasTokenActivity = logs.some((log: string) =>
+          log.includes('TokenkegQ') ||      // SPL Token program
+          log.includes('Token2') ||          // Token2022 program
+          log.includes('6EF8rrecthR5') ||    // Pump.fun program
+          log.includes('Transfer') ||        // Token transfer instruction
+          log.includes('MintTo') ||          // Mint instruction
+          log.includes('Burn'),              // Burn instruction
+        );
+        if (!hasTokenActivity) {
+          this.filteredTxCount++;
+          return; // Skip RPC fetch entirely — no token-related activity
+        }
 
         // Keep dedup set small
         if (this.recentSignatures.size > 500) {
@@ -428,6 +446,7 @@ export class HeliusWebSocketManager extends EventEmitter {
     lastTxAgoMs: number;
     totalMessages: number;
     txNotifications: number;
+    filteredTxCount: number;
   } {
     return {
       connected: this.connected,
@@ -438,6 +457,7 @@ export class HeliusWebSocketManager extends EventEmitter {
       lastTxAgoMs: this.lastTxAt > 0 ? Date.now() - this.lastTxAt : -1,
       totalMessages: this.messageCount,
       txNotifications: this.txNotificationCount,
+      filteredTxCount: this.filteredTxCount,
     };
   }
 }

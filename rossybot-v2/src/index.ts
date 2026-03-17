@@ -137,6 +137,12 @@ class RossyBotV2 {
       this.shadowTracker = new ShadowTracker();
       logger.info('SHADOW mode — simulated positions only');
     }
+
+    // Wire up pump.fun live trading if enabled
+    if (config.pumpFun.liveMode && this.swapExecutor) {
+      this.pumpFunTracker.setSwapExecutor(this.swapExecutor);
+      logger.info({ fixedSize: config.pumpFun.fixedPositionSizeSol }, 'Pump.fun LIVE mode enabled');
+    }
   }
 
   // --- Unified position accessors ---
@@ -926,11 +932,10 @@ class RossyBotV2 {
         return;
       }
 
-      // Calculate position size: standard tier size × pump.fun multiplier
-      const tierSize = this.capitalManager.getPositionSize();
-      const pumpSize = tierSize * cfg.positionSizeMultiplier;
+      // Fixed position size for pump.fun
+      const pumpSize = cfg.fixedPositionSizeSol;
 
-      // Open pump.fun position (shadow mode — always simulated for now)
+      // Open pump.fun position
       const pos = await this.pumpFunTracker.openPosition({
         tokenMint: mint,
         tokenSymbol: signal.tokenMint.slice(0, 6),
@@ -943,23 +948,36 @@ class RossyBotV2 {
         capitalTier: this.capitalManager.tier,
       });
 
+      if (!pos) {
+        await this.telegram.send(
+          `🎰 PUMP.FUN BUY FAILED: ${mint.slice(0, 8)}\n` +
+          `├ Wallet: ${walletLabel}\n` +
+          `└ Swap execution failed — check logs`,
+        );
+        return;
+      }
+
       // Telegram alert
+      const entryTxLine = pos.entry_tx ? `├ Tx: ${pos.entry_tx.slice(0, 12)}...\n` : '';
       await this.telegram.send(
         `🎰 PUMP.FUN ENTRY: ${mint.slice(0, 8)}\n` +
         `├ Wallet: ${walletLabel}\n` +
-        `├ Size: ${pumpSize.toFixed(3)} SOL (${(cfg.positionSizeMultiplier * 100).toFixed(0)}% of standard)\n` +
+        `├ Size: ${pos.entry_price_sol.toFixed(3)} SOL\n` +
+        entryTxLine +
         `├ Curve: ${(validation.curveFillPct * 100).toFixed(0)}% filled (${validation.solInCurve.toFixed(1)} SOL)\n` +
         `├ Alpha spent: ${Math.abs(signal.solDelta).toFixed(2)} SOL\n` +
         `├ Detection lag: ${signal.detectionLagMs}ms\n` +
         `├ Exits: stall ${cfg.staleTimeKillMins}min | SL ${(cfg.stopLoss * 100).toFixed(0)}% | hard 60min\n` +
-        `└ Mode: SHADOW`,
+        `└ Mode: ${cfg.liveMode ? 'LIVE' : 'SHADOW'}`,
       );
 
       logger.info({
         token: mint.slice(0, 8),
         wallet: walletLabel,
-        size: pumpSize.toFixed(3),
+        size: pos.entry_price_sol.toFixed(3),
         curveFill: `${(validation.curveFillPct * 100).toFixed(0)}%`,
+        live: cfg.liveMode,
+        tx: pos.entry_tx?.slice(0, 12),
       }, 'Pump.fun position opened');
     } catch (err) {
       logger.error({ err, token: signal.tokenMint?.slice(0, 8) }, 'Error in pump.fun buy handler');

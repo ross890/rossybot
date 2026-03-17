@@ -309,6 +309,15 @@ async function migrate() {
     )
   `);
 
+  // Pump.fun live trading columns
+  try {
+    await pool.query(`
+      ALTER TABLE pumpfun_positions ADD COLUMN IF NOT EXISTS entry_tx TEXT;
+      ALTER TABLE pumpfun_positions ADD COLUMN IF NOT EXISTS exit_tx TEXT;
+      ALTER TABLE pumpfun_positions ADD COLUMN IF NOT EXISTS fees_paid_sol DECIMAL DEFAULT 0;
+    `);
+  } catch { /* columns may already exist */ }
+
   // --- Indexes ---
   await pool.query(`CREATE INDEX IF NOT EXISTS idx_wallet_tx_wallet ON wallet_transactions(wallet_address)`);
   await pool.query(`CREATE INDEX IF NOT EXISTS idx_wallet_tx_token ON wallet_transactions(token_mint)`);

@@ -76,10 +76,11 @@ export const config = {
   dailyLossLimitPct: 0.30, // 30%
   pumpFun: {
     programId: '6EF8rrecthR5Dkzon8Nwu78hRvfCKubJ14M5uBEwF6P',
-    positionSizeMultiplier: 0.4,       // 40% of normal tier sizing
+    positionSizeMultiplier: 0.4,       // 40% of normal tier sizing (fallback)
+    fixedPositionSizeSol: 0.5,         // Fixed 0.5 SOL per pump.fun trade
     staleTimeKillMins: 20,             // Exit if no movement in 20 min
-    stopLoss: -0.25,                   // 25% stop loss
-    hardKill: -0.35,                   // 35% hard kill
+    stopLoss: -0.15,                   // 15% stop loss (tightened from 25%)
+    hardKill: -0.25,                   // 25% hard kill (tightened from 35%)
     graduationProfitTarget: 0.50,      // 50% TP on graduation
     graduationSellPct: 60,             // Sell 60% at graduation, hold 40%
     minConvictionSol: 0.5,             // Alpha must spend ≥0.5 SOL
@@ -87,6 +88,7 @@ export const config = {
     maxTokenAgeMins: 60,               // Only tokens <1hr old
     maxPositions: 3,                   // Max 3 pump.fun positions
     slippageBps: 500,                  // 5% slippage for bonding curve
+    liveMode: true,                    // Execute real trades
   },
 } as const;
 

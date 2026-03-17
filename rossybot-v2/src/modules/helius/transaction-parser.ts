@@ -106,6 +106,12 @@ export class TransactionParser {
           sig: signature.slice(0, 12),
           wallets: involvedWallets.map((w) => w.slice(0, 8)),
           curve: pumpFunCurve?.slice(0, 12),
+          preTokenBalances: (tx.meta.preTokenBalances || []).length,
+          postTokenBalances: (tx.meta.postTokenBalances || []).length,
+          tokenOwners: [...new Set([
+            ...(tx.meta.preTokenBalances || []).map((b: TokenBalanceEntry) => `${b.owner?.slice(0, 8)}(idx${b.accountIndex})`),
+            ...(tx.meta.postTokenBalances || []).map((b: TokenBalanceEntry) => `${b.owner?.slice(0, 8)}(idx${b.accountIndex})`),
+          ])],
         }, 'Pump.fun interaction detected in TX');
       }
 
@@ -115,26 +121,96 @@ export class TransactionParser {
       const preMap = this.buildBalanceMap(preBalances);
       const postMap = this.buildBalanceMap(postBalances);
 
+      // Build a set of accountKey indices that belong to each subscribed wallet.
+      // For Token2022, the `owner` field in token balances may not match the wallet pubkey,
+      // so we also resolve ownership via accountIndex → accountKeys mapping.
+      const walletAccountIndices = new Map<string, Set<number>>();
+      for (const wallet of involvedWallets) {
+        const indices = new Set<number>();
+        accountKeys.forEach((k, idx) => {
+          if (k.pubkey === wallet) indices.add(idx);
+        });
+        walletAccountIndices.set(wallet, indices);
+      }
+
       // Check token balance deltas for EACH involved wallet
       for (const wallet of involvedWallets) {
+        const walletIndices = walletAccountIndices.get(wallet)!;
+
+        // Match by owner (standard SPL tokens) OR by accountIndex (Token2022)
+        const matchesWallet = (b: TokenBalanceEntry) =>
+          b.owner === wallet || walletIndices.has(b.accountIndex);
+
         const allMints = new Set([
-          ...preBalances.filter((b) => b.owner === wallet).map((b) => b.mint),
-          ...postBalances.filter((b) => b.owner === wallet).map((b) => b.mint),
+          ...preBalances.filter(matchesWallet).map((b) => b.mint),
+          ...postBalances.filter(matchesWallet).map((b) => b.mint),
         ]);
 
-        // Debug: if pump.fun TX but no token mints for this wallet, log raw balances
-        if (isPumpFun && allMints.size === 0) {
-          const allOwners = new Set([
-            ...preBalances.map((b) => b.owner),
-            ...postBalances.map((b) => b.owner),
+        // Pump.fun Token2022 fallback: if no token balance matches the wallet by owner,
+        // but this IS a pump.fun TX with token balance changes, infer the trade from SOL delta.
+        // The signer wallet spent/received SOL, and the token mint is in the balance entries.
+        if (allMints.size === 0 && isPumpFun) {
+          const allTxMints = new Set([
+            ...preBalances.map((b) => b.mint),
+            ...postBalances.map((b) => b.mint),
           ]);
-          logger.warn({
-            sig: signature.slice(0, 12),
-            wallet: wallet.slice(0, 8),
-            tokenBalanceCount: preBalances.length + postBalances.length,
-            owners: Array.from(allOwners).map((o) => o.slice(0, 8)),
-            mints: [...new Set([...preBalances.map((b) => b.mint), ...postBalances.map((b) => b.mint)])].map((m) => m.slice(0, 8)),
-          }, 'Pump.fun TX but no token balance match for wallet — possible Token2022 owner mismatch');
+          // Remove SOL mint and find the actual token being traded
+          allTxMints.delete(SOL_MINT);
+
+          if (allTxMints.size > 0) {
+            const walletIdx = accountKeys.findIndex((k) => k.pubkey === wallet);
+            const preSol = walletIdx >= 0 ? (tx.meta.preBalances[walletIdx] || 0) / 1e9 : 0;
+            const postSol = walletIdx >= 0 ? (tx.meta.postBalances[walletIdx] || 0) / 1e9 : 0;
+            const solDelta = postSol - preSol;
+
+            // Only generate signal if there's a meaningful SOL change (not just fees)
+            if (Math.abs(solDelta) > 0.005) {
+              const type = solDelta < 0 ? SignalType.BUY : SignalType.SELL;
+              const mint = allTxMints.values().next().value!;
+
+              // Estimate token amount from the balance entries
+              let tokenAmount = 0;
+              for (const b of postBalances) {
+                if (b.mint === mint) {
+                  tokenAmount = parseFloat(b.uiTokenAmount.uiAmountString || '0');
+                  break;
+                }
+              }
+
+              logger.info({
+                sig: signature.slice(0, 12),
+                wallet: wallet.slice(0, 8),
+                type,
+                mint: mint.slice(0, 8),
+                solDelta: solDelta.toFixed(4),
+                tokenAmount: tokenAmount.toFixed(2),
+              }, 'Pump.fun Token2022 signal recovered via SOL delta fallback');
+
+              const signal: ParsedSignal = {
+                walletAddress: wallet,
+                txSignature: signature,
+                blockTime,
+                type,
+                tokenMint: mint,
+                tokenAmount,
+                solDelta,
+                detectedAt: now,
+                detectionLagMs,
+                detectionSource: DetectionSource.PUMPFUN_CURVE,
+                isPumpFun: true,
+                ...(pumpFunCurve ? {
+                  pumpFunData: {
+                    bondingCurveAddress: pumpFunCurve,
+                    solSpent: Math.abs(solDelta),
+                  },
+                } : {}),
+              };
+
+              signals.push(signal);
+              await this.logTransaction(signal);
+              continue; // Skip the standard balance-matching path for this wallet
+            }
+          }
         }
 
         if (allMints.size === 0) continue; // No token activity for this wallet
@@ -148,9 +224,26 @@ export class TransactionParser {
         for (const mint of allMints) {
           if (mint === SOL_MINT) continue; // Skip wrapped SOL
 
-          const key = `${wallet}:${mint}`;
-          const preAmount = preMap.get(key) || 0;
-          const postAmount = postMap.get(key) || 0;
+          // Look up balance by owner:mint first, then fall back to accountIndex matching
+          let preAmount = preMap.get(`${wallet}:${mint}`) || 0;
+          let postAmount = postMap.get(`${wallet}:${mint}`) || 0;
+
+          // Token2022 fallback: match by accountIndex when owner doesn't match wallet
+          if (preAmount === 0 && postAmount === 0) {
+            for (const b of preBalances) {
+              if (b.mint === mint && walletIndices.has(b.accountIndex)) {
+                preAmount = parseFloat(b.uiTokenAmount.uiAmountString || '0');
+                break;
+              }
+            }
+            for (const b of postBalances) {
+              if (b.mint === mint && walletIndices.has(b.accountIndex)) {
+                postAmount = parseFloat(b.uiTokenAmount.uiAmountString || '0');
+                break;
+              }
+            }
+          }
+
           const delta = postAmount - preAmount;
 
           if (Math.abs(delta) < 0.000001) continue; // Ignore dust

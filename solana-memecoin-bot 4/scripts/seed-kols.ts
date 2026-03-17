@@ -552,6 +552,27 @@ const RESEARCHED_KOLS: KolData[] = [
   },
 
   // =============================================
+  // HARDCODED ALPHA WALLETS - HIGH CONVICTION
+  // Manually identified top performers for copy trading
+  // =============================================
+  {
+    handle: 'alpha_AgmLJ',
+    displayName: 'Alpha Wallet AgmLJ',
+    followerCount: null,
+    tier: KolTier.TIER_1,
+    notes: 'Hardcoded big alpha wallet - high conviction copy trade target. See docs/WALLET_ANALYSIS_AgmLJ.md for detailed analysis.',
+    mainWallets: [
+      {
+        address: 'AgmLJBMDCqWynYnQiPCuj9ewsNNsBJXyzoUhD9LJzN51',
+        confidence: AttributionConfidence.HIGH,
+        linkMethod: LinkMethod.DIRECT_KNOWN,
+        notes: 'Primary alpha wallet - hardcoded for copy trading signals',
+      },
+    ],
+    sideWallets: [],
+  },
+
+  // =============================================
   // PUMP.FUN ELITE - PLACEHOLDER
   // Top 293 wallets (~0.002% of all Pump.fun traders)
   // =============================================

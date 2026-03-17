@@ -337,6 +337,11 @@ export class TelegramService {
       liquidityMin: number;
       partialExits: boolean;
     };
+    pumpFunCurveProfitTarget: number;
+    pumpFunCurveHardExit: number;
+    pumpFunStaleTimeMins: number;
+    pumpFunMinConviction: number;
+    pumpFunConfluenceBonus: boolean;
     signalsToday: number;
     tradesAllTime: number;
     discoveryTokens: number;
@@ -396,6 +401,14 @@ export class TelegramService {
       `│ Hard time: ${data.tierConfig.hardTime}h`,
       `│ Partial exits: ${data.tierConfig.partialExits ? 'YES' : 'NO (fee-destructive at this tier)'}`,
       `│ Alpha exit: sell on wallet sell >30%`,
+      `│`,
+      `├─ PUMP.FUN STRATEGY: CURVE SCALP`,
+      `│ Curve TP: ${(data.pumpFunCurveProfitTarget * 100).toFixed(0)}% fill`,
+      `│ Curve hard exit: ${(data.pumpFunCurveHardExit * 100).toFixed(0)}% fill (pre-graduation)`,
+      `│ Stall timer: ${data.pumpFunStaleTimeMins}min`,
+      `│ Min conviction: ${data.pumpFunMinConviction} SOL`,
+      `│ Confluence bonus: ${data.pumpFunConfluenceBonus ? 'YES' : 'NO'}`,
+      `│ Post-grad: IMMEDIATE EXIT`,
       `│`,
       `├─ STATS`,
       `│ Signals today: ${data.signalsToday}`,

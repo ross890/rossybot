@@ -303,47 +303,12 @@ export class PumpFunTracker {
   private lastGradCheckAt: Map<string, number> = new Map();
   private static readonly GRAD_CHECK_INTERVAL_MS = 30_000; // Check graduation every 30s, not 5s
 
-  /** Check a pre-graduation position on the bonding curve */
+  /** Check a pre-graduation position on the bonding curve — CURVE SCALP STRATEGY */
   private async checkCurvePosition(pos: PumpFunPosition): Promise<void> {
     const holdMins = (Date.now() - pos.entry_time.getTime()) / 60_000;
     const cfg = config.pumpFun;
 
-    // 1. Check if token has graduated — throttled to every 30s (DexScreener rate limit)
-    const now = Date.now();
-    const lastGradCheck = this.lastGradCheckAt.get(pos.id) || 0;
-    const shouldCheckGrad = (now - lastGradCheck) >= PumpFunTracker.GRAD_CHECK_INTERVAL_MS;
-
-    let graduation = { graduated: false } as { graduated: boolean; dexPairAddress?: string };
-    if (shouldCheckGrad) {
-      this.lastGradCheckAt.set(pos.id, now);
-      graduation = await checkGraduation(pos.token_address);
-    }
-    if (graduation.graduated) {
-      pos.graduated = true;
-      pos.graduated_at = new Date();
-      await this.updatePosition(pos);
-
-      logger.info({
-        token: pos.token_symbol || pos.token_address.slice(0, 8),
-        holdMins: holdMins.toFixed(1),
-        curveFill: `${(pos.current_curve_fill_pct * 100).toFixed(0)}%`,
-      }, 'GRADUATION DETECTED — token migrated to Raydium');
-
-      this.onGraduation?.(pos);
-
-      // Fetch DexScreener price now that it's on Raydium
-      const pair = await fetchDexPair(pos.token_address);
-      if (pair) {
-        pos.current_price = getPriceUsd(pair);
-        pos.graduation_price = pos.current_price; // Lock in graduation price as PnL baseline
-        pos.peak_price = pos.current_price;
-      }
-
-      await this.updatePosition(pos);
-      return;
-    }
-
-    // 2. Update curve progress
+    // 1. Update curve progress
     if (pos.bonding_curve_address && pos.bonding_curve_address !== 'unknown') {
       const curveState = await fetchCurveState(pos.bonding_curve_address);
       if (curveState?.exists) {
@@ -356,29 +321,69 @@ export class PumpFunTracker {
           pos.pnl_percent = (pos.current_curve_fill_pct / pos.curve_fill_pct_at_entry) - 1;
         }
 
+        // --- CURVE SCALP EXITS (highest priority — take profit before graduation) ---
+
+        // 2a. Curve hard exit — NEVER hold through graduation (force-exit at 85%)
+        if (pos.current_curve_fill_pct >= cfg.curveHardExit) {
+          await this.closePosition(pos, `Curve hard exit (${(pos.current_curve_fill_pct * 100).toFixed(0)}% filled — pre-graduation exit)`);
+          return;
+        }
+
+        // 2b. Curve profit target — sell at 75% curve fill
+        if (pos.current_curve_fill_pct >= cfg.curveProfitTarget) {
+          await this.closePosition(pos, `Curve TP (${(pos.current_curve_fill_pct * 100).toFixed(0)}% filled — target hit)`);
+          return;
+        }
+
+        // --- DEFENSIVE EXITS ---
+
         // 3. Curve stall exit — compare SOL growth since ENTRY (not last 5s check)
         const solDeltaSinceEntry = curveState.solBalance - pos.sol_in_curve_at_entry;
-        const solDeltaSinceLastCheck = curveState.solBalance - prevSol;
         if (holdMins >= cfg.staleTimeKillMins && solDeltaSinceEntry <= 0.5) {
           await this.closePosition(pos, `Curve stall (${holdMins.toFixed(0)}min, no momentum)`);
           return;
         }
 
-        // 3b. Early stall — if curve is going backwards (net sells vs entry) after 5 min
-        if (holdMins >= 5 && solDeltaSinceEntry < -0.05) {
+        // 3b. Early stall — if curve is going backwards (net sells vs entry) after 3 min
+        if (holdMins >= 3 && solDeltaSinceEntry < -0.05) {
           await this.closePosition(pos, `Curve reversal (${holdMins.toFixed(0)}min, SOL leaving curve)`);
           return;
         }
       }
     }
 
-    // 4. Hard time kill — aligned with maxTokenAgeMins config
+    // 4. Check graduation as fallback — if we somehow miss the curve fill, sell immediately
+    const now = Date.now();
+    const lastGradCheck = this.lastGradCheckAt.get(pos.id) || 0;
+    const shouldCheckGrad = (now - lastGradCheck) >= PumpFunTracker.GRAD_CHECK_INTERVAL_MS;
+
+    if (shouldCheckGrad) {
+      this.lastGradCheckAt.set(pos.id, now);
+      const graduation = await checkGraduation(pos.token_address);
+      if (graduation.graduated) {
+        pos.graduated = true;
+        pos.graduated_at = new Date();
+
+        logger.warn({
+          token: pos.token_symbol || pos.token_address.slice(0, 8),
+          holdMins: holdMins.toFixed(1),
+          curveFill: `${(pos.current_curve_fill_pct * 100).toFixed(0)}%`,
+        }, 'GRADUATION DETECTED — should have exited pre-grad, selling immediately');
+
+        this.onGraduation?.(pos);
+        // Sell immediately — don't wait for post-grad monitoring
+        await this.closePosition(pos, `Emergency graduation exit (missed curve TP at ${(pos.current_curve_fill_pct * 100).toFixed(0)}%)`);
+        return;
+      }
+    }
+
+    // 5. Hard time kill — tighter at 15 min (curve scalps resolve fast)
     if (holdMins >= cfg.maxTokenAgeMins) {
       await this.closePosition(pos, `Pump.fun hard time kill (${holdMins.toFixed(0)}min)`);
       return;
     }
 
-    // 5. Stop loss based on curve regression
+    // 6. Stop loss based on curve regression
     if (pos.pnl_percent <= cfg.stopLoss) {
       await this.closePosition(pos, `Pump.fun stop loss (${(pos.pnl_percent * 100).toFixed(1)}%)`);
       return;
@@ -387,78 +392,23 @@ export class PumpFunTracker {
     await this.updatePosition(pos);
   }
 
-  /** Check a post-graduation position (now on Raydium, use DexScreener pricing) */
+  /** Post-graduation fallback — we should have exited pre-grad, sell immediately */
   private async checkGraduatedPosition(pos: PumpFunPosition): Promise<void> {
-    const pair = await fetchDexPair(pos.token_address);
-    if (!pair) return;
-
-    const price = getPriceUsd(pair);
-    if (price <= 0) return;
-
-    pos.current_price = price;
-    if (price > pos.peak_price) pos.peak_price = price;
-
-    // Post-graduation PnL tracking — use locked graduation_price, NOT peak_price
-    if (pos.graduation_price > 0 && pos.graduated_at) {
-      pos.pnl_percent = (price - pos.graduation_price) / pos.graduation_price;
-    }
-
-    const holdMins = (Date.now() - pos.entry_time.getTime()) / 60_000;
+    // Curve scalp strategy: we should NEVER be here. If we are, sell ASAP.
+    // Short cooldown to let Jupiter routing stabilize after migration.
+    const GRADUATION_COOLDOWN_SECS = 20;
     const holdSinceGrad = pos.graduated_at
-      ? (Date.now() - pos.graduated_at.getTime()) / 60_000
+      ? (Date.now() - pos.graduated_at.getTime()) / 1000
       : 0;
 
-    // Post-graduation cooldown: Jupiter can't route immediately after Raydium migration.
-    // Wait 90s before attempting any sells to avoid Custom:6001 errors.
-    // BUT: if price crashes past hard kill during cooldown, close immediately when cooldown expires.
-    const GRADUATION_COOLDOWN_SECS = 30; // Reduced from 90s — Jupiter routes within ~15-20s post-migration
-    const inCooldown = pos.graduated_at && (Date.now() - pos.graduated_at.getTime()) < GRADUATION_COOLDOWN_SECS * 1000;
-    if (inCooldown) {
-      // Still track PnL — if hard kill breached, mark for immediate sell on cooldown exit
-      if (pos.pnl_percent <= config.pumpFun.hardKill) {
-        pos.exit_reason = `Post-grad hard kill (${(pos.pnl_percent * 100).toFixed(1)}%) — queued during cooldown`;
-        logger.warn({ token: pos.token_address.slice(0, 8), pnl: (pos.pnl_percent * 100).toFixed(1) },
-          'Graduation cooldown: hard kill breached, will sell at cooldown end');
-      }
-      await this.updatePosition(pos);
+    if (holdSinceGrad < GRADUATION_COOLDOWN_SECS) {
+      logger.info({ token: pos.token_address.slice(0, 8), waitSecs: Math.round(GRADUATION_COOLDOWN_SECS - holdSinceGrad) },
+        'Post-grad cooldown — waiting to sell');
       return;
     }
 
-    // If a sell was queued during cooldown, execute it now
-    if (pos.exit_reason && pos.exit_reason.includes('queued during cooldown')) {
-      await this.closePosition(pos, pos.exit_reason.replace(' — queued during cooldown', ''));
-      return;
-    }
-
-    // Post-graduation: apply standard-ish exit rules but more aggressive
-    // Profit target at graduation
-    if (pos.pnl_percent >= config.pumpFun.graduationProfitTarget) {
-      await this.closePosition(pos, `Graduation TP (${(pos.pnl_percent * 100).toFixed(1)}%)`);
-      return;
-    }
-
-    // Trailing stop: 20% drawdown from peak post-graduation
-    if (pos.peak_price > 0) {
-      const drawdown = (pos.peak_price - price) / pos.peak_price;
-      if (drawdown >= 0.20 && holdSinceGrad >= 2) {
-        await this.closePosition(pos, `Post-grad trailing stop (${(drawdown * 100).toFixed(1)}% from peak)`);
-        return;
-      }
-    }
-
-    // Hard stop
-    if (pos.pnl_percent <= config.pumpFun.hardKill) {
-      await this.closePosition(pos, `Post-grad hard kill (${(pos.pnl_percent * 100).toFixed(1)}%)`);
-      return;
-    }
-
-    // Time kill: 2 hours post-graduation with no significant gain
-    if (holdSinceGrad >= 120 && pos.pnl_percent < 0.10) {
-      await this.closePosition(pos, 'Post-grad time kill (2h <10%)');
-      return;
-    }
-
-    await this.updatePosition(pos);
+    // Sell everything — graduation was never the plan
+    await this.closePosition(pos, `Post-grad emergency exit (graduated while held — selling 100%)`);
   }
 
   /** Scan wallet for tokens we think we hold — auto-drop if balance is 0 */

@@ -79,17 +79,20 @@ export const config = {
   minCapitalForStandardTrading: 5.0, // 5 SOL
   pumpFun: {
     programId: '6EF8rrecthR5Dkzon8Nwu78hRvfCKubJ14M5uBEwF6P',
-    positionSizeMultiplier: 0.75,      // 75% of normal tier sizing (was 0.5 — larger wins when right)
-    staleTimeKillMins: 8,              // Exit if no movement in 8 min (was 12 — exit dead tokens faster)
+    positionSizeMultiplier: 0.75,      // 75% of normal tier sizing
+    staleTimeKillMins: 5,              // Exit if no movement in 5 min (curve fills are fast or DOA)
     stopLoss: -0.20,                   // 20% stop loss
     hardKill: -0.25,                   // 25% hard kill
-    graduationProfitTarget: 0.50,      // 50% TP on graduation
-    graduationSellPct: 60,             // Sell 60% at graduation, hold 40%
-    minConvictionSol: 1.0,             // Alpha must spend ≥1.0 SOL (was 0.5 — only enter when alpha is committing)
+    // --- Curve scalp strategy: exit BEFORE graduation ---
+    curveProfitTarget: 0.75,           // Sell when curve hits 75% filled
+    curveHardExit: 0.85,              // Force-exit at 85% — NEVER hold through graduation
+    graduationSellPct: 100,            // Sell 100% on any graduation (no lottery holds)
+    minConvictionSol: 1.0,             // Alpha must spend ≥1.0 SOL
     minCurveVelocity: 0.1,            // 0.1 SOL/min curve velocity
-    maxTokenAgeMins: 30,               // Only tokens <30min old
+    maxTokenAgeMins: 15,               // Only tokens <15min old (was 30 — tighter, curve plays resolve fast)
     maxPositions: 3,                   // Max 3 pump.fun positions
     slippageBps: 500,                  // 5% slippage for bonding curve
+    confluenceBonus: true,             // Track multi-wallet convergence on same token
   },
 } as const;
 

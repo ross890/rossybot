@@ -441,20 +441,21 @@ export class LiveTracker {
           return;
         }
       }
+    } else {
+      pos.fees_paid_sol += result.feesSol;
+
+      // Calculate final P&L from actual SOL received
+      const totalSolReceived = (result.outputAmount / 1e9) +
+        pos.partial_exits.reduce((s, p) => s + (Number((p as Record<string, unknown>).solReceived) || 0), 0);
+      pos.pnl_sol = totalSolReceived - pos.entry_sol;
+      pos.net_pnl_sol = pos.pnl_sol - pos.fees_paid_sol;
+      pos.pnl_percent = pos.entry_sol > 0 ? pos.pnl_sol / pos.entry_sol : 0;
     }
 
     pos.status = PositionStatus.CLOSED;
     pos.exit_reason = reason;
     pos.closed_at = new Date();
     pos.hold_time_mins = Math.round((pos.closed_at.getTime() - pos.entry_time.getTime()) / (1000 * 60));
-    pos.fees_paid_sol += result.feesSol;
-
-    // Calculate final P&L from actual SOL received
-    const totalSolReceived = (result.outputAmount / 1e9) +
-      pos.partial_exits.reduce((s, p) => s + (Number((p as Record<string, unknown>).solReceived) || 0), 0);
-    pos.pnl_sol = totalSolReceived - pos.entry_sol;
-    pos.net_pnl_sol = pos.pnl_sol - pos.fees_paid_sol;
-    pos.pnl_percent = pos.entry_sol > 0 ? pos.pnl_sol / pos.entry_sol : 0;
 
     await this.updatePosition(pos);
     await this.updateWalletStats(pos);

@@ -1055,7 +1055,7 @@ class RossyBotV2 {
         if (curveRangeReasons.includes(validation.failReason || '')) {
           this.pumpFunRejectionCache.set(mint, {
             reason: validation.failReason!,
-            expiresAt: Date.now() + RossyBot.PUMP_FUN_REJECTION_TTL_MS,
+            expiresAt: Date.now() + RossyBotV2.PUMP_FUN_REJECTION_TTL_MS,
           });
           // No Telegram message for curve-range rejections — these are noise, not actionable
         } else {

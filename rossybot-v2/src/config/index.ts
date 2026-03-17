@@ -79,13 +79,13 @@ export const config = {
   minCapitalForStandardTrading: 5.0, // 5 SOL
   pumpFun: {
     programId: '6EF8rrecthR5Dkzon8Nwu78hRvfCKubJ14M5uBEwF6P',
-    positionSizeMultiplier: 0.5,       // 50% of normal tier sizing
-    staleTimeKillMins: 12,             // Exit if no movement in 12 min (winners move in <7min avg)
+    positionSizeMultiplier: 0.75,      // 75% of normal tier sizing (was 0.5 — larger wins when right)
+    staleTimeKillMins: 8,              // Exit if no movement in 8 min (was 12 — exit dead tokens faster)
     stopLoss: -0.20,                   // 20% stop loss
     hardKill: -0.25,                   // 25% hard kill
     graduationProfitTarget: 0.50,      // 50% TP on graduation
     graduationSellPct: 60,             // Sell 60% at graduation, hold 40%
-    minConvictionSol: 0.5,             // Alpha must spend ≥0.5 SOL (was 0.3 — too many low-quality signals)
+    minConvictionSol: 1.0,             // Alpha must spend ≥1.0 SOL (was 0.5 — only enter when alpha is committing)
     minCurveVelocity: 0.1,            // 0.1 SOL/min curve velocity
     maxTokenAgeMins: 30,               // Only tokens <30min old
     maxPositions: 3,                   // Max 3 pump.fun positions
@@ -102,9 +102,9 @@ export const TIER_CONFIGS: Record<CapitalTier, TierConfig> = {
     walletsMonitored: 50,
     positionSizePct: 0.30,            // 30% per position (was 25% — small capital needs more concentration)
     minPositionSol: 0.003,            // 0.003 SOL min (was 0.3 — bot couldn't trade with 0.025 SOL balance)
-    profitTarget: 0.50,
-    stopLoss: -0.15,                  // 15% stop (was 20% — protect tiny capital more aggressively)
-    hardKill: -0.20,                  // 20% hard kill (was 25% — same reasoning)
+    profitTarget: 0.40,                // 40% TP (was 50% — take profits slightly earlier)
+    stopLoss: -0.20,                  // 20% stop (was 15% — less whipsaw on volatile micro-caps)
+    hardKill: -0.25,                  // 25% hard kill (was 20% — give more room before force-exit)
     partialExitsEnabled: false,
     walletConfluenceRequired: 1,
     confluenceWindow: 30,
@@ -122,7 +122,7 @@ export const TIER_CONFIGS: Record<CapitalTier, TierConfig> = {
     momentumMax: 300,
     volumeMultiplierMin: 1,
     tokenMaxAgeDays: 14,              // 14 days max age (was 30 — stale tokens less interesting)
-    minSignalScore: 35,
+    minSignalScore: 45,               // Raised from 35 — filter out low-quality signals
   },
   [CapitalTier.SMALL]: {
     tier: CapitalTier.SMALL,

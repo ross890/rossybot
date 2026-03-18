@@ -1278,7 +1278,7 @@ class RossyBotV2 {
       await this.telegram.send(
         `🟡 BUY · ${mint.slice(0, 8)} · ${pumpSize.toFixed(4)} SOL\n` +
         `├ Wallet: ${walletLabel}${confluenceTag} · Alpha: ${solSpent.toFixed(2)} SOL\n` +
-        `├ Curve: ${(validation.curveFillPct * 100).toFixed(0)}% · TP +25% · SL ${(cfg.stopLoss * 100).toFixed(0)}%\n` +
+        `├ Curve: ${(validation.curveFillPct * 100).toFixed(0)}% · TP +${(cfg.profitTarget * 100).toFixed(0)}% · SL ${(cfg.stopLoss * 100).toFixed(0)}%\n` +
         (pos.entry_tx ? `├ TX: ${pos.entry_tx.slice(0, 16)}...\n` : '') +
         `└ <a href="https://pump.fun/coin/${mint}">pump.fun</a> · <a href="https://dexscreener.com/solana/${mint}">dex</a> · ${mode}`,
         { parse_mode: 'HTML' },

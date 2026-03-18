@@ -213,7 +213,13 @@ export const TIER_CONFIGS: Record<CapitalTier, TierConfig> = {
 };
 
 // Seed wallets
-export const SEED_WALLETS = [
+export const SEED_WALLETS: Array<{
+  address: string;
+  label: string;
+  minTier: CapitalTier;
+  pumpfunOnly?: boolean;
+}> = [
+  // --- Nansen / general alpha wallets ---
   { address: '7Z5VhcNSpMpaTVqRg8QTkySw6syfcTehTx8CqRPvf9bg', label: 'nansen_smart_1', minTier: CapitalTier.MICRO },
   { address: '2sqTwLCEqKxmyUq79HVL4bwS6QjvfMtnqnZznLFmwJMi', label: 'nansen_349roi', minTier: CapitalTier.MICRO },
   { address: '5MigbXPuoCBzzDXBHMxRKudWmby4BVDQckZLAB6ti1RF', label: 'nansen_sniper', minTier: CapitalTier.MICRO },
@@ -222,6 +228,20 @@ export const SEED_WALLETS = [
   { address: '7iRo63BzGA3BoXyNhrhR3WNzBzRN1WP4bDik4Q5t9fDR', label: 'nansen_okc', minTier: CapitalTier.MEDIUM },
   { address: 'DP4QTfM8HUvUP8hHXuGpTinoJYrYV6XhuFLPP3EYrChq', label: 'nansen_active_1', minTier: CapitalTier.MEDIUM },
   { address: 'AgmLJBMDCqWynYnQiPCuj9ewsNNsBJXyzoUhD9LJzN51', label: 'alpha_big_conviction', minTier: CapitalTier.MICRO },
+
+  // --- Pump.fun bonding curve alpha wallets (Tier 1 — verified across multiple sources) ---
+  // $3.3M realized profit. Early Pump.fun entries. Top trade: TRUMP $749K→$1.55M. (Nansen Smart Money)
+  { address: '3xqUaVuAWsppb8yaSPJ2hvdvfjteMq2EbdCc3CLguaTE', label: 'pf_nansen_3m3_profit', minTier: CapitalTier.MICRO, pumpfunOnly: true },
+  // $4.3M realized PnL. Gaming token specialist. 52% win rate, 192 tokens/90d. (Nansen Smart Money)
+  { address: '9UWZFoiCHeYRLmzmDJhdMrP7wgrTw7DMSpPiT2eHgJHe', label: 'pf_nansen_4m3_gaming', minTier: CapitalTier.MICRO, pumpfunOnly: true },
+  // AI token specialist. ~$1M profit. 28,876% gain on CATG. (Nansen Smart Money)
+  { address: 'BKVaB3eNrGUVRCj3M4LiodKypBTzrpatoo7VBhmdv3eY', label: 'pf_nansen_ai_specialist', minTier: CapitalTier.MICRO, pumpfunOnly: true },
+  // High win rate in early launches. Flagged as insider on KOLSCAN + GMGN.
+  { address: 'AVAZvHLR2PcWpDf8BXY4rVxNHYRBytycHkcB5z5QNXYm', label: 'pf_kolscan_insider', minTier: CapitalTier.MICRO, pumpfunOnly: true },
+  // Consistent 50x+ flips on Raydium-migrated tokens. Dominates Pump.fun launches. (Axiom Leaderboard)
+  { address: '4Be9CvxqHW6BYiRAxW9Q3xu1ycTMWaL5z8NX4HR3ha7t', label: 'pf_axiom_50x_flipper', minTier: CapitalTier.MICRO, pumpfunOnly: true },
+  // High win rates on Dune "Solana Alpha Wallets" dashboard. Active across trading bots. (Dune Analytics)
+  { address: '8zFZHuSRuDpuAR7J6FzwyF3vKNx4CVW3DFHJerQhc7Zd', label: 'pf_dune_high_wr', minTier: CapitalTier.MICRO, pumpfunOnly: true },
 ];
 
 export function getTierForCapital(capitalSol: number): CapitalTier {

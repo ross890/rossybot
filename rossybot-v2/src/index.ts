@@ -894,9 +894,9 @@ class RossyBotV2 {
           lines.push(`❌ LOSS · ${pos.token_address.slice(0, 8)} · ${(pnl * 100).toFixed(1)}%`);
         }
 
-        if (this.pumpFunTracker.isLive) {
-          lines.push(`├ Net: ${pnlSign}${pos.net_pnl_sol.toFixed(4)} SOL (fees: ${pos.fees_paid_sol.toFixed(4)})`);
-        }
+        const feeStr = pos.fees_paid_sol > 0 ? ` (fees: ${pos.fees_paid_sol.toFixed(4)})` : '';
+        const modeTag = this.pumpFunTracker.isLive ? '' : ' sim';
+        lines.push(`├ Net: ${pnlSign}${pos.net_pnl_sol.toFixed(4)} SOL${feeStr}${modeTag}`);
         lines.push(`├ Curve: ${(pos.curve_fill_pct_at_entry * 100).toFixed(0)}% → ${(pos.current_curve_fill_pct * 100).toFixed(0)}% · Hold: ${pos.hold_time_mins}min`);
         lines.push(`├ Exit: ${pos.exit_reason}`);
 

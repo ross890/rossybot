@@ -80,12 +80,13 @@ export const config = {
   pumpFun: {
     programId: '6EF8rrecthR5Dkzon8Nwu78hRvfCKubJ14M5uBEwF6P',
     positionSizeMultiplier: 1.20,      // 120% of normal tier sizing — tighter entry/exit controls justify bigger bets
-    staleTimeKillMins: 5,              // Exit if no movement in 5 min (curve fills are fast or DOA)
-    stopLoss: -0.20,                   // 20% stop loss
-    hardKill: -0.25,                   // 25% hard kill
+    staleTimeKillMins: 3,              // Exit if no movement in 3 min (curve plays resolve fast or DOA)
+    profitTarget: 0.10,                 // 10% PnL take profit (realistic for curve scalps)
+    stopLoss: -0.15,                   // 15% stop loss (tighter — cut losers fast)
+    hardKill: -0.20,                   // 20% hard kill
     // --- Curve scalp strategy: exit BEFORE graduation ---
-    curveProfitTarget: 0.75,           // Sell when curve hits 75% filled
-    curveHardExit: 0.85,              // Force-exit at 85% — NEVER hold through graduation
+    curveProfitTarget: 0.30,           // Sell when curve hits 30% filled (median peak is 20%, P75 is 39%)
+    curveHardExit: 0.45,              // Force-exit at 45% — data shows tokens rarely go higher
     graduationSellPct: 100,            // Sell 100% on any graduation (no lottery holds)
     minConvictionSol: 0.15,            // Alpha must spend ≥0.15 SOL — loosened now that exits work properly
     minCurveVelocity: 0.1,            // 0.1 SOL/min curve velocity

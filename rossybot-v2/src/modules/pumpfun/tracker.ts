@@ -664,4 +664,54 @@ export class PumpFunTracker {
   getOpenCount(): number {
     return this.getOpenPositions().length;
   }
+
+  /**
+   * Real-time curve update from PumpPortal WebSocket trade events.
+   * Called on every buy/sell on tokens we hold — much faster than 2s RPC polling.
+   * Uses vSolInBondingCurve from the trade event to update curve fill and check exits instantly.
+   */
+  async handleRealtimeCurveUpdate(tokenMint: string, vSolInBondingCurve: number): Promise<void> {
+    for (const pos of this.positions.values()) {
+      if (pos.token_address !== tokenMint || pos.status === PositionStatus.CLOSED || pos.graduated) continue;
+
+      const cfg = config.pumpFun;
+
+      // vSolInBondingCurve includes virtual reserves (~30 SOL), so subtract to get real SOL deposited
+      // Real SOL ≈ vSol - 30 (pump.fun uses 30 SOL virtual reserve)
+      const realSol = Math.max(0, vSolInBondingCurve - 30);
+      pos.last_curve_check_sol = realSol;
+      pos.current_curve_fill_pct = estimateCurveFillPct(realSol);
+
+      // Estimate PnL from curve progress
+      if (pos.curve_fill_pct_at_entry > 0) {
+        pos.pnl_percent = (pos.current_curve_fill_pct / pos.curve_fill_pct_at_entry) - 1;
+      }
+
+      // --- INSTANT CURVE SCALP EXITS ---
+
+      // Hard exit at 85% — NEVER hold through graduation
+      if (pos.current_curve_fill_pct >= cfg.curveHardExit) {
+        await this.closePosition(pos, `Curve hard exit (${(pos.current_curve_fill_pct * 100).toFixed(0)}% filled — pre-graduation exit) [realtime]`);
+        return;
+      }
+
+      // PnL-based take profit at 25%
+      if (pos.pnl_percent >= 0.25) {
+        await this.closePosition(pos, `Curve TP (${(pos.pnl_percent * 100).toFixed(0)}% PnL — taking profit) [realtime]`);
+        return;
+      }
+
+      // Curve fill TP at 75%
+      if (pos.current_curve_fill_pct >= cfg.curveProfitTarget) {
+        await this.closePosition(pos, `Curve TP (${(pos.current_curve_fill_pct * 100).toFixed(0)}% filled — target hit) [realtime]`);
+        return;
+      }
+
+      // Stop loss based on curve regression
+      if (pos.pnl_percent <= cfg.stopLoss) {
+        await this.closePosition(pos, `Pump.fun stop loss (${(pos.pnl_percent * 100).toFixed(1)}%) [realtime]`);
+        return;
+      }
+    }
+  }
 }

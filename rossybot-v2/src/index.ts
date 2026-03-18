@@ -299,6 +299,14 @@ class RossyBotV2 {
       this.pumpFunAlphaDiscovery.processTrade(trade).catch((err) =>
         logger.error({ err }, 'PumpPortal alpha discovery error'),
       );
+
+      // Real-time curve fill updates for open positions — reacts instantly instead of 2s polling.
+      // PumpPortal trade events include vSolInBondingCurve which we use to check TP/exits.
+      if (trade.txType === 'buy' || trade.txType === 'sell') {
+        this.pumpFunTracker.handleRealtimeCurveUpdate(trade.mint, trade.vSolInBondingCurve).catch((err) =>
+          logger.error({ err, token: trade.mint.slice(0, 8) }, 'Real-time curve update failed'),
+        );
+      }
     });
 
     this.pumpPortal.connect().catch((err) =>

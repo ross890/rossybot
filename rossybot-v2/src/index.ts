@@ -15,6 +15,7 @@ import { CapitalManager } from './modules/trading/capital-manager.js';
 import { SwapExecutor } from './modules/trading/swap-executor.js';
 import { TelegramService } from './modules/telegram/index.js';
 import { PumpFunTracker, validatePumpFunSignal, PumpPortalClient, PumpFunAlphaDiscovery, deriveBondingCurveAddress } from './modules/pumpfun/index.js';
+import { GraduationAnalyzer } from './modules/analysis/graduation-analyzer.js';
 import { fetchDexPair } from './modules/validation/dexscreener.js';
 import { SignalType, type ParsedSignal, type PositionView } from './types/index.js';
 
@@ -143,6 +144,9 @@ class RossyBotV2 {
   private pumpPortal: PumpPortalClient;
   private pumpFunAlphaDiscovery: PumpFunAlphaDiscovery;
 
+  // Graduation retroanalysis — discovers wallets that buy early on tokens that graduate
+  private graduationAnalyzer: GraduationAnalyzer;
+
   private get isLive(): boolean {
     return !config.shadowMode && this.liveTracker !== null;
   }
@@ -170,6 +174,7 @@ class RossyBotV2 {
     this.pumpFunTracker = new PumpFunTracker();
     this.pumpPortal = new PumpPortalClient();
     this.pumpFunAlphaDiscovery = new PumpFunAlphaDiscovery();
+    this.graduationAnalyzer = new GraduationAnalyzer();
 
     // Initialize position tracker based on mode
     if (!config.shadowMode && config.wallet.privateKey) {
@@ -412,6 +417,33 @@ class RossyBotV2 {
 
     // 9b. Start WS slot rotation — evict zero-signal wallets, promote better candidates
     this.startWsRotation();
+
+    // 9c. Run graduation retroanalysis (non-blocking — heavy RPC usage)
+    this.graduationAnalyzer.runAnalysis().then((result) => {
+      if (result.walletsPromoted > 0) {
+        this.telegram.send(
+          `🎓 GRADUATION ANALYSIS\n` +
+          `├ Tokens analyzed: ${result.tokensAnalyzed}\n` +
+          `├ Unique early buyers: ${result.walletsFound}\n` +
+          `└ New wallets promoted: ${result.walletsPromoted}`,
+        ).catch(() => {});
+      }
+    }).catch((err) => logger.error({ err }, 'Graduation analysis failed'));
+
+    // Schedule graduation analysis to run daily at 4 AM UTC
+    setInterval(async () => {
+      const now = new Date();
+      if (now.getUTCHours() === 4 && now.getUTCMinutes() === 0) {
+        const result = await this.graduationAnalyzer.runAnalysis();
+        if (result.walletsPromoted > 0) {
+          await this.telegram.send(
+            `🎓 DAILY GRADUATION SCAN\n` +
+            `├ Tokens: ${result.tokensAnalyzed} · Wallets: ${result.walletsFound}\n` +
+            `└ Promoted: ${result.walletsPromoted} new alpha wallets`,
+          ).catch(() => {});
+        }
+      }
+    }, 60_000);
 
     // 10. Start Telegram bot polling
     await this.telegram.startPolling();
@@ -993,6 +1025,7 @@ class RossyBotV2 {
     this.telegram.setWsHealthCallback(() => this.wsManager.getStatus());
     this.telegram.setNansenUsageCallback(() => this.nansen.usage);
     this.telegram.setDiscoveryCallback(() => this.walletDiscovery.runDiscovery());
+    this.telegram.setGraduationCallback(() => this.graduationAnalyzer.runAnalysis());
     this.telegram.setPauseCallback(() => logger.info('Trading PAUSED via Telegram'));
     this.telegram.setResumeCallback(() => logger.info('Trading RESUMED via Telegram'));
 

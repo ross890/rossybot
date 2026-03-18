@@ -20,6 +20,7 @@ export class TelegramService {
   private onKill: ((token: string) => Promise<{ success: boolean; token?: string; error?: string }>) | null = null;
   private onDrop: ((token: string) => Promise<{ success: boolean; token?: string; error?: string }>) | null = null;
   private onHoldTimeAnalysis: (() => Promise<string[]>) | null = null;
+  private onGraduationAnalysis: (() => Promise<{ tokensAnalyzed: number; walletsFound: number; walletsPromoted: number }>) | null = null;
   private getPumpFunPositions: (() => Array<Record<string, unknown>>) | null = null;
 
   constructor() {
@@ -53,6 +54,7 @@ export class TelegramService {
   setKillCallback(cb: (token: string) => Promise<{ success: boolean; token?: string; error?: string }>): void { this.onKill = cb; }
   setDropCallback(cb: (token: string) => Promise<{ success: boolean; token?: string; error?: string }>): void { this.onDrop = cb; }
   setHoldTimeCallback(cb: () => Promise<string[]>): void { this.onHoldTimeAnalysis = cb; }
+  setGraduationCallback(cb: () => Promise<{ tokensAnalyzed: number; walletsFound: number; walletsPromoted: number }>): void { this.onGraduationAnalysis = cb; }
   setPumpFunPositionsCallback(cb: () => Array<Record<string, unknown>>): void { this.getPumpFunPositions = cb; }
 
   get isPaused(): boolean { return this.paused; }
@@ -746,6 +748,26 @@ export class TelegramService {
         }
       } catch (err) {
         await this.bot.sendMessage(msg.chat.id, '❌ Hold-time analysis failed');
+      }
+    });
+
+    this.bot.onText(/\/graduation/, async (msg) => {
+      if (msg.chat.id.toString() !== this.chatId) return;
+      if (!this.onGraduationAnalysis) {
+        await this.bot.sendMessage(msg.chat.id, '❌ Graduation analysis not available');
+        return;
+      }
+      await this.bot.sendMessage(msg.chat.id, '🎓 Running graduation retroanalysis (this takes a few minutes)...');
+      try {
+        const result = await this.onGraduationAnalysis();
+        await this.bot.sendMessage(msg.chat.id,
+          `🎓 GRADUATION ANALYSIS COMPLETE\n` +
+          `├ Tokens analyzed: ${result.tokensAnalyzed}\n` +
+          `├ Unique early buyers found: ${result.walletsFound}\n` +
+          `└ New wallets promoted: ${result.walletsPromoted}`,
+        );
+      } catch (err) {
+        await this.bot.sendMessage(msg.chat.id, '❌ Graduation analysis failed');
       }
     });
 

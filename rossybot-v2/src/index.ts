@@ -875,9 +875,7 @@ class RossyBotV2 {
     // Wire swap failure notifications
     this.pumpFunTracker.setSwapFailedCallback(async (tokenSymbol, error, type) => {
       await this.telegram.send(
-        `⚠️ PUMP.FUN ${type} SWAP FAILED\n` +
-        `├ Token: ${tokenSymbol}\n` +
-        `└ Error: ${error}`,
+        `⚠️ ${type} FAILED · ${tokenSymbol} · ${error}`,
       );
     });
 
@@ -885,22 +883,41 @@ class RossyBotV2 {
       this.blockedTokens.add(pos.token_address);
       try {
         const pnl = pos.pnl_percent;
-        const emoji = pnl >= 0 ? '🟢' : '🔴';
-        const mode = this.pumpFunTracker.isLive ? 'LIVE' : 'SHADOW';
-        const liveDetails = this.pumpFunTracker.isLive
-          ? `├ Net PnL: ${pos.net_pnl_sol.toFixed(6)} SOL\n` +
-            `├ Fees: ${pos.fees_paid_sol.toFixed(6)} SOL\n`
-          : '';
-        await this.telegram.send(
-          `🎰 PUMP.FUN CLOSED ${emoji} [${mode}]\n` +
-          `├ Token: ${pos.token_symbol || pos.token_address.slice(0, 8)}\n` +
-          `├ PnL: ${(pnl * 100).toFixed(1)}%\n` +
-          liveDetails +
-          `├ Hold: ${pos.hold_time_mins}min\n` +
-          `├ Graduated: ${pos.graduated ? `YES (at ${pos.graduated_at?.toISOString().slice(11, 19)} UTC)` : 'NO'}\n` +
-          `├ Curve: ${(pos.curve_fill_pct_at_entry * 100).toFixed(0)}% → ${(pos.current_curve_fill_pct * 100).toFixed(0)}%\n` +
-          `└ Reason: ${pos.exit_reason}`,
-        );
+        const isWin = pnl > 0;
+        const pnlSign = pnl >= 0 ? '+' : '';
+
+        // Build clean close message
+        const lines: string[] = [];
+        if (isWin) {
+          lines.push(`✅ WIN · ${pos.token_address.slice(0, 8)} · ${pnlSign}${(pnl * 100).toFixed(1)}%`);
+        } else {
+          lines.push(`❌ LOSS · ${pos.token_address.slice(0, 8)} · ${(pnl * 100).toFixed(1)}%`);
+        }
+
+        if (this.pumpFunTracker.isLive) {
+          lines.push(`├ Net: ${pnlSign}${pos.net_pnl_sol.toFixed(4)} SOL (fees: ${pos.fees_paid_sol.toFixed(4)})`);
+        }
+        lines.push(`├ Curve: ${(pos.curve_fill_pct_at_entry * 100).toFixed(0)}% → ${(pos.current_curve_fill_pct * 100).toFixed(0)}% · Hold: ${pos.hold_time_mins}min`);
+        lines.push(`├ Exit: ${pos.exit_reason}`);
+
+        // Session + all-time running PnL
+        const session = this.pumpFunTracker.getSessionStats();
+        const sessionWR = session.trades > 0 ? `${(session.winRate * 100).toFixed(0)}%` : '-';
+        const sessionPnlSign = session.totalPnlSol >= 0 ? '+' : '';
+        lines.push(`├─────────────────────`);
+        lines.push(`├ Session: ${sessionPnlSign}${session.totalPnlSol.toFixed(4)} SOL · ${session.wins}W/${session.trades - session.wins}L · WR ${sessionWR}`);
+
+        // Fetch all-time stats (fast — single indexed query)
+        try {
+          const allTime = await this.pumpFunTracker.getAllTimeStats();
+          const allTimeWR = allTime.trades > 0 ? `${(allTime.winRate * 100).toFixed(0)}%` : '-';
+          const allTimePnlSign = allTime.totalPnlSol >= 0 ? '+' : '';
+          lines.push(`└ All-time: ${allTimePnlSign}${allTime.totalPnlSol.toFixed(4)} SOL · ${allTime.wins}W/${allTime.trades - allTime.wins}L · WR ${allTimeWR}`);
+        } catch {
+          lines.push(`└ Mode: ${this.pumpFunTracker.isLive ? 'LIVE' : 'SHADOW'}`);
+        }
+
+        await this.telegram.send(lines.join('\n'));
       } catch (err) {
         logger.error({ err }, 'Error in pump.fun close callback');
       }
@@ -909,11 +926,9 @@ class RossyBotV2 {
     this.pumpFunTracker.setGraduationCallback(async (pos) => {
       try {
         await this.telegram.send(
-          `🎓 GRADUATION: ${pos.token_symbol || pos.token_address.slice(0, 8)}\n` +
-          `├ Migrated to Raydium!\n` +
-          `├ Hold time: ${((Date.now() - pos.entry_time.getTime()) / 60_000).toFixed(0)}min\n` +
-          `├ Entry curve: ${(pos.curve_fill_pct_at_entry * 100).toFixed(0)}%\n` +
-          `└ Now tracking via DexScreener`,
+          `🎓 GRADUATED · ${pos.token_address.slice(0, 8)}\n` +
+          `├ Curve: ${(pos.curve_fill_pct_at_entry * 100).toFixed(0)}% → 100% · Hold: ${((Date.now() - pos.entry_time.getTime()) / 60_000).toFixed(0)}min\n` +
+          `└ Selling immediately`,
         );
       } catch (err) {
         logger.error({ err }, 'Error in pump.fun graduation callback');
@@ -1066,8 +1081,7 @@ class RossyBotV2 {
         if (slotNow - this.lastSlotsFullMsgAt >= 120_000) {
           this.lastSlotsFullMsgAt = slotNow;
           await this.telegram.send(
-            `🎰 PUMP.FUN signal blocked: $${signal.tokenMint.slice(0, 8)}\n` +
-            `└ ${this.pumpFunTracker.getOpenCount()}/${cfg.maxPositions} pump.fun slots full`,
+            `⏸️ FULL · ${signal.tokenMint.slice(0, 8)} · ${this.pumpFunTracker.getOpenCount()}/${cfg.maxPositions} slots`,
           );
         }
         return;
@@ -1111,12 +1125,8 @@ class RossyBotV2 {
             winRate: `${(wr * 100).toFixed(0)}%`, consLosses,
           }, 'Pump.fun REJECTED — wallet quality too low');
           await this.telegram.send(
-            `🎰 PUMP.FUN rejected: ${mint.slice(0, 8)}\n` +
-            `├ Wallet: ${walletLabel}\n` +
-            `├ Reason: WALLET_QUALITY (WR ${(wr * 100).toFixed(0)}%, ${consLosses} consecutive losses)\n` +
-            `├ SOL spent: ${solSpent.toFixed(2)}\n` +
-            `└ <a href="https://pump.fun/coin/${mint}">pump.fun</a> · <a href="https://dexscreener.com/solana/${mint}">dex</a>`,
-            { parse_mode: 'HTML' },
+            `⛔ SKIP · ${mint.slice(0, 8)} · Bad wallet\n` +
+            `└ ${walletLabel} · WR ${(wr * 100).toFixed(0)}% · ${consLosses} consecutive losses`,
           );
           return;
         }
@@ -1163,12 +1173,8 @@ class RossyBotV2 {
               expiresAt: Date.now() + RossyBotV2.PUMP_FUN_REJECTION_TTL_MS,
             });
             await this.telegram.send(
-              `🎰 PUMP.FUN rejected: ${mint.slice(0, 8)}\n` +
-              `├ Wallet: ${walletLabel}\n` +
-              `├ Reason: STAMPEDE (${effectiveBuyers} effective / ${buyerTracker.buyers.size} raw buyers, curve ${(curveFill * 100).toFixed(0)}%)\n` +
-              `├ SOL spent: ${solSpent.toFixed(2)}\n` +
-              `└ <a href="https://pump.fun/coin/${mint}">pump.fun</a> · <a href="https://dexscreener.com/solana/${mint}">dex</a>`,
-              { parse_mode: 'HTML' },
+              `⛔ SKIP · ${mint.slice(0, 8)} · Stampede\n` +
+              `└ ${effectiveBuyers} buyers · curve ${(curveFill * 100).toFixed(0)}% · ${walletLabel}`,
             );
             return;
           } else {
@@ -1226,25 +1232,15 @@ class RossyBotV2 {
           // Only send Telegram for LOW_CONVICTION once (first occurrence gets through, rest cached)
           if (validation.failReason === 'LOW_CONVICTION') {
             await this.telegram.send(
-              `🎰 PUMP.FUN rejected: ${mint.slice(0, 8)}\n` +
-              `├ Wallet: ${walletLabel}\n` +
-              `├ Reason: ${validation.failReason}\n` +
-              `├ Curve: ${(validation.curveFillPct * 100).toFixed(0)}% (${validation.solInCurve.toFixed(1)} SOL)\n` +
-              `├ SOL spent: ${solSpent.toFixed(2)}\n` +
-              `└ <a href="https://pump.fun/coin/${mint}">pump.fun</a> · <a href="https://dexscreener.com/solana/${mint}">dex</a>`,
-              { parse_mode: 'HTML' },
+              `⛔ SKIP · ${mint.slice(0, 8)} · Low conviction\n` +
+              `└ ${walletLabel} · ${solSpent.toFixed(2)} SOL · curve ${(validation.curveFillPct * 100).toFixed(0)}%`,
             );
           }
         } else {
-          // Other rejections (WALLET_QUALITY, etc.) still get Telegram alerts
+          // Other rejections still get Telegram alerts
           await this.telegram.send(
-            `🎰 PUMP.FUN rejected: ${mint.slice(0, 8)}\n` +
-            `├ Wallet: ${walletLabel}\n` +
-            `├ Reason: ${validation.failReason}\n` +
-            `├ Curve: ${(validation.curveFillPct * 100).toFixed(0)}% (${validation.solInCurve.toFixed(1)} SOL)\n` +
-            `├ SOL spent: ${solSpent.toFixed(2)}\n` +
-            `└ <a href="https://pump.fun/coin/${mint}">pump.fun</a> · <a href="https://dexscreener.com/solana/${mint}">dex</a>`,
-            { parse_mode: 'HTML' },
+            `⛔ SKIP · ${mint.slice(0, 8)} · ${validation.failReason}\n` +
+            `└ ${walletLabel} · ${solSpent.toFixed(2)} SOL · curve ${(validation.curveFillPct * 100).toFixed(0)}%`,
           );
         }
         return;
@@ -1269,28 +1265,22 @@ class RossyBotV2 {
 
       if (!pos) {
         await this.telegram.send(
-          `🎰 PUMP.FUN BUY FAILED: ${mint.slice(0, 8)}\n` +
-          `├ Wallet: ${walletLabel}\n` +
-          `├ Size: ${pumpSize.toFixed(4)} SOL\n` +
-          `└ Swap execution failed — check logs`,
+          `⚠️ BUY FAILED · ${mint.slice(0, 8)} · ${pumpSize.toFixed(4)} SOL\n` +
+          `└ ${walletLabel} · swap failed`,
         );
         return;
       }
 
       const mode = this.pumpFunTracker.isLive ? 'LIVE' : 'SHADOW';
-      const confluenceTag = confluenceCount >= 2 ? ` (${confluenceCount} wallets, ${confluence.totalSol.toFixed(1)} SOL total)` : '';
+      const confluenceTag = confluenceCount >= 2 ? ` +${confluenceCount - 1} wallets` : '';
 
-      // Telegram alert — curve scalp strategy
+      // Telegram alert — curve scalp entry
       await this.telegram.send(
-        `🎰 CURVE SCALP ENTRY: ${mint.slice(0, 8)}\n` +
-        `├ Wallet: ${walletLabel}${confluenceTag}\n` +
-        `├ Size: ${pumpSize.toFixed(4)} SOL\n` +
-        `├ Curve: ${(validation.curveFillPct * 100).toFixed(0)}% → TP at ${(cfg.curveProfitTarget * 100).toFixed(0)}% | exit at ${(cfg.curveHardExit * 100).toFixed(0)}%\n` +
-        `├ Alpha spent: ${solSpent.toFixed(2)} SOL\n` +
-        `├ Exits: stall ${cfg.staleTimeKillMins}min | SL ${(cfg.stopLoss * 100).toFixed(0)}% | hard ${cfg.maxTokenAgeMins}min\n` +
+        `🟡 BUY · ${mint.slice(0, 8)} · ${pumpSize.toFixed(4)} SOL\n` +
+        `├ Wallet: ${walletLabel}${confluenceTag} · Alpha: ${solSpent.toFixed(2)} SOL\n` +
+        `├ Curve: ${(validation.curveFillPct * 100).toFixed(0)}% → TP ${(cfg.curveProfitTarget * 100).toFixed(0)}% · SL ${(cfg.stopLoss * 100).toFixed(0)}%\n` +
         (pos.entry_tx ? `├ TX: ${pos.entry_tx.slice(0, 16)}...\n` : '') +
-        `├ <a href="https://pump.fun/coin/${mint}">pump.fun</a> · <a href="https://dexscreener.com/solana/${mint}">dex</a>\n` +
-        `└ Mode: ${mode} | Strategy: PRE-GRAD SCALP`,
+        `└ <a href="https://pump.fun/coin/${mint}">pump.fun</a> · <a href="https://dexscreener.com/solana/${mint}">dex</a> · ${mode}`,
         { parse_mode: 'HTML' },
       );
 

@@ -1,6 +1,6 @@
 import { v4 as uuid } from 'uuid';
 import { logger } from '../../utils/logger.js';
-import { query, getMany } from '../../db/database.js';
+import { query, getMany, getOne } from '../../db/database.js';
 import { config } from '../../config/index.js';
 import { PositionStatus } from '../../types/index.js';
 import { checkGraduation } from './detector.js';
@@ -56,6 +56,45 @@ export class PumpFunTracker {
 
   // Live trading: when set, executes real swaps via Jupiter
   private swapExecutor: SwapExecutor | null = null;
+
+  // Session PnL tracking (resets on restart)
+  private sessionStats = {
+    trades: 0,
+    wins: 0,
+    totalPnlSol: 0,
+    totalFeesSol: 0,
+    startedAt: new Date(),
+  };
+
+  getSessionStats(): { trades: number; wins: number; winRate: number; totalPnlSol: number; totalFeesSol: number; startedAt: Date } {
+    return {
+      ...this.sessionStats,
+      winRate: this.sessionStats.trades > 0 ? this.sessionStats.wins / this.sessionStats.trades : 0,
+    };
+  }
+
+  async getAllTimeStats(): Promise<{ trades: number; wins: number; winRate: number; totalPnlSol: number; totalFeesSol: number }> {
+    try {
+      const row = await getOne<{ total: string; wins: string; total_pnl: string; total_fees: string }>(
+        `SELECT COUNT(*) as total,
+                COUNT(*) FILTER (WHERE pnl_percent > 0) as wins,
+                COALESCE(SUM(net_pnl_sol), 0) as total_pnl,
+                COALESCE(SUM(fees_paid_sol), 0) as total_fees
+         FROM pumpfun_positions WHERE status = 'CLOSED'`,
+      );
+      const trades = Number(row?.total || 0);
+      const wins = Number(row?.wins || 0);
+      return {
+        trades,
+        wins,
+        winRate: trades > 0 ? wins / trades : 0,
+        totalPnlSol: Number(row?.total_pnl || 0),
+        totalFeesSol: Number(row?.total_fees || 0),
+      };
+    } catch {
+      return { trades: 0, wins: 0, winRate: 0, totalPnlSol: 0, totalFeesSol: 0 };
+    }
+  }
 
   get isLive(): boolean {
     return this.swapExecutor !== null;
@@ -338,19 +377,19 @@ export class PumpFunTracker {
 
         // 2a. Curve hard exit — NEVER hold through graduation (force-exit at 85%)
         if (pos.current_curve_fill_pct >= cfg.curveHardExit) {
-          await this.closePosition(pos, `Curve hard exit (${(pos.current_curve_fill_pct * 100).toFixed(0)}% filled — pre-graduation exit)`);
+          await this.closePosition(pos, 'Curve hard exit (pre-graduation)');
           return;
         }
 
         // 2b. PnL-based take profit — lock in 25% gain (don't get greedy)
         if (pos.pnl_percent >= 0.25) {
-          await this.closePosition(pos, `Curve TP (${(pos.pnl_percent * 100).toFixed(0)}% PnL — taking profit)`);
+          await this.closePosition(pos, 'Take profit');
           return;
         }
 
         // 2c. Curve fill TP fallback — sell at 75% curve fill regardless of PnL calc
         if (pos.current_curve_fill_pct >= cfg.curveProfitTarget) {
-          await this.closePosition(pos, `Curve TP (${(pos.current_curve_fill_pct * 100).toFixed(0)}% filled — target hit)`);
+          await this.closePosition(pos, 'Curve target hit');
           return;
         }
 
@@ -359,13 +398,13 @@ export class PumpFunTracker {
         // 3. Curve stall exit — compare SOL growth since ENTRY (not last 5s check)
         const solDeltaSinceEntry = curveState.solBalance - pos.sol_in_curve_at_entry;
         if (holdMins >= cfg.staleTimeKillMins && solDeltaSinceEntry <= 0.5) {
-          await this.closePosition(pos, `Curve stall (${holdMins.toFixed(0)}min, no momentum)`);
+          await this.closePosition(pos, 'Stall (no momentum)');
           return;
         }
 
         // 3b. Early stall — if curve is going backwards (net sells vs entry) after 3 min
         if (holdMins >= 3 && solDeltaSinceEntry < -0.05) {
-          await this.closePosition(pos, `Curve reversal (${holdMins.toFixed(0)}min, SOL leaving curve)`);
+          await this.closePosition(pos, 'Curve reversal');
           return;
         }
       }
@@ -391,20 +430,20 @@ export class PumpFunTracker {
 
         this.onGraduation?.(pos);
         // Sell immediately — don't wait for post-grad monitoring
-        await this.closePosition(pos, `Emergency graduation exit (missed curve TP at ${(pos.current_curve_fill_pct * 100).toFixed(0)}%)`);
+        await this.closePosition(pos, 'Graduated (emergency exit)');
         return;
       }
     }
 
     // 5. Hard time kill — tighter at 15 min (curve scalps resolve fast)
     if (holdMins >= cfg.maxTokenAgeMins) {
-      await this.closePosition(pos, `Pump.fun hard time kill (${holdMins.toFixed(0)}min)`);
+      await this.closePosition(pos, 'Time limit');
       return;
     }
 
     // 6. Stop loss based on curve regression
     if (pos.pnl_percent <= cfg.stopLoss) {
-      await this.closePosition(pos, `Pump.fun stop loss (${(pos.pnl_percent * 100).toFixed(1)}%)`);
+      await this.closePosition(pos, 'Stop loss');
       return;
     }
 
@@ -415,7 +454,7 @@ export class PumpFunTracker {
   private async checkGraduatedPosition(pos: PumpFunPosition): Promise<void> {
     // Curve scalp strategy: we should NEVER be here. If we are, sell ASAP.
     // No cooldown — every second costs money post-graduation.
-    await this.closePosition(pos, `Post-grad emergency exit (graduated while held — selling 100%)`);
+    await this.closePosition(pos, 'Graduated (emergency exit)');
   }
 
   /** Scan wallet for tokens we think we hold — auto-drop if balance is 0 */
@@ -545,6 +584,12 @@ export class PumpFunTracker {
     pos.exit_reason = reason;
     pos.closed_at = new Date();
     pos.hold_time_mins = Math.round((pos.closed_at.getTime() - pos.entry_time.getTime()) / 60_000);
+
+    // Update session stats
+    this.sessionStats.trades++;
+    if (pos.pnl_percent > 0) this.sessionStats.wins++;
+    this.sessionStats.totalPnlSol += pos.net_pnl_sol;
+    this.sessionStats.totalFeesSol += pos.fees_paid_sol;
 
     await this.updatePosition(pos);
     await this.updateWalletStats(pos);
@@ -708,6 +753,21 @@ export class PumpFunTracker {
       // vSolInBondingCurve includes virtual reserves (~30 SOL), so subtract to get real SOL deposited
       // Real SOL ≈ vSol - 30 (pump.fun uses 30 SOL virtual reserve)
       const realSol = Math.max(0, vSolInBondingCurve - 30);
+
+      // Spike protection: reject wild jumps in curve fill from a single event.
+      // Prevents false -100% PnL (transient sell dip) and false 100% fill (anomalous data).
+      const prevSol = pos.last_curve_check_sol;
+      const solDelta = Math.abs(realSol - prevSol);
+      if (solDelta > 20 && prevSol > 0) {
+        logger.debug({
+          token: tokenMint.slice(0, 8),
+          prevSol: prevSol.toFixed(1),
+          newSol: realSol.toFixed(1),
+          delta: solDelta.toFixed(1),
+        }, 'Curve update spike rejected — single event too large');
+        return;
+      }
+
       pos.last_curve_check_sol = realSol;
       pos.current_curve_fill_pct = estimateCurveFillPct(realSol);
 
@@ -720,25 +780,25 @@ export class PumpFunTracker {
 
       // Hard exit at 85% — NEVER hold through graduation
       if (pos.current_curve_fill_pct >= cfg.curveHardExit) {
-        await this.closePosition(pos, `Curve hard exit (${(pos.current_curve_fill_pct * 100).toFixed(0)}% filled — pre-graduation exit) [realtime]`);
+        await this.closePosition(pos, 'Curve hard exit (pre-graduation)');
         return;
       }
 
       // PnL-based take profit at 25%
       if (pos.pnl_percent >= 0.25) {
-        await this.closePosition(pos, `Curve TP (${(pos.pnl_percent * 100).toFixed(0)}% PnL — taking profit) [realtime]`);
+        await this.closePosition(pos, 'Take profit');
         return;
       }
 
       // Curve fill TP at 75%
       if (pos.current_curve_fill_pct >= cfg.curveProfitTarget) {
-        await this.closePosition(pos, `Curve TP (${(pos.current_curve_fill_pct * 100).toFixed(0)}% filled — target hit) [realtime]`);
+        await this.closePosition(pos, 'Curve target hit');
         return;
       }
 
       // Stop loss based on curve regression
       if (pos.pnl_percent <= cfg.stopLoss) {
-        await this.closePosition(pos, `Pump.fun stop loss (${(pos.pnl_percent * 100).toFixed(1)}%) [realtime]`);
+        await this.closePosition(pos, 'Stop loss');
         return;
       }
     }

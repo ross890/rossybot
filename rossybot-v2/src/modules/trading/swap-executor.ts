@@ -95,32 +95,41 @@ export class SwapExecutor {
   }): Promise<SwapResult> {
     const { inputMint, outputMint, amount, slippageBps, isBuy } = params;
 
-    // Get priority fee estimate
-    const priorityFee = await this.getPriorityFee();
+    // Get priority fee + quote in parallel (independent calls)
+    const jupHeaders: Record<string, string> = {};
+    if (config.jupiter.apiKey) {
+      jupHeaders['x-api-key'] = config.jupiter.apiKey;
+    }
+
+    const [priorityFee, quoteResponse] = await Promise.all([
+      this.getPriorityFee(),
+      axios.get(`${config.jupiter.apiUrl}/quote`, {
+        params: {
+          inputMint,
+          outputMint,
+          amount: amount.toString(),
+          slippageBps,
+          onlyDirectRoutes: false,
+        },
+        headers: jupHeaders,
+        timeout: 10_000,
+      }),
+    ]);
 
     for (let attempt = 0; attempt <= config.jupiter.maxRetries; attempt++) {
       try {
         const currentPriorityFee = attempt === 0 ? priorityFee : priorityFee * 2;
 
-        // 1. Get quote
-        const jupHeaders: Record<string, string> = {};
-        if (config.jupiter.apiKey) {
-          jupHeaders['x-api-key'] = config.jupiter.apiKey;
+        // On retry, re-fetch quote (price may have moved)
+        let quote = quoteResponse.data;
+        if (attempt > 0) {
+          const retryQuote = await axios.get(`${config.jupiter.apiUrl}/quote`, {
+            params: { inputMint, outputMint, amount: amount.toString(), slippageBps, onlyDirectRoutes: false },
+            headers: jupHeaders,
+            timeout: 10_000,
+          });
+          quote = retryQuote.data;
         }
-
-        const quoteResponse = await axios.get(`${config.jupiter.apiUrl}/quote`, {
-          params: {
-            inputMint,
-            outputMint,
-            amount: amount.toString(),
-            slippageBps,
-            onlyDirectRoutes: false,
-          },
-          headers: jupHeaders,
-          timeout: 10_000,
-        });
-
-        const quote = quoteResponse.data;
         if (!quote || quote.error) {
           throw new Error(`Quote failed: ${quote?.error || 'no response'}`);
         }
@@ -142,22 +151,23 @@ export class SwapExecutor {
           throw new Error('No swap transaction returned');
         }
 
-        // 3. Deserialize, sign, and send
+        // 3. Deserialize, sign, send — skip preflight for speed (Jupiter already simulated)
         const txBuf = Buffer.from(swapTransaction, 'base64');
         const tx = VersionedTransaction.deserialize(txBuf);
         tx.sign([this.keypair]);
 
-        const preBalance = await this.connection.getBalance(this.keypair.publicKey);
-
-        const signature = await this.connection.sendTransaction(tx, {
-          skipPreflight: false,
-          maxRetries: 2,
-          preflightCommitment: 'confirmed',
-        });
+        // Fire send + blockhash fetch in parallel (blockhash needed for confirm, not for send)
+        const [signature, blockhash] = await Promise.all([
+          this.connection.sendTransaction(tx, {
+            skipPreflight: true,
+            maxRetries: 2,
+          }),
+          this.connection.getLatestBlockhash('confirmed'),
+        ]);
 
         // 4. Confirm transaction
         const confirmation = await this.connection.confirmTransaction(
-          { signature, ...(await this.connection.getLatestBlockhash()) },
+          { signature, ...blockhash },
           'confirmed',
         );
 
@@ -165,13 +175,7 @@ export class SwapExecutor {
           throw new Error(`Transaction failed on-chain: ${JSON.stringify(confirmation.value.err)}`);
         }
 
-        const postBalance = await this.connection.getBalance(this.keypair.publicKey);
-        const solDelta = (postBalance - preBalance) / LAMPORTS_PER_SOL;
-        const feesSol = isBuy
-          ? Math.abs(solDelta) - (amount / LAMPORTS_PER_SOL) // Extra cost beyond input = fees
-          : 0; // For sells, fee is embedded in output
-
-        // Estimate fees from priority fee + base fee
+        // Estimate fees from priority fee + base fee (skip pre/post balance RPC calls)
         const estimatedFees = (currentPriorityFee * 200_000 / 1e6 + 5000) / LAMPORTS_PER_SOL;
 
         logger.info({

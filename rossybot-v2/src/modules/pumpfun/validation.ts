@@ -62,11 +62,11 @@ export async function validatePumpFunSignal(
       { passed: false, reason: `Curve ${(curveFillPct * 100).toFixed(0)}% filled — too close to TP/exit zone` });
   }
 
-  // Reject if curve is too empty (<15%) — need existing momentum before we enter.
-  // Exception: allow if alpha is spending ≥2 SOL (strong conviction, they ARE the momentum).
+  // Reject if curve is too empty (<20%) — need existing momentum before we enter.
+  // No exceptions: entering too early = rug risk + instant graduation on fast fills.
   const solSpentAbs = Math.abs(signal.solDelta);
-  if (curveFillPct < 0.15 && solInCurve < 12 && solSpentAbs < 2.0) {
-    logger.info({ mint: mint.slice(0, 8), solInCurve, alphaSpent: solSpentAbs.toFixed(2) },
+  if (curveFillPct < 0.20) {
+    logger.info({ mint: mint.slice(0, 8), solInCurve, curveFillPct: (curveFillPct * 100).toFixed(1) },
       'Pump.fun REJECTED — curve too early, no momentum');
     return buildFail('CURVE_TOO_EARLY', curveFillPct, solInCurve,
       { passed: false, reason: `Only ${solInCurve.toFixed(2)} SOL in curve (${(curveFillPct * 100).toFixed(0)}%) — too early` });

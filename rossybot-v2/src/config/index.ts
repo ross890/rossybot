@@ -87,7 +87,7 @@ export const config = {
     curveProfitTarget: 0.75,           // Sell when curve hits 75% filled
     curveHardExit: 0.85,              // Force-exit at 85% — NEVER hold through graduation
     graduationSellPct: 100,            // Sell 100% on any graduation (no lottery holds)
-    minConvictionSol: 1.0,             // Alpha must spend ≥1.0 SOL
+    minConvictionSol: 0.30,            // Alpha must spend ≥0.30 SOL (pump.fun wallets typically buy 0.05-1.0)
     minCurveVelocity: 0.1,            // 0.1 SOL/min curve velocity
     maxTokenAgeMins: 15,               // Only tokens <15min old (was 30 — tighter, curve plays resolve fast)
     maxPositions: 3,                   // Max 3 pump.fun positions

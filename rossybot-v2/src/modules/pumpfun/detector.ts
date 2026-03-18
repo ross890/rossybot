@@ -89,8 +89,12 @@ export async function fetchCurveState(
  * Check if a token has graduated from pump.fun's bonding curve to a DEX.
  * Since March 2025, pump.fun migrates graduated tokens to PumpSwap (their own AMM)
  * instead of Raydium. We check for both PumpSwap and Raydium pairs on DexScreener.
+ *
+ * IMPORTANT: DexScreener lists bonding curve pairs as dexId='pumpfun' — these are NOT
+ * graduated tokens. Only 'pumpswap'/'pump_swap' (post-graduation AMM) and 'raydium'
+ * (legacy migration) indicate actual graduation.
  */
-export async function checkGraduation(tokenMint: string): Promise<{
+export async function checkGraduation(tokenMint: string, currentCurveFillPct?: number): Promise<{
   graduated: boolean;
   dexPairAddress?: string;
 }> {
@@ -102,14 +106,24 @@ export async function checkGraduation(tokenMint: string): Promise<{
 
     const pairs = resp.data?.pairs || [];
 
-    // Check PumpSwap first (current default), then Raydium (legacy)
+    // Only PumpSwap (post-graduation AMM) and Raydium (legacy) indicate real graduation.
+    // 'pumpfun' dexId = bonding curve pair, NOT graduated.
     const dexPair = pairs.find((p: { dexId: string }) =>
-      p.dexId === 'pumpswap' || p.dexId === 'pump_swap' || p.dexId === 'pumpfun',
+      p.dexId === 'pumpswap' || p.dexId === 'pump_swap',
     ) || pairs.find((p: { dexId: string }) =>
       p.dexId === 'raydium',
     );
 
     if (dexPair) {
+      // Safety net: if we know the curve is far from full, DexScreener is stale/wrong
+      if (currentCurveFillPct !== undefined && currentCurveFillPct < 0.70) {
+        logger.warn({
+          token: tokenMint.slice(0, 8),
+          dexId: dexPair.dexId,
+          curveFill: `${(currentCurveFillPct * 100).toFixed(0)}%`,
+        }, 'DexScreener says graduated but curve fill too low — ignoring false graduation');
+        return { graduated: false };
+      }
       return { graduated: true, dexPairAddress: dexPair.pairAddress };
     }
 

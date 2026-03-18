@@ -308,7 +308,7 @@ export class HoldTimeAnalyzer {
       const walletRow = await getOne<{ source: string; tier: string }>(
         `SELECT source, tier FROM alpha_wallets WHERE address = $1`, [profile.address],
       );
-      const isSeed = walletRow?.source === 'NANSEN_SEED';
+      const isSeed = walletRow?.source === 'NANSEN_SEED' || walletRow?.source === 'PUMPFUN_SEED';
 
       // === HARD CUTOFFS (quick-flip focus) ===
 

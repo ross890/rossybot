@@ -118,10 +118,12 @@ class RossyBotV2 {
   private pumpFunCurveCache: Map<string, { vSol: number; realSol: number; updatedAt: number }> = new Map();
 
   // Copy-trade stampede detection: count unique buyers per token from PumpPortal stream
-  // Key: tokenMint, Value: { buyers: Set<walletAddr>, firstBuyAt, totalSol }
-  private pumpFunBuyerTracker: Map<string, { buyers: Set<string>; firstBuyAt: number; totalSol: number }> = new Map();
+  // Key: tokenMint, Value: { buyers: Map<walletAddr, buyTimestamp>, firstBuyAt, totalSol }
+  private pumpFunBuyerTracker: Map<string, { buyers: Map<string, number>; firstBuyAt: number; totalSol: number }> = new Map();
   private static readonly STAMPEDE_WINDOW_MS = 60_000; // 60s window
-  private static readonly STAMPEDE_BUYER_THRESHOLD = 8; // >8 unique buyers = stampede
+  private static readonly STAMPEDE_BUYER_THRESHOLD = 20; // >20 unique (de-clustered) buyers = stampede
+  private static readonly STAMPEDE_CURVE_FLOOR = 0.50; // Only reject stampedes above 50% curve fill
+  private static readonly CLUSTER_BUCKET_MS = 2_000; // 2s window for grouping coordinated buys
 
   // In-memory wallet quality cache (avoids 50-150ms DB query per signal)
   private walletQualityCache: Map<string, {
@@ -333,15 +335,17 @@ class RossyBotV2 {
         });
       }
 
-      // Track unique buyers per token for stampede detection
+      // Track unique buyers per token for stampede detection (with timestamps for cluster analysis)
       if (trade.txType === 'buy') {
         const now = Date.now();
         let tracker = this.pumpFunBuyerTracker.get(trade.mint);
         if (!tracker || (now - tracker.firstBuyAt) > RossyBotV2.STAMPEDE_WINDOW_MS) {
-          tracker = { buyers: new Set(), firstBuyAt: now, totalSol: 0 };
+          tracker = { buyers: new Map(), firstBuyAt: now, totalSol: 0 };
           this.pumpFunBuyerTracker.set(trade.mint, tracker);
         }
-        tracker.buyers.add(trade.traderPublicKey);
+        if (!tracker.buyers.has(trade.traderPublicKey)) {
+          tracker.buyers.set(trade.traderPublicKey, now);
+        }
         // Estimate SOL from vSol change (rough but fast)
         tracker.totalSol += Math.max(0, trade.vSolInBondingCurve - 30 - (this.pumpFunCurveCache.get(trade.mint)?.realSol || 0));
       }
@@ -1122,27 +1126,66 @@ class RossyBotV2 {
       // Multi-wallet confluence still gets a size bonus (see confluenceMultiplier below).
       const confluenceCount = confluence.wallets.size;
 
-      // Stampede detection: if too many unique buyers already, we're joining a crowded trade
+      // Stampede detection: curve-aware + cluster de-duplication
+      // Early stampedes (curve <50%) are bullish momentum, not crowded trades.
+      // Also discount "unique" buyers that are really coordinated bots (same 2s window clusters).
       const buyerTracker = this.pumpFunBuyerTracker.get(mint);
       if (buyerTracker && buyerTracker.buyers.size >= RossyBotV2.STAMPEDE_BUYER_THRESHOLD) {
-        logger.info({
-          token: mint.slice(0, 8),
-          uniqueBuyers: buyerTracker.buyers.size,
-          wallet: walletLabel,
-        }, 'Pump.fun REJECTED — copy-trade stampede detected');
-        this.pumpFunRejectionCache.set(mint, {
-          reason: 'STAMPEDE',
-          expiresAt: Date.now() + RossyBotV2.PUMP_FUN_REJECTION_TTL_MS,
-        });
-        await this.telegram.send(
-          `🎰 PUMP.FUN rejected: ${mint.slice(0, 8)}\n` +
-          `├ Wallet: ${walletLabel}\n` +
-          `├ Reason: STAMPEDE (${buyerTracker.buyers.size} unique buyers in 60s)\n` +
-          `├ SOL spent: ${solSpent.toFixed(2)}\n` +
-          `└ <a href="https://pump.fun/coin/${mint}">pump.fun</a> · <a href="https://dexscreener.com/solana/${mint}">dex</a>`,
-          { parse_mode: 'HTML' },
-        );
-        return;
+        // Check curve fill — stampede at low curve fill is momentum, not danger
+        const curveData = this.pumpFunCurveCache.get(mint);
+        const realSol = curveData?.realSol ?? 0;
+        const curveFill = realSol / 85; // 85 SOL = graduation threshold
+        if (curveFill >= RossyBotV2.STAMPEDE_CURVE_FLOOR) {
+          // De-cluster: bucket buyers into 2s windows, count only distinct time clusters
+          const buckets = new Map<number, number>();
+          for (const [, buyTime] of buyerTracker.buyers) {
+            const bucket = Math.floor(buyTime / RossyBotV2.CLUSTER_BUCKET_MS);
+            buckets.set(bucket, (buckets.get(bucket) || 0) + 1);
+          }
+          // Effective unique buyers = number of time clusters + solo buyers in large clusters
+          // A bucket with >3 buyers in 2s is likely coordinated — count it as 1 "buyer group"
+          let effectiveBuyers = 0;
+          for (const count of buckets.values()) {
+            effectiveBuyers += count <= 3 ? count : 1;
+          }
+
+          if (effectiveBuyers >= RossyBotV2.STAMPEDE_BUYER_THRESHOLD) {
+            logger.info({
+              token: mint.slice(0, 8),
+              rawBuyers: buyerTracker.buyers.size,
+              effectiveBuyers,
+              curveFill: `${(curveFill * 100).toFixed(0)}%`,
+              clusters: buckets.size,
+              wallet: walletLabel,
+            }, 'Pump.fun REJECTED — stampede (curve-aware, de-clustered)');
+            this.pumpFunRejectionCache.set(mint, {
+              reason: 'STAMPEDE',
+              expiresAt: Date.now() + RossyBotV2.PUMP_FUN_REJECTION_TTL_MS,
+            });
+            await this.telegram.send(
+              `🎰 PUMP.FUN rejected: ${mint.slice(0, 8)}\n` +
+              `├ Wallet: ${walletLabel}\n` +
+              `├ Reason: STAMPEDE (${effectiveBuyers} effective / ${buyerTracker.buyers.size} raw buyers, curve ${(curveFill * 100).toFixed(0)}%)\n` +
+              `├ SOL spent: ${solSpent.toFixed(2)}\n` +
+              `└ <a href="https://pump.fun/coin/${mint}">pump.fun</a> · <a href="https://dexscreener.com/solana/${mint}">dex</a>`,
+              { parse_mode: 'HTML' },
+            );
+            return;
+          } else {
+            logger.info({
+              token: mint.slice(0, 8),
+              rawBuyers: buyerTracker.buyers.size,
+              effectiveBuyers,
+              curveFill: `${(curveFill * 100).toFixed(0)}%`,
+            }, 'Stampede de-clustered — passing (bots inflated count)');
+          }
+        } else {
+          logger.info({
+            token: mint.slice(0, 8),
+            rawBuyers: buyerTracker.buyers.size,
+            curveFill: `${(curveFill * 100).toFixed(0)}%`,
+          }, 'Stampede bypassed — curve too early for rejection, momentum is bullish');
+        }
       }
 
       // Calculate position size early (needed for parallel quote)

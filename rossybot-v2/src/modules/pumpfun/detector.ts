@@ -1,8 +1,22 @@
 import axios from 'axios';
+import { PublicKey } from '@solana/web3.js';
 import { config } from '../../config/index.js';
 import { logger } from '../../utils/logger.js';
 
 const PUMP_FUN_PROGRAM = config.pumpFun.programId;
+const PUMP_FUN_PROGRAM_KEY = new PublicKey(PUMP_FUN_PROGRAM);
+
+/**
+ * Derive the bonding curve PDA for a pump.fun token.
+ * This is deterministic and always correct, unlike heuristic account-key parsing.
+ */
+export function deriveBondingCurveAddress(tokenMint: string): string {
+  const [pda] = PublicKey.findProgramAddressSync(
+    [Buffer.from('bonding-curve'), new PublicKey(tokenMint).toBuffer()],
+    PUMP_FUN_PROGRAM_KEY,
+  );
+  return pda.toBase58();
+}
 
 /**
  * Check if a transaction interacts with the pump.fun bonding curve program.
@@ -10,18 +24,35 @@ const PUMP_FUN_PROGRAM = config.pumpFun.programId;
  */
 export function detectPumpFunInteraction(
   accountKeys: Array<{ pubkey: string; signer: boolean; writable: boolean }>,
+  tokenMint?: string,
 ): string | null {
   // The pump.fun program ID must appear in the account keys
   const programIdx = accountKeys.findIndex((k) => k.pubkey === PUMP_FUN_PROGRAM);
   if (programIdx === -1) return null;
 
-  // The bonding curve account is typically the first writable non-signer after the program
-  // In pump.fun buy transactions: [user, bondingCurve, ..., program]
-  // Find the first writable non-signer that isn't the program itself
+  // If we know the token mint, derive the exact PDA (100% reliable)
+  if (tokenMint) {
+    try {
+      return deriveBondingCurveAddress(tokenMint);
+    } catch {
+      // Fall through to heuristic
+    }
+  }
+
+  // Fallback heuristic: first writable non-signer that isn't a known program
+  const KNOWN_PROGRAMS = new Set([
+    PUMP_FUN_PROGRAM,
+    'TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA',  // Token Program
+    'ATokenGPvbdGVxr1b2hvZbsiqW5xWH25efTNsLJA8knL', // Associated Token Program
+    '11111111111111111111111111111111',                 // System Program
+    'SysvarRent111111111111111111111111111111111',      // Rent
+    'So11111111111111111111111111111111111111112',      // Wrapped SOL
+  ]);
+
   for (const key of accountKeys) {
-    if (key.pubkey === PUMP_FUN_PROGRAM) continue;
+    if (KNOWN_PROGRAMS.has(key.pubkey)) continue;
     if (key.writable && !key.signer) {
-      return key.pubkey; // bonding curve account
+      return key.pubkey;
     }
   }
 

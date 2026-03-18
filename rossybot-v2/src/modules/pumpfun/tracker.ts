@@ -301,7 +301,7 @@ export class PumpFunTracker {
 
   // Track last graduation check time per position to throttle DexScreener API calls
   private lastGradCheckAt: Map<string, number> = new Map();
-  private static readonly GRAD_CHECK_INTERVAL_MS = 10_000; // Check graduation every 10s (safety net if curve TP missed)
+  private static readonly GRAD_CHECK_INTERVAL_MS = 5_000; // Check graduation every 5s — must beat the 85% curve exit
 
   /** Check a pre-graduation position on the bonding curve — CURVE SCALP STRATEGY */
   private async checkCurvePosition(pos: PumpFunPosition): Promise<void> {

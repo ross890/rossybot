@@ -9,13 +9,17 @@ import type { PumpPortalTrade } from './pumpportal-client.js';
  */
 interface WalletTracker {
   address: string;
-  /** Token mint → buy entry { mcapSol, vSol, timestamp } */
-  openBuys: Map<string, { mcapSol: number; vSol: number; timestamp: number }>;
+  /** Token mint → buy entry { mcapSol, vSol, timestamp, solSpent } */
+  openBuys: Map<string, { mcapSol: number; vSol: number; timestamp: number; solSpent: number }>;
   totalBuys: number;
   totalSells: number;
   wins: number;
   losses: number;
   totalPnlPct: number;
+  /** Sum of hold times (ms) for closed trades — used to calc avg hold */
+  totalHoldTimeMs: number;
+  /** All buy sizes in SOL — used to calculate median buy size */
+  buySizes: number[];
   firstSeen: number;
   lastSeen: number;
   /** Already promoted to alpha_wallets */
@@ -41,11 +45,13 @@ export class PumpFunAlphaDiscovery {
 
   // --- Promotion thresholds ---
   /** Minimum completed round-trips to evaluate */
-  private static readonly MIN_TRADES = 3;
+  private static readonly MIN_TRADES = 5;
   /** Minimum win rate to promote */
-  private static readonly MIN_WIN_RATE = 0.55;
+  private static readonly MIN_WIN_RATE = 0.60;
   /** Minimum average PnL % per trade */
   private static readonly MIN_AVG_PNL = 0.10; // 10%
+  /** Max average hold time (ms) — reject bag-holders at discovery time */
+  private static readonly MAX_AVG_HOLD_MS = 30 * 60 * 1000; // 30 minutes
   /** Max wallets to track in memory (evict oldest) */
   private static readonly MAX_TRACKED = 10_000;
   /** Evict wallets not seen in this many ms */
@@ -91,6 +97,8 @@ export class PumpFunAlphaDiscovery {
         wins: 0,
         losses: 0,
         totalPnlPct: 0,
+        totalHoldTimeMs: 0,
+        buySizes: [],
         firstSeen: Date.now(),
         lastSeen: Date.now(),
         promoted: false,
@@ -102,12 +110,18 @@ export class PumpFunAlphaDiscovery {
 
     if (trade.txType === 'buy') {
       tracker.totalBuys++;
+      // Estimate SOL spent from vSol change (PumpPortal doesn't give exact SOL amount)
+      const estimatedSolSpent = trade.vSolInBondingCurve > 30
+        ? Math.max(0.01, (trade.vSolInBondingCurve - 30) * 0.05) // rough estimate: ~5% of real curve balance
+        : 0.1;
+      tracker.buySizes.push(estimatedSolSpent);
       // Record entry point for this token
       if (!tracker.openBuys.has(mint)) {
         tracker.openBuys.set(mint, {
           mcapSol: trade.marketCapSol,
           vSol: trade.vSolInBondingCurve,
           timestamp: Date.now(),
+          solSpent: estimatedSolSpent,
         });
       }
     } else if (trade.txType === 'sell') {
@@ -118,6 +132,9 @@ export class PumpFunAlphaDiscovery {
         const pnlPct = entry.mcapSol > 0
           ? (trade.marketCapSol - entry.mcapSol) / entry.mcapSol
           : 0;
+
+        // Track hold time for avg hold calculation
+        tracker.totalHoldTimeMs += Date.now() - entry.timestamp;
 
         if (pnlPct > 0) {
           tracker.wins++;
@@ -145,6 +162,10 @@ export class PumpFunAlphaDiscovery {
     if (winRate < PumpFunAlphaDiscovery.MIN_WIN_RATE) return;
     if (avgPnl < PumpFunAlphaDiscovery.MIN_AVG_PNL) return;
 
+    // Reject bag-holders: avg hold time must be under threshold
+    const avgHoldMs = tracker.totalHoldTimeMs / completedTrades;
+    if (avgHoldMs > PumpFunAlphaDiscovery.MAX_AVG_HOLD_MS) return;
+
     // Check if already in alpha_wallets
     const existing = await getOne<{ address: string }>(
       `SELECT address FROM alpha_wallets WHERE address = $1`,
@@ -160,11 +181,18 @@ export class PumpFunAlphaDiscovery {
     tracker.promoted = true;
     const label = `pf_alpha_${tracker.address.slice(0, 6)}`;
 
+    // Calculate median buy size
+    const sortedSizes = [...tracker.buySizes].sort((a, b) => a - b);
+    const medianBuySize = sortedSizes.length > 0
+      ? sortedSizes[Math.floor(sortedSizes.length / 2)]
+      : 0;
+    const avgHoldMins = Math.round(avgHoldMs / 60_000);
+
     try {
       await query(
         `INSERT INTO alpha_wallets (address, label, source, tier, active, helius_subscribed, pumpfun_only,
-           our_total_trades, our_win_rate, our_avg_pnl_percent)
-         VALUES ($1, $2, $3, $4, TRUE, FALSE, TRUE, $5, $6, $7)
+           our_total_trades, our_win_rate, our_avg_pnl_percent, avg_buy_size_sol)
+         VALUES ($1, $2, $3, $4, TRUE, FALSE, TRUE, $5, $6, $7, $8)
          ON CONFLICT (address) DO NOTHING`,
         [
           tracker.address,
@@ -174,6 +202,7 @@ export class PumpFunAlphaDiscovery {
           completedTrades,
           winRate,
           avgPnl,
+          medianBuySize,
         ],
       );
 
@@ -182,6 +211,8 @@ export class PumpFunAlphaDiscovery {
         trades: completedTrades,
         winRate: `${(winRate * 100).toFixed(0)}%`,
         avgPnl: `${(avgPnl * 100).toFixed(1)}%`,
+        avgHoldMins,
+        medianBuySol: medianBuySize.toFixed(2),
       }, 'NEW pump.fun alpha wallet discovered via PumpPortal');
 
       this.onNewAlpha?.(tracker.address);

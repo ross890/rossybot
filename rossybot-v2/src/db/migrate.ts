@@ -80,6 +80,18 @@ async function migrate() {
     END $$
   `);
 
+  // Add avg_buy_size_sol column — tracks wallet's typical buy size for relative conviction filtering
+  await pool.query(`
+    DO $$ BEGIN
+      IF NOT EXISTS (
+        SELECT 1 FROM information_schema.columns
+        WHERE table_name = 'alpha_wallets' AND column_name = 'avg_buy_size_sol'
+      ) THEN
+        ALTER TABLE alpha_wallets ADD COLUMN avg_buy_size_sol DECIMAL DEFAULT 0;
+      END IF;
+    END $$
+  `);
+
   // 2. wallet_transactions
   await pool.query(`
     CREATE TABLE IF NOT EXISTS wallet_transactions (

@@ -105,6 +105,12 @@ class RossyBotV2 {
   // Throttle "slots full" Telegram messages — at most once per 2 minutes
   private lastSlotsFullMsgAt = 0;
 
+  // WS slot productivity tracking: wallet address → signal count since last rotation
+  private wsSignalCounts: Map<string, number> = new Map();
+  private wsRotationInterval: ReturnType<typeof setInterval> | null = null;
+  private static readonly WS_ROTATION_INTERVAL_MS = 10 * 60_000; // Rotate every 10 min
+  private static readonly WS_MIN_SIGNALS_FOR_KEEP = 1; // Must produce ≥1 signal per rotation window
+
   // Pump.fun confluence tracking: multiple alpha wallets buying the same token
   private pumpFunConfluence: Map<string, { wallets: Set<string>; totalSol: number; firstSeen: number }> = new Map();
 
@@ -128,7 +134,8 @@ class RossyBotV2 {
   // In-memory wallet quality cache (avoids 50-150ms DB query per signal)
   private walletQualityCache: Map<string, {
     label: string; our_total_trades: number; our_win_rate: number;
-    our_avg_pnl_percent: number; consecutive_losses: number; cachedAt: number;
+    our_avg_pnl_percent: number; consecutive_losses: number;
+    avg_buy_size_sol: number; cachedAt: number;
   } | null> = new Map();
   private static readonly WALLET_QUALITY_CACHE_TTL_MS = 30 * 60_000; // 30 min
 
@@ -403,6 +410,9 @@ class RossyBotV2 {
       console.error('Initial discovery failed:', err),
     );
 
+    // 9b. Start WS slot rotation — evict zero-signal wallets, promote better candidates
+    this.startWsRotation();
+
     // 10. Start Telegram bot polling
     await this.telegram.startPolling();
 
@@ -425,6 +435,10 @@ class RossyBotV2 {
         const tierCfg = getTierConfig(this.capitalManager.tier);
 
         for (const signal of signals) {
+          // Track WS signal productivity for slot rotation
+          const prevCount = this.wsSignalCounts.get(signal.walletAddress) || 0;
+          this.wsSignalCounts.set(signal.walletAddress, prevCount + 1);
+
           // Look up wallet info (label + stats) for noise filtering
           const walletRow = await (await import('./db/database.js')).getOne<{
             label: string; pumpfun_only: boolean;
@@ -1093,9 +1107,10 @@ class RossyBotV2 {
         // Cache miss — fetch from DB and cache
         const dbRow = await (await import('./db/database.js')).getOne<{
           label: string; our_total_trades: number; our_win_rate: number;
-          our_avg_pnl_percent: number; consecutive_losses: number;
+          our_avg_pnl_percent: number; consecutive_losses: number; avg_buy_size_sol: number;
         }>(
-          `SELECT label, our_total_trades, our_win_rate, our_avg_pnl_percent, consecutive_losses
+          `SELECT label, our_total_trades, our_win_rate, our_avg_pnl_percent, consecutive_losses,
+                  COALESCE(avg_buy_size_sol, 0) as avg_buy_size_sol
            FROM alpha_wallets WHERE address = $1`, [signal.walletAddress],
         );
         walletRow = dbRow ? { ...dbRow, cachedAt: Date.now() } : null;
@@ -1115,11 +1130,11 @@ class RossyBotV2 {
       }
       const walletLabel = walletRow?.label || signal.walletAddress.slice(0, 8);
 
-      // Skip wallets with proven bad track records (3+ trades, <25% WR or 3+ consecutive losses)
+      // Skip wallets with proven bad track records (3+ trades, <30% WR or 2+ consecutive losses)
       if (walletRow && walletRow.our_total_trades >= 3) {
         const wr = walletRow.our_win_rate;
         const consLosses = walletRow.consecutive_losses || 0;
-        if (wr < 0.25 || consLosses >= 3) {
+        if (wr < 0.30 || consLosses >= 2) {
           logger.info({
             token: mint.slice(0, 8), wallet: walletLabel,
             winRate: `${(wr * 100).toFixed(0)}%`, consLosses,
@@ -1130,6 +1145,37 @@ class RossyBotV2 {
           );
           return;
         }
+      }
+
+      // Update wallet's avg buy size from observed buys (exponential moving average)
+      // This builds up the avg_buy_size_sol over time from real observations
+      if (solSpent >= config.pumpFun.minConvictionSol) {
+        const currentAvg = walletRow?.avg_buy_size_sol || 0;
+        const { query: dbQuery } = await import('./db/database.js');
+        if (currentAvg === 0) {
+          // First observation — set directly
+          dbQuery(`UPDATE alpha_wallets SET avg_buy_size_sol = $1 WHERE address = $2`,
+            [solSpent, signal.walletAddress]).catch(() => {});
+          if (walletRow) walletRow.avg_buy_size_sol = solSpent;
+        } else {
+          // EMA: weight new observation 20%, keep 80% of historical
+          const newAvg = currentAvg * 0.8 + solSpent * 0.2;
+          dbQuery(`UPDATE alpha_wallets SET avg_buy_size_sol = $1 WHERE address = $2`,
+            [newAvg, signal.walletAddress]).catch(() => {});
+          if (walletRow) walletRow.avg_buy_size_sol = newAvg;
+        }
+      }
+
+      // Relative conviction check: if wallet has a known avg buy size and this buy
+      // is less than 30% of their typical size, it's a throwaway/spray buy — skip it.
+      const avgBuySize = walletRow?.avg_buy_size_sol || 0;
+      if (avgBuySize > 0 && solSpent < avgBuySize * 0.30) {
+        logger.info({
+          token: mint.slice(0, 8), wallet: walletLabel,
+          solSpent: solSpent.toFixed(2), avgBuy: avgBuySize.toFixed(2),
+          ratio: `${((solSpent / avgBuySize) * 100).toFixed(0)}%`,
+        }, 'Pump.fun REJECTED — buy far below wallet avg (low relative conviction)');
+        return;
       }
 
       // Confluence tracking: single wallet is enough now that exits work properly.
@@ -1324,6 +1370,88 @@ class RossyBotV2 {
     } catch (err) {
       logger.error({ err }, 'Failed to log alpha exit');
     }
+  }
+
+  /**
+   * WS slot rotation: evict wallets producing zero signals and replace with
+   * higher-scoring unsubscribed wallets. Runs every 10 minutes.
+   */
+  private startWsRotation(): void {
+    this.wsRotationInterval = setInterval(() => this.rotateWsSlots().catch(
+      (err) => logger.error({ err }, 'WS rotation failed'),
+    ), RossyBotV2.WS_ROTATION_INTERVAL_MS);
+    logger.info('WS slot rotation started (every 10 min)');
+  }
+
+  private async rotateWsSlots(): Promise<void> {
+    const tierCfg = getTierConfig(this.capitalManager.tier);
+    const maxSlots = tierCfg.walletsMonitored;
+
+    // Find zero-signal wallets currently holding WS slots (exclude first 10 min after startup)
+    const deadWeight: string[] = [];
+    for (const addr of this.walletAddresses) {
+      const count = this.wsSignalCounts.get(addr) || 0;
+      if (count < RossyBotV2.WS_MIN_SIGNALS_FOR_KEEP) {
+        deadWeight.push(addr);
+      }
+    }
+
+    if (deadWeight.length === 0) {
+      // Reset counters for next window
+      this.wsSignalCounts.clear();
+      return;
+    }
+
+    // Get current ranked wallets to find better candidates
+    const isPfOnly = this.capitalManager.capital < config.minCapitalForStandardTrading;
+    const rankedWallets = await this.walletDiscovery.getActiveWallets(isPfOnly);
+
+    // Find unsubscribed wallets that rank higher than dead weight
+    const subscribedSet = new Set(this.walletAddresses);
+    const candidates = rankedWallets.filter((w) => !subscribedSet.has(w));
+
+    if (candidates.length === 0) {
+      this.wsSignalCounts.clear();
+      return;
+    }
+
+    // Evict up to half the dead-weight wallets per rotation (gradual, not aggressive)
+    const maxEvictions = Math.max(1, Math.floor(deadWeight.length / 2));
+    const toEvict = deadWeight.slice(0, maxEvictions);
+    const toAdd = candidates.slice(0, toEvict.length);
+
+    for (let i = 0; i < toEvict.length && i < toAdd.length; i++) {
+      const evictAddr = toEvict[i];
+      const addAddr = toAdd[i];
+
+      // Remove old wallet from WS
+      this.walletAddresses = this.walletAddresses.filter((a) => a !== evictAddr);
+      this.txParser.removeWallet(evictAddr);
+      this.wsManager.removeWallet(evictAddr);
+
+      // Add new wallet to WS
+      this.walletAddresses.push(addAddr);
+      this.txParser.addWallet(addAddr);
+      await this.wsManager.addWallet(addAddr);
+
+      logger.info({
+        evicted: evictAddr.slice(0, 8),
+        added: addAddr.slice(0, 8),
+        signals: this.wsSignalCounts.get(evictAddr) || 0,
+      }, 'WS slot rotated — evicted zero-signal wallet');
+    }
+
+    if (toEvict.length > 0) {
+      logger.info({
+        evicted: toEvict.length,
+        added: toAdd.length,
+        totalSlots: this.walletAddresses.length,
+        maxSlots,
+      }, 'WS rotation complete');
+    }
+
+    // Reset counters for next window
+    this.wsSignalCounts.clear();
   }
 
   private scheduleDailySummary(): void {

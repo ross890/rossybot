@@ -55,6 +55,11 @@ export class PumpFunTracker {
   private onSwapFailed: ((tokenSymbol: string, error: string, type: 'BUY' | 'SELL') => void) | null = null;
   private onBalanceRefresh: (() => Promise<void>) | null = null;
 
+  // Cumulative alpha sell tracking: positionId → total SOL sold by signal wallets
+  private alphaExitAccumulator: Map<string, number> = new Map();
+  private static readonly ALPHA_EXIT_SINGLE_THRESHOLD = 0.5; // Single dump ≥0.5 SOL triggers exit
+  private static readonly ALPHA_EXIT_CUMULATIVE_THRESHOLD = 1.0; // Cumulative sells ≥1.0 SOL triggers exit
+
   // Live trading: when set, executes real swaps via Jupiter
   private swapExecutor: SwapExecutor | null = null;
 
@@ -339,16 +344,33 @@ export class PumpFunTracker {
         continue;
       }
 
-      // Use SOL received to gauge sell significance.
-      // Small take-profits (<1 SOL) are normal — only exit on significant dumps.
       const absSol = Math.abs(solReceived);
-      if (absSol < 1.0) {
-        logger.info({ token: pos.token_symbol || tokenMint.slice(0, 8), wallet: walletAddress.slice(0, 8), solReceived: absSol.toFixed(2) },
-          'Pump.fun signal wallet took small profit — holding');
+
+      // Single large dump — exit immediately
+      if (absSol >= PumpFunTracker.ALPHA_EXIT_SINGLE_THRESHOLD) {
+        this.alphaExitAccumulator.delete(pos.id);
+        await this.closePosition(pos, `Alpha exit on curve: ${walletAddress.slice(0, 8)} dumped ${absSol.toFixed(1)} SOL`);
         continue;
       }
 
-      await this.closePosition(pos, `Alpha exit on curve: ${walletAddress.slice(0, 8)} dumped ${absSol.toFixed(1)} SOL`);
+      // Accumulate smaller sells — alpha may be unwinding incrementally
+      const prevCumulative = this.alphaExitAccumulator.get(pos.id) || 0;
+      const newCumulative = prevCumulative + absSol;
+      this.alphaExitAccumulator.set(pos.id, newCumulative);
+
+      if (newCumulative >= PumpFunTracker.ALPHA_EXIT_CUMULATIVE_THRESHOLD) {
+        this.alphaExitAccumulator.delete(pos.id);
+        await this.closePosition(pos, `Alpha incremental exit: ${walletAddress.slice(0, 8)} sold ${newCumulative.toFixed(2)} SOL total`);
+        continue;
+      }
+
+      logger.info({
+        token: pos.token_symbol || tokenMint.slice(0, 8),
+        wallet: walletAddress.slice(0, 8),
+        thisSell: absSol.toFixed(2),
+        cumulative: newCumulative.toFixed(2),
+        threshold: PumpFunTracker.ALPHA_EXIT_CUMULATIVE_THRESHOLD,
+      }, 'Pump.fun signal wallet partial sell — tracking cumulative');
     }
   }
 
@@ -642,6 +664,7 @@ export class PumpFunTracker {
     this.onPositionClosed?.(pos);
     this.positions.delete(pos.id);
     this.lastGradCheckAt.delete(pos.id);
+    this.alphaExitAccumulator.delete(pos.id);
 
     // Refresh wallet balance after sell
     if (this.swapExecutor && this.onBalanceRefresh) {

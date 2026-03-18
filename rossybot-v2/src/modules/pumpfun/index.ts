@@ -3,3 +3,4 @@ export { validatePumpFunSignal, type PumpFunValidationResult } from './validatio
 export { PumpFunTracker, type PumpFunPosition } from './tracker.js';
 export { PumpPortalClient, type PumpPortalTrade } from './pumpportal-client.js';
 export { PumpFunAlphaDiscovery } from './alpha-discovery.js';
+export { MoversTracker, type MoverToken } from './movers-tracker.js';

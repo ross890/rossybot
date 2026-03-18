@@ -79,7 +79,7 @@ export const config = {
   minCapitalForStandardTrading: 5.0, // 5 SOL
   pumpFun: {
     programId: '6EF8rrecthR5Dkzon8Nwu78hRvfCKubJ14M5uBEwF6P',
-    positionSizeMultiplier: 0.75,      // 75% of normal tier sizing
+    positionSizeMultiplier: 1.20,      // 120% of normal tier sizing — tighter entry/exit controls justify bigger bets
     staleTimeKillMins: 5,              // Exit if no movement in 5 min (curve fills are fast or DOA)
     stopLoss: -0.20,                   // 20% stop loss
     hardKill: -0.25,                   // 25% hard kill

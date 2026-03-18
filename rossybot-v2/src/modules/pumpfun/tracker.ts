@@ -84,7 +84,7 @@ export class PumpFunTracker {
 
   start(): void {
     // Check every 5 seconds (faster than standard 10s — pump.fun moves fast)
-    this.checkInterval = setInterval(() => this.checkPositions(), 5000);
+    this.checkInterval = setInterval(() => this.checkPositions(), 2000);
     // Scan wallet balances every 60s to detect manual sells and free up slots
     if (this.swapExecutor) {
       this.balanceScanInterval = setInterval(() => this.scanWalletBalances(), 60_000);
@@ -301,7 +301,7 @@ export class PumpFunTracker {
 
   // Track last graduation check time per position to throttle DexScreener API calls
   private lastGradCheckAt: Map<string, number> = new Map();
-  private static readonly GRAD_CHECK_INTERVAL_MS = 5_000; // Check graduation every 5s — must beat the 85% curve exit
+  private static readonly GRAD_CHECK_INTERVAL_MS = 2_000; // Check graduation every 2s — must beat the 85% curve exit
 
   /** Check a pre-graduation position on the bonding curve — CURVE SCALP STRATEGY */
   private async checkCurvePosition(pos: PumpFunPosition): Promise<void> {
@@ -334,7 +334,13 @@ export class PumpFunTracker {
           return;
         }
 
-        // 2b. Curve profit target — sell at 75% curve fill
+        // 2b. PnL-based take profit — lock in 25% gain (don't get greedy)
+        if (pos.pnl_percent >= 0.25) {
+          await this.closePosition(pos, `Curve TP (${(pos.pnl_percent * 100).toFixed(0)}% PnL — taking profit)`);
+          return;
+        }
+
+        // 2c. Curve fill TP fallback — sell at 75% curve fill regardless of PnL calc
         if (pos.current_curve_fill_pct >= cfg.curveProfitTarget) {
           await this.closePosition(pos, `Curve TP (${(pos.current_curve_fill_pct * 100).toFixed(0)}% filled — target hit)`);
           return;
@@ -448,12 +454,12 @@ export class PumpFunTracker {
       logger.info({ token: tokenName, reason }, 'Pump.fun LIVE SELL — executing swap');
 
       // Use pump.fun slippage as base, higher for post-graduation (price volatile after migration)
-      // Pre-grad: 500→800→1100 bps | Post-grad: 1200→1500 bps (start high, routes are thin)
-      const baseSlippage = pos.graduated ? 1200 : config.pumpFun.slippageBps;
+      // Pre-grad: 500→700→900 bps | Post-grad: 800→1000→1200 bps (tighter to preserve profit)
+      const baseSlippage = pos.graduated ? 800 : config.pumpFun.slippageBps;
       const retryCount = pos.sell_retry_count || 0;
       const slippageBps = retryCount === 0
         ? baseSlippage
-        : Math.min(baseSlippage + retryCount * 300, 2000); // Cap at 20%
+        : Math.min(baseSlippage + retryCount * 200, 1500); // Cap at 15% (was 20%)
 
       const pair = await fetchDexPair(pos.token_address);
       const liquidityUsd = pair?.liquidity?.usd || 0;

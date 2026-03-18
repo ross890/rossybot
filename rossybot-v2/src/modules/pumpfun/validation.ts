@@ -54,12 +54,12 @@ export async function validatePumpFunSignal(
     }
   }
 
-  // Reject if curve is already >95% filled (too close to graduation, better to wait for Raydium)
-  if (curveFillPct > 0.95) {
+  // Reject if curve is already >65% filled — need room for 75% TP / 85% hard exit
+  if (curveFillPct > 0.65) {
     logger.info({ mint: mint.slice(0, 8), curveFillPct: (curveFillPct * 100).toFixed(1) },
-      'Pump.fun REJECTED — curve nearly graduated, wait for Raydium');
+      'Pump.fun REJECTED — curve too far along, no room for scalp');
     return buildFail('CURVE_NEARLY_GRADUATED', curveFillPct, solInCurve,
-      { passed: false, reason: `Curve ${(curveFillPct * 100).toFixed(0)}% filled — too close to graduation` });
+      { passed: false, reason: `Curve ${(curveFillPct * 100).toFixed(0)}% filled — too close to TP/exit zone` });
   }
 
   // Reject if curve is too empty (<15%) — need existing momentum before we enter.

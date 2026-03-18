@@ -319,10 +319,16 @@ class RossyBotV2 {
 
     // 8c. Start PumpPortal — real-time pump.fun trade stream for alpha wallet discovery
     this.pumpFunAlphaDiscovery.setNewAlphaCallback((address) => {
-      // Auto-subscribe new pump.fun alpha wallets to Helius WS
-      this.txParser.addWallet(address);
-      this.wsManager.addWallet(address);
-      logger.info({ address: address.slice(0, 8) }, 'PumpPortal alpha discovered — added to Helius WS');
+      // Respect WS slot cap — only subscribe if we have room
+      const tierCfg = getTierConfig(this.capitalManager.tier);
+      if (this.walletAddresses.length < tierCfg.walletsMonitored) {
+        this.walletAddresses.push(address);
+        this.txParser.addWallet(address);
+        this.wsManager.addWallet(address);
+        logger.info({ address: address.slice(0, 8), total: this.walletAddresses.length }, 'PumpPortal alpha discovered — added to Helius WS');
+      } else {
+        logger.info({ address: address.slice(0, 8) }, 'PumpPortal alpha discovered — WS slots full, added for on-chain confluence only');
+      }
     });
     this.pumpFunAlphaDiscovery.start();
 
@@ -467,10 +473,6 @@ class RossyBotV2 {
         const tierCfg = getTierConfig(this.capitalManager.tier);
 
         for (const signal of signals) {
-          // Track WS signal productivity for slot rotation
-          const prevCount = this.wsSignalCounts.get(signal.walletAddress) || 0;
-          this.wsSignalCounts.set(signal.walletAddress, prevCount + 1);
-
           // Look up wallet info (label + stats) for noise filtering
           const walletRow = await (await import('./db/database.js')).getOne<{
             label: string; pumpfun_only: boolean;
@@ -490,6 +492,10 @@ class RossyBotV2 {
           const isPumpFunOnly = walletRow?.pumpfun_only === true;
 
           if (signal.type === SignalType.BUY) {
+            // Track actionable signal for WS rotation (only count buys that reach handlers)
+            const actionCount = this.wsSignalCounts.get(signal.walletAddress) || 0;
+            this.wsSignalCounts.set(signal.walletAddress, actionCount + 1);
+
             if (signal.isPumpFun) {
               await this.handlePumpFunBuy(signal);
               // Also subscribe PumpPortal to this token's trades — alpha discovery

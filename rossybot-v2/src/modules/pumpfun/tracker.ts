@@ -378,7 +378,7 @@ export class PumpFunTracker {
 
     if (shouldCheckGrad) {
       this.lastGradCheckAt.set(pos.id, now);
-      const graduation = await checkGraduation(pos.token_address);
+      const graduation = await checkGraduation(pos.token_address, pos.current_curve_fill_pct);
       if (graduation.graduated) {
         pos.graduated = true;
         pos.graduated_at = new Date();

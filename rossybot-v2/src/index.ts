@@ -1153,9 +1153,10 @@ class RossyBotV2 {
         (async () => {
           const dbRow = await (await import('./db/database.js')).getOne<{
             label: string; our_total_trades: number; our_win_rate: number;
-            our_avg_pnl_percent: number; consecutive_losses: number;
+            our_avg_pnl_percent: number; consecutive_losses: number; avg_buy_size_sol: number;
           }>(
-            `SELECT label, our_total_trades, our_win_rate, our_avg_pnl_percent, consecutive_losses
+            `SELECT label, our_total_trades, our_win_rate, our_avg_pnl_percent, consecutive_losses,
+                    COALESCE(avg_buy_size_sol, 0) as avg_buy_size_sol
              FROM alpha_wallets WHERE address = $1`, [signal.walletAddress],
           );
           this.walletQualityCache.set(signal.walletAddress, dbRow ? { ...dbRow, cachedAt: Date.now() } : null);

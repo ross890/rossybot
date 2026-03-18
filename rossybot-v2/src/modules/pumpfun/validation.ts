@@ -62,18 +62,17 @@ export async function validatePumpFunSignal(
     }
   }
 
-  // Reject if curve is already >65% filled — need room for 75% TP / 85% hard exit
-  if (curveFillPct > 0.65) {
+  // Reject if curve is already >25% filled — need room for 30% TP / 45% hard exit
+  if (curveFillPct > 0.25) {
     logger.info({ mint: mint.slice(0, 8), curveFillPct: (curveFillPct * 100).toFixed(1) },
       'Pump.fun REJECTED — curve too far along, no room for scalp');
     return buildFail('CURVE_NEARLY_GRADUATED', curveFillPct, solInCurve,
       { passed: false, reason: `Curve ${(curveFillPct * 100).toFixed(0)}% filled — too close to TP/exit zone` });
   }
 
-  // Reject if curve is too empty (<10%) — need some momentum before we enter.
-  // Lowered from 20% — earlier entry = more room for 75% TP. Exits now work properly.
+  // Reject if curve is too empty (<5%) — need some momentum before we enter.
   const solSpentAbs = Math.abs(signal.solDelta);
-  if (curveFillPct < 0.10) {
+  if (curveFillPct < 0.05) {
     logger.info({ mint: mint.slice(0, 8), solInCurve, curveFillPct: (curveFillPct * 100).toFixed(1) },
       'Pump.fun REJECTED — curve too early, no momentum');
     return buildFail('CURVE_TOO_EARLY', curveFillPct, solInCurve,

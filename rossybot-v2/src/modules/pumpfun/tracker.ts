@@ -373,26 +373,29 @@ export class PumpFunTracker {
           pos.peak_curve_fill_pct = pos.current_curve_fill_pct;
         }
 
-        // Estimate PnL from curve progress: if curve SOL increased, our position likely gained
-        if (pos.curve_fill_pct_at_entry > 0) {
-          pos.pnl_percent = (pos.current_curve_fill_pct / pos.curve_fill_pct_at_entry) - 1;
+        // Estimate PnL from curve SOL balance change.
+        // Bonding curve: price ∝ sqrt(solBalance), so PnL ≈ sqrt(sol_now/sol_entry) - 1
+        if (pos.sol_in_curve_at_entry > 0 && curveState.solBalance > 0) {
+          pos.pnl_percent = Math.sqrt(curveState.solBalance / pos.sol_in_curve_at_entry) - 1;
+        } else if (curveState.solBalance <= 0) {
+          pos.pnl_percent = -1; // Curve emptied — total loss
         }
 
         // --- CURVE SCALP EXITS (highest priority — take profit before graduation) ---
 
-        // 2a. Curve hard exit — NEVER hold through graduation (force-exit at 85%)
+        // 2a. Curve hard exit — NEVER hold through graduation (force-exit at 45%)
         if (pos.current_curve_fill_pct >= cfg.curveHardExit) {
           await this.closePosition(pos, 'Curve hard exit (pre-graduation)');
           return;
         }
 
-        // 2b. PnL-based take profit — lock in 25% gain (don't get greedy)
-        if (pos.pnl_percent >= 0.25) {
+        // 2b. PnL-based take profit — must hold ≥30s to avoid false TP on first tick
+        if (holdMins >= 0.5 && pos.pnl_percent >= cfg.profitTarget) {
           await this.closePosition(pos, 'Take profit');
           return;
         }
 
-        // 2c. Curve fill TP fallback — sell at 75% curve fill regardless of PnL calc
+        // 2c. Curve fill TP fallback — sell at curve target regardless of PnL calc
         if (pos.current_curve_fill_pct >= cfg.curveProfitTarget) {
           await this.closePosition(pos, 'Curve target hit');
           return;
@@ -407,8 +410,8 @@ export class PumpFunTracker {
           return;
         }
 
-        // 3b. Early stall — if curve is going backwards (net sells vs entry) after 3 min
-        if (holdMins >= 3 && solDeltaSinceEntry < -0.05) {
+        // 3b. Early stall — if curve is going backwards (net sells vs entry) after 2 min
+        if (holdMins >= 2 && solDeltaSinceEntry < -0.05) {
           await this.closePosition(pos, 'Curve reversal');
           return;
         }

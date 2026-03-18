@@ -80,20 +80,26 @@ export const config = {
   pumpFun: {
     programId: '6EF8rrecthR5Dkzon8Nwu78hRvfCKubJ14M5uBEwF6P',
     positionSizeMultiplier: 1.20,      // 120% of normal tier sizing — tighter entry/exit controls justify bigger bets
-    staleTimeKillMins: 3,              // Exit if no movement in 3 min (curve plays resolve fast or DOA)
+    staleTimeKillMins: 1.5,            // Exit if no movement in 90s (was 3min — data shows avg hold is 2min, stalls resolve faster)
     profitTarget: 0.10,                 // 10% PnL take profit (realistic for curve scalps)
     stopLoss: -0.15,                   // 15% stop loss (tighter — cut losers fast)
     hardKill: -0.20,                   // 20% hard kill
-    // --- Curve scalp strategy: exit BEFORE graduation ---
-    curveProfitTarget: 0.30,           // Sell when curve hits 30% filled (median peak is 20%, P75 is 39%)
-    curveHardExit: 0.45,              // Force-exit at 45% — data shows tokens rarely go higher
+    // --- Curve scalp strategy: DEFERRED ENTRY (don't enter at alpha's entry, wait for momentum) ---
+    curveProfitTarget: 0.40,           // Sell when curve hits 40% filled (was 30% — now entering higher, need room to TP)
+    curveHardExit: 0.50,              // Force-exit at 50% (was 45% — adjusted for higher entry)
+    curveEntryMin: 0.28,              // MINIMUM 28% curve fill to enter — below this is 1-11% WR death zone
+    curveEntryMax: 0.38,              // Maximum 38% curve fill — above this no room for TP
+    curveVelocityMin: 0.3,            // Minimum 0.3 SOL/min curve growth rate to confirm momentum
     graduationSellPct: 100,            // Sell 100% on any graduation (no lottery holds)
     minConvictionSol: 0.50,            // Alpha must spend ≥0.50 SOL — raised to filter throwaway buys causing -100% wipeouts
-    minCurveVelocity: 0.1,            // 0.1 SOL/min curve velocity
+    minCurveVelocity: 0.1,            // 0.1 SOL/min curve velocity (legacy — curveVelocityMin is the active check)
     maxTokenAgeMins: 15,               // Only tokens <15min old (was 30 — tighter, curve plays resolve fast)
     maxPositions: 3,                   // Max 3 pump.fun positions
     slippageBps: 500,                  // 5% slippage for bonding curve
     confluenceBonus: true,             // Track multi-wallet convergence on same token
+    // --- Deferred entry watchlist ---
+    deferredEntryEnabled: true,        // When alpha buys early, add to watchlist instead of entering immediately
+    deferredEntryMaxWaitMs: 5 * 60_000, // Max 5 min to wait for curve to reach entry zone
   },
 } as const;
 

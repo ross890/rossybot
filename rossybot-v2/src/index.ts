@@ -120,6 +120,16 @@ class RossyBotV2 {
   private pumpFunRejectionCache: Map<string, { reason: string; expiresAt: number }> = new Map();
   private static readonly PUMP_FUN_REJECTION_TTL_MS = 5 * 60_000; // 5 minutes
 
+  // Deferred entry watchlist: tokens where alpha bought early (below entry zone)
+  // We monitor curve fill via PumpPortal and enter when it reaches the 28-38% sweet spot
+  private deferredEntries: Map<string, {
+    signal: ParsedSignal;
+    walletLabel: string;
+    confluence: { wallets: Set<string>; totalSol: number };
+    addedAt: number;
+    lastCurveFill: number;
+  }> = new Map();
+
   // Real-time curve state cache from PumpPortal (avoids 200-400ms RPC call in validation)
   // Key: tokenMint, Value: { vSol (virtual), realSol, updatedAt }
   private pumpFunCurveCache: Map<string, { vSol: number; realSol: number; updatedAt: number }> = new Map();
@@ -351,6 +361,11 @@ class RossyBotV2 {
           realSol,
           updatedAt: Date.now(),
         });
+
+        // Check deferred entries: has this token reached the entry zone?
+        this.checkDeferredEntry(trade.mint, realSol).catch((err) =>
+          logger.error({ err, token: trade.mint.slice(0, 8) }, 'Deferred entry check failed'),
+        );
       }
 
       // Track unique buyers per token for stampede detection (with timestamps for cluster analysis)
@@ -412,6 +427,18 @@ class RossyBotV2 {
       }
       if (cleaned > 0) {
         logger.debug({ cleaned, remaining: this.pumpFunRejectionCache.size }, 'Pump.fun rejection cache cleanup');
+      }
+      // Also clean expired deferred entries
+      const maxWait = config.pumpFun.deferredEntryMaxWaitMs;
+      let deferredCleaned = 0;
+      for (const [mint, entry] of this.deferredEntries) {
+        if (Date.now() - entry.addedAt > maxWait) {
+          this.deferredEntries.delete(mint);
+          deferredCleaned++;
+        }
+      }
+      if (deferredCleaned > 0) {
+        logger.debug({ cleaned: deferredCleaned, remaining: this.deferredEntries.size }, 'Deferred entry watchlist cleanup');
       }
     }, 5 * 60 * 1000);
 
@@ -1300,6 +1327,27 @@ class RossyBotV2 {
       ]);
 
       if (!validation.passed) {
+        // DEFERRED ENTRY: alpha bought early, watchlist the token for momentum confirmation
+        if (validation.deferToWatchlist && !this.deferredEntries.has(mint)) {
+          this.deferredEntries.set(mint, {
+            signal,
+            walletLabel,
+            confluence: { wallets: new Set(confluence.wallets), totalSol: confluence.totalSol },
+            addedAt: Date.now(),
+            lastCurveFill: validation.curveFillPct,
+          });
+          // Subscribe PumpPortal to this token's trades so we get curve updates
+          if (this.pumpPortal.connected) {
+            this.pumpPortal.subscribeTokenTrades([mint]);
+          }
+          logger.info({
+            token: mint.slice(0, 8), wallet: walletLabel,
+            curveFill: `${(validation.curveFillPct * 100).toFixed(0)}%`,
+            entryZone: `${(config.pumpFun.curveEntryMin * 100).toFixed(0)}-${(config.pumpFun.curveEntryMax * 100).toFixed(0)}%`,
+          }, 'Pump.fun WATCHLISTED — waiting for curve to reach entry zone');
+          return;
+        }
+
         logger.info({
           token: mint.slice(0, 8),
           reason: validation.failReason,
@@ -1308,14 +1356,12 @@ class RossyBotV2 {
         }, `Pump.fun signal rejected: ${validation.failReason}`);
 
         // Cache curve-range AND low-conviction rejections to stop spam
-        // Curve-range: avoid re-fetching RPC. Low-conviction: same wallet+token spams 50+ alerts.
         const cacheableReasons = ['CURVE_TOO_EARLY', 'CURVE_NEARLY_GRADUATED', 'LOW_CONVICTION'];
         if (cacheableReasons.includes(validation.failReason || '')) {
           this.pumpFunRejectionCache.set(mint, {
             reason: validation.failReason!,
             expiresAt: Date.now() + RossyBotV2.PUMP_FUN_REJECTION_TTL_MS,
           });
-          // Only send Telegram for LOW_CONVICTION once (first occurrence gets through, rest cached)
           if (validation.failReason === 'LOW_CONVICTION') {
             await this.telegram.send(
               `⛔ SKIP · ${mint.slice(0, 8)} · Low conviction\n` +
@@ -1374,6 +1420,100 @@ class RossyBotV2 {
     } catch (err) {
       logger.error({ err, token: signal.tokenMint?.slice(0, 8) }, 'Error in pump.fun buy handler');
     }
+  }
+
+  /**
+   * Check if a deferred entry token has reached the curve entry zone.
+   * Called on every PumpPortal trade update for watched tokens.
+   */
+  private async checkDeferredEntry(tokenMint: string, realSol: number): Promise<void> {
+    const deferred = this.deferredEntries.get(tokenMint);
+    if (!deferred) return;
+
+    const cfg = config.pumpFun;
+    const { estimateCurveFillPct } = await import('./modules/pumpfun/detector.js');
+    const curveFillPct = estimateCurveFillPct(realSol);
+
+    // Update last known fill
+    deferred.lastCurveFill = curveFillPct;
+
+    // Expired — token didn't reach entry zone in time
+    if (Date.now() - deferred.addedAt > cfg.deferredEntryMaxWaitMs) {
+      this.deferredEntries.delete(tokenMint);
+      logger.info({ token: tokenMint.slice(0, 8), curveFill: `${(curveFillPct * 100).toFixed(0)}%` },
+        'Deferred entry expired — curve never reached entry zone');
+      return;
+    }
+
+    // Still below entry zone
+    if (curveFillPct < cfg.curveEntryMin) return;
+
+    // Above entry zone — missed the window
+    if (curveFillPct > cfg.curveEntryMax) {
+      this.deferredEntries.delete(tokenMint);
+      logger.info({ token: tokenMint.slice(0, 8), curveFill: `${(curveFillPct * 100).toFixed(0)}%` },
+        'Deferred entry cancelled — curve overshot entry zone');
+      return;
+    }
+
+    // IN THE ENTRY ZONE — execute the deferred entry!
+    this.deferredEntries.delete(tokenMint);
+
+    // Pre-flight checks
+    if (this.pumpFunTracker.hasPosition(tokenMint) || this.hasPosition(tokenMint)) return;
+    if (this.blockedTokens.has(tokenMint)) return;
+    if (this.pumpFunTracker.getOpenCount() >= cfg.maxPositions) return;
+
+    const tierSize = this.capitalManager.getPositionSize();
+    let pumpSize = tierSize * cfg.positionSizeMultiplier;
+    const confluenceCount = deferred.confluence.wallets.size;
+    const confluenceMultiplier = Math.min(1 + (confluenceCount - 1) * 0.25, 1.5);
+    pumpSize = pumpSize * confluenceMultiplier;
+
+    const waitSecs = Math.round((Date.now() - deferred.addedAt) / 1000);
+
+    logger.info({
+      token: tokenMint.slice(0, 8),
+      curveFill: `${(curveFillPct * 100).toFixed(0)}%`,
+      waitSecs,
+      wallet: deferred.walletLabel,
+      pumpSize: pumpSize.toFixed(4),
+    }, 'DEFERRED ENTRY TRIGGERED — curve reached entry zone');
+
+    // Prefetch quote in parallel with nothing (validation already passed)
+    const swapExec = this.pumpFunTracker.getSwapExecutor();
+    const prefetchedQuote = swapExec ? await swapExec.prefetchQuote(tokenMint, pumpSize) : null;
+
+    const pos = await this.pumpFunTracker.openPosition({
+      tokenMint,
+      tokenSymbol: tokenMint.slice(0, 6),
+      bondingCurveAddress: deferred.signal.pumpFunData?.bondingCurveAddress || deriveBondingCurveAddress(tokenMint),
+      solAmount: pumpSize,
+      curveFillPct,
+      solInCurve: realSol,
+      alphaBuyTime: new Date(deferred.signal.blockTime * 1000),
+      signalWallets: Array.from(deferred.confluence.wallets),
+      capitalTier: this.capitalManager.tier,
+      prefetchedQuote: prefetchedQuote || undefined,
+    });
+
+    if (!pos) {
+      await this.telegram.send(
+        `⚠️ DEFERRED BUY FAILED · ${tokenMint.slice(0, 8)} · ${pumpSize.toFixed(4)} SOL\n` +
+        `└ ${deferred.walletLabel} · swap failed after ${waitSecs}s wait`,
+      );
+      return;
+    }
+
+    const mode = this.pumpFunTracker.isLive ? 'LIVE' : 'SHADOW';
+    await this.telegram.send(
+      `🟡 DEFERRED BUY · ${tokenMint.slice(0, 8)} · ${pumpSize.toFixed(4)} SOL\n` +
+      `├ Wallet: ${deferred.walletLabel} · Waited ${waitSecs}s for curve momentum\n` +
+      `├ Curve: ${(curveFillPct * 100).toFixed(0)}% · TP ${(cfg.curveProfitTarget * 100).toFixed(0)}% · SL ${(cfg.stopLoss * 100).toFixed(0)}%\n` +
+      (pos.entry_tx ? `├ TX: ${pos.entry_tx.slice(0, 16)}...\n` : '') +
+      `└ <a href="https://pump.fun/coin/${tokenMint}">pump.fun</a> · <a href="https://dexscreener.com/solana/${tokenMint}">dex</a> · ${mode}`,
+      { parse_mode: 'HTML' },
+    );
   }
 
   /** Handle sell signals from alpha wallets */

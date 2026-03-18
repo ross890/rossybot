@@ -446,14 +446,15 @@ export class PumpFunTracker {
         // --- DEFENSIVE EXITS ---
 
         // 3. Curve stall exit — compare SOL growth since ENTRY (not last 5s check)
+        //    Stale time reduced from 3min to 1.5min — data shows avg hold is 2min, stalls resolve fast
         const solDeltaSinceEntry = curveState.solBalance - pos.sol_in_curve_at_entry;
         if (holdMins >= cfg.staleTimeKillMins && solDeltaSinceEntry <= 0.5) {
           await this.closePosition(pos, 'Stall (no momentum)');
           return;
         }
 
-        // 3b. Early stall — if curve is going backwards (net sells vs entry) after 2 min
-        if (holdMins >= 2 && solDeltaSinceEntry < -0.05) {
+        // 3b. Early reversal — curve going backwards after 60s (was 2min — faster cut)
+        if (holdMins >= 1 && solDeltaSinceEntry < -0.05) {
           await this.closePosition(pos, 'Curve reversal');
           return;
         }

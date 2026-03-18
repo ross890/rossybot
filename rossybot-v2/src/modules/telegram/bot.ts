@@ -921,6 +921,98 @@ export class TelegramService {
       }
     });
 
+    this.bot.onText(/\/curve/, async (msg) => {
+      if (msg.chat.id.toString() !== this.chatId) return;
+      try {
+        // Histogram buckets for peak curve fill distribution
+        const buckets = await getMany<{ bucket: string; count: string; avg_pnl: string; wins: string }>(
+          `SELECT
+             CASE
+               WHEN peak_curve_fill_pct < 0.10 THEN '0-10%'
+               WHEN peak_curve_fill_pct < 0.20 THEN '10-20%'
+               WHEN peak_curve_fill_pct < 0.30 THEN '20-30%'
+               WHEN peak_curve_fill_pct < 0.40 THEN '30-40%'
+               WHEN peak_curve_fill_pct < 0.50 THEN '40-50%'
+               WHEN peak_curve_fill_pct < 0.60 THEN '50-60%'
+               WHEN peak_curve_fill_pct < 0.70 THEN '60-70%'
+               WHEN peak_curve_fill_pct < 0.80 THEN '70-80%'
+               WHEN peak_curve_fill_pct < 0.90 THEN '80-90%'
+               ELSE '90-100%'
+             END as bucket,
+             COUNT(*) as count,
+             COALESCE(AVG(pnl_percent), 0) as avg_pnl,
+             COUNT(*) FILTER (WHERE pnl_percent > 0) as wins
+           FROM pumpfun_positions
+           WHERE status = 'CLOSED' AND peak_curve_fill_pct > 0
+           GROUP BY bucket
+           ORDER BY bucket`,
+        );
+
+        // Summary stats
+        const summary = await getOne<Record<string, unknown>>(
+          `SELECT
+             COUNT(*) as total,
+             COALESCE(AVG(peak_curve_fill_pct), 0) as avg_peak,
+             COALESCE(PERCENTILE_CONT(0.5) WITHIN GROUP (ORDER BY peak_curve_fill_pct), 0) as median_peak,
+             COALESCE(PERCENTILE_CONT(0.75) WITHIN GROUP (ORDER BY peak_curve_fill_pct), 0) as p75_peak,
+             COALESCE(PERCENTILE_CONT(0.25) WITHIN GROUP (ORDER BY peak_curve_fill_pct), 0) as p25_peak,
+             COUNT(*) FILTER (WHERE graduated = TRUE) as graduated,
+             COALESCE(AVG(peak_curve_fill_pct) FILTER (WHERE pnl_percent > 0), 0) as avg_peak_wins,
+             COALESCE(AVG(peak_curve_fill_pct) FILTER (WHERE pnl_percent <= 0), 0) as avg_peak_losses
+           FROM pumpfun_positions
+           WHERE status = 'CLOSED' AND peak_curve_fill_pct > 0`,
+        );
+
+        const total = Number(summary?.total || 0);
+        if (total === 0) {
+          await this.bot.sendMessage(msg.chat.id, '📭 No peak curve data yet — need trades with new tracking');
+          return;
+        }
+
+        const avgPeak = (Number(summary?.avg_peak || 0) * 100).toFixed(0);
+        const medianPeak = (Number(summary?.median_peak || 0) * 100).toFixed(0);
+        const p25 = (Number(summary?.p25_peak || 0) * 100).toFixed(0);
+        const p75 = (Number(summary?.p75_peak || 0) * 100).toFixed(0);
+        const gradCount = Number(summary?.graduated || 0);
+        const avgPeakWins = (Number(summary?.avg_peak_wins || 0) * 100).toFixed(0);
+        const avgPeakLosses = (Number(summary?.avg_peak_losses || 0) * 100).toFixed(0);
+
+        // Build histogram bars
+        const maxCount = Math.max(...buckets.map((b) => Number(b.count)));
+        const histLines = buckets.map((b) => {
+          const count = Number(b.count);
+          const barLen = maxCount > 0 ? Math.round((count / maxCount) * 10) : 0;
+          const bar = '█'.repeat(barLen) + '░'.repeat(10 - barLen);
+          const wr = count > 0 ? `${((Number(b.wins) / count) * 100).toFixed(0)}%W` : '-';
+          const pnl = (Number(b.avg_pnl) * 100).toFixed(0);
+          return `│ ${b.bucket.padEnd(7)} ${bar} ${String(count).padStart(3)} (${wr}, ${pnl}%avg)`;
+        });
+
+        const lines = [
+          `📊 CURVE DISTRIBUTION (${total} trades)`,
+          ``,
+          `┌─ PEAK CURVE FILL HISTOGRAM`,
+          ...histLines,
+          `│`,
+          `├─ PERCENTILES`,
+          `│ Median: ${medianPeak}% · Mean: ${avgPeak}%`,
+          `│ P25: ${p25}% · P75: ${p75}%`,
+          `│ Graduated: ${gradCount}/${total} (${total > 0 ? (gradCount / total * 100).toFixed(0) : 0}%)`,
+          `│`,
+          `├─ WINS vs LOSSES`,
+          `│ Avg peak (wins): ${avgPeakWins}%`,
+          `│ Avg peak (losses): ${avgPeakLosses}%`,
+          `│`,
+          `└─ Use median (${medianPeak}%) as baseline for TP threshold`,
+        ];
+
+        await this.bot.sendMessage(msg.chat.id, lines.join('\n'));
+      } catch (err) {
+        logger.error({ err }, 'Failed to generate curve analysis');
+        await this.bot.sendMessage(msg.chat.id, '❌ Failed to load curve data');
+      }
+    });
+
     logger.info('Telegram bot commands registered');
   }
 

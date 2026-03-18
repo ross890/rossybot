@@ -23,6 +23,7 @@ export interface PumpFunPosition {
   // Curve tracking
   curve_fill_pct_at_entry: number;
   current_curve_fill_pct: number;
+  peak_curve_fill_pct: number;  // Highest curve fill observed during position lifetime
   sol_in_curve_at_entry: number;  // SOL in curve when we entered — baseline for stall detection
   last_curve_check_sol: number;
   // Price tracking (post-graduation)
@@ -256,6 +257,7 @@ export class PumpFunTracker {
       status: PositionStatus.OPEN,
       curve_fill_pct_at_entry: params.curveFillPct,
       current_curve_fill_pct: params.curveFillPct,
+      peak_curve_fill_pct: params.curveFillPct,
       sol_in_curve_at_entry: params.solInCurve,
       last_curve_check_sol: params.solInCurve,
       graduated: false,
@@ -278,13 +280,13 @@ export class PumpFunTracker {
     await query(
       `INSERT INTO pumpfun_positions (id, token_address, token_symbol, bonding_curve_address,
          entry_price_sol, entry_time, alpha_buy_time, signal_wallets, capital_tier,
-         simulated_entry_sol, status, curve_fill_pct_at_entry, current_curve_fill_pct,
+         simulated_entry_sol, status, curve_fill_pct_at_entry, current_curve_fill_pct, peak_curve_fill_pct,
          sol_in_curve_at_entry, last_curve_check_sol, graduated, graduation_price, entry_tx, fees_paid_sol, net_pnl_sol)
-       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20)`,
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21)`,
       [pos.id, pos.token_address, pos.token_symbol, pos.bonding_curve_address,
        pos.entry_price_sol, pos.entry_time, pos.alpha_buy_time, pos.signal_wallets,
        pos.capital_tier, pos.simulated_entry_sol, pos.status,
-       pos.curve_fill_pct_at_entry, pos.current_curve_fill_pct,
+       pos.curve_fill_pct_at_entry, pos.current_curve_fill_pct, pos.peak_curve_fill_pct,
        pos.sol_in_curve_at_entry, pos.last_curve_check_sol, pos.graduated, pos.graduation_price,
        pos.entry_tx, pos.fees_paid_sol, pos.net_pnl_sol],
     );
@@ -367,6 +369,9 @@ export class PumpFunTracker {
         const prevSol = pos.last_curve_check_sol;
         pos.last_curve_check_sol = curveState.solBalance;
         pos.current_curve_fill_pct = estimateCurveFillPct(curveState.solBalance);
+        if (pos.current_curve_fill_pct > pos.peak_curve_fill_pct) {
+          pos.peak_curve_fill_pct = pos.current_curve_fill_pct;
+        }
 
         // Estimate PnL from curve progress: if curve SOL increased, our position likely gained
         if (pos.curve_fill_pct_at_entry > 0) {
@@ -666,12 +671,12 @@ export class PumpFunTracker {
            status = $1, current_curve_fill_pct = $2, last_curve_check_sol = $3,
            graduated = $4, graduated_at = $5, graduation_price = $6, current_price = $7, peak_price = $8,
            pnl_percent = $9, exit_reason = $10, closed_at = $11, hold_time_mins = $12,
-           fees_paid_sol = $13, net_pnl_sol = $14
+           fees_paid_sol = $13, net_pnl_sol = $14, peak_curve_fill_pct = $16
          WHERE id = $15`,
         [pos.status, pos.current_curve_fill_pct, pos.last_curve_check_sol,
          pos.graduated, pos.graduated_at, pos.graduation_price, pos.current_price, pos.peak_price,
          pos.pnl_percent, pos.exit_reason, pos.closed_at, pos.hold_time_mins,
-         pos.fees_paid_sol, pos.net_pnl_sol, pos.id],
+         pos.fees_paid_sol, pos.net_pnl_sol, pos.id, pos.peak_curve_fill_pct],
       );
     } catch (err) {
       logger.error({ err, posId: pos.id.slice(0, 8) }, 'Failed to update pump.fun position');
@@ -699,6 +704,7 @@ export class PumpFunTracker {
           status: PositionStatus.OPEN,
           curve_fill_pct_at_entry: Number(row.curve_fill_pct_at_entry),
           current_curve_fill_pct: Number(row.current_curve_fill_pct),
+          peak_curve_fill_pct: Number(row.peak_curve_fill_pct || row.current_curve_fill_pct || row.curve_fill_pct_at_entry),
           sol_in_curve_at_entry: Number(row.sol_in_curve_at_entry || row.last_curve_check_sol),
           last_curve_check_sol: Number(row.last_curve_check_sol),
           graduated: Boolean(row.graduated),
@@ -770,6 +776,9 @@ export class PumpFunTracker {
 
       pos.last_curve_check_sol = realSol;
       pos.current_curve_fill_pct = estimateCurveFillPct(realSol);
+      if (pos.current_curve_fill_pct > pos.peak_curve_fill_pct) {
+        pos.peak_curve_fill_pct = pos.current_curve_fill_pct;
+      }
 
       // Estimate PnL from curve progress
       if (pos.curve_fill_pct_at_entry > 0) {

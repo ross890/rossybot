@@ -59,15 +59,19 @@ export class WalletDiscovery {
         });
 
     for (const w of eligible) {
+      const isPumpFun = w.pumpfunOnly === true;
+      const source = isPumpFun ? WalletSource.PUMPFUN_SEED : WalletSource.NANSEN_SEED;
+
       await query(
-        `INSERT INTO alpha_wallets (address, label, source, tier, min_capital_tier, active, helius_subscribed)
-         VALUES ($1, $2, $3, $4, $5, TRUE, FALSE)
-         ON CONFLICT (address) DO UPDATE SET active = TRUE`,
-        [w.address, w.label, WalletSource.NANSEN_SEED, WalletTier.B, w.minTier],
+        `INSERT INTO alpha_wallets (address, label, source, tier, min_capital_tier, active, helius_subscribed, pumpfun_only)
+         VALUES ($1, $2, $3, $4, $5, TRUE, FALSE, $6)
+         ON CONFLICT (address) DO UPDATE SET active = TRUE, pumpfun_only = COALESCE(EXCLUDED.pumpfun_only, alpha_wallets.pumpfun_only)`,
+        [w.address, w.label, source, WalletTier.B, w.minTier, isPumpFun],
       );
     }
 
-    logger.info({ count: eligible.length, tier: capitalTier }, 'Seed wallets loaded');
+    const pfCount = eligible.filter((w) => w.pumpfunOnly).length;
+    logger.info({ count: eligible.length, pumpfun: pfCount, tier: capitalTier }, 'Seed wallets loaded');
     return eligible.map((w) => w.address);
   }
 
@@ -103,7 +107,7 @@ export class WalletDiscovery {
     const result = await query(
       `UPDATE alpha_wallets SET active = FALSE
        WHERE active = TRUE
-         AND source != 'NANSEN_SEED'
+         AND source NOT IN ('NANSEN_SEED', 'PUMPFUN_SEED')
          AND COALESCE(nansen_pnl_usd, 0) < $1
        RETURNING address`,
       [MIN_PNL_USD],
@@ -124,7 +128,7 @@ export class WalletDiscovery {
     const result = await query(
       `UPDATE alpha_wallets SET active = FALSE
        WHERE active = TRUE
-         AND source != 'NANSEN_SEED'
+         AND source NOT IN ('NANSEN_SEED', 'PUMPFUN_SEED')
          AND (
            -- No trade data AND past grace period (give new wallets time to prove themselves)
            (COALESCE(our_total_trades, 0) = 0 AND COALESCE(round_trips_analyzed, 0) = 0
@@ -408,7 +412,7 @@ export class WalletDiscovery {
     // Deactivate: 3 consecutive losses (was 5 — tighter)
     const deactivated = await query(
       `UPDATE alpha_wallets SET active = FALSE
-       WHERE active = TRUE AND source != 'NANSEN_SEED' AND consecutive_losses >= 3
+       WHERE active = TRUE AND source NOT IN ('NANSEN_SEED', 'PUMPFUN_SEED') AND consecutive_losses >= 3
        RETURNING address`,
     );
 
@@ -416,7 +420,7 @@ export class WalletDiscovery {
     const pnlPurged = await query(
       `UPDATE alpha_wallets SET active = FALSE
        WHERE active = TRUE
-         AND source != 'NANSEN_SEED'
+         AND source NOT IN ('NANSEN_SEED', 'PUMPFUN_SEED')
          AND COALESCE(nansen_pnl_usd, 0) < 1000
        RETURNING address`,
     );
@@ -481,6 +485,8 @@ export class WalletDiscovery {
         const lastTxTime = await this.getLastTransactionTime(wallet.address);
         checked++;
 
+        const isSeed = wallet.source === 'NANSEN_SEED' || wallet.source === 'PUMPFUN_SEED';
+
         if (lastTxTime) {
           // Update last_active_at with actual on-chain activity time
           await query(
@@ -489,7 +495,7 @@ export class WalletDiscovery {
           );
 
           // Deactivate if inactive for too long (skip seed wallets)
-          if (wallet.source !== 'NANSEN_SEED' && lastTxTime * 1000 < cutoff.getTime()) {
+          if (!isSeed && lastTxTime * 1000 < cutoff.getTime()) {
             await query(`UPDATE alpha_wallets SET active = FALSE WHERE address = $1`, [wallet.address]);
             deactivated++;
             logger.info({
@@ -499,7 +505,7 @@ export class WalletDiscovery {
           }
         } else {
           // No transactions found at all — deactivate non-seeds
-          if (wallet.source !== 'NANSEN_SEED') {
+          if (!isSeed) {
             await query(`UPDATE alpha_wallets SET active = FALSE WHERE address = $1`, [wallet.address]);
             deactivated++;
             logger.info({ address: wallet.address.slice(0, 8) }, 'Deactivated wallet — no on-chain activity found');
@@ -561,7 +567,7 @@ export class WalletDiscovery {
     const staleResult = await query(
       `UPDATE alpha_wallets SET active = FALSE
        WHERE active = TRUE
-         AND source != 'NANSEN_SEED'
+         AND source NOT IN ('NANSEN_SEED', 'PUMPFUN_SEED')
          AND COALESCE(our_total_trades, 0) = 0
          AND COALESCE(round_trips_analyzed, 0) = 0
          AND discovered_at < $1
@@ -579,7 +585,7 @@ export class WalletDiscovery {
     const slowResult = await query(
       `UPDATE alpha_wallets SET active = FALSE
        WHERE active = TRUE
-         AND source != 'NANSEN_SEED'
+         AND source NOT IN ('NANSEN_SEED', 'PUMPFUN_SEED')
          AND COALESCE(median_hold_time_mins, 0) > 720
          AND COALESCE(round_trips_analyzed, 0) >= 3
        RETURNING address`,
@@ -603,7 +609,7 @@ export class WalletDiscovery {
         `UPDATE alpha_wallets SET active = FALSE
          WHERE address IN (
            SELECT address FROM alpha_wallets
-           WHERE active = TRUE AND source != 'NANSEN_SEED'
+           WHERE active = TRUE AND source NOT IN ('NANSEN_SEED', 'PUMPFUN_SEED')
            ORDER BY
              COALESCE(short_term_alpha_score, 0) ASC,
              COALESCE(nansen_pnl_usd, 0) ASC
@@ -633,7 +639,7 @@ export class WalletDiscovery {
       `SELECT address,
          (
            -- Seed wallets get base priority
-           CASE WHEN source = 'NANSEN_SEED' THEN 50 ELSE 0 END
+           CASE WHEN source IN ('NANSEN_SEED', 'PUMPFUN_SEED') THEN 50 ELSE 0 END
            -- Tier A wallets get priority
            + CASE WHEN tier = 'A' THEN 30 ELSE 0 END
            -- SHORT-TERM ALPHA SCORE (0-100 → 0-40 pts) — biggest weight

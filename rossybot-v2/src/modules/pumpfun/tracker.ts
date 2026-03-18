@@ -241,6 +241,26 @@ export class PumpFunTracker {
       if (this.onBalanceRefresh) {
         try { await this.onBalanceRefresh(); } catch { /* ignore */ }
       }
+
+      // Re-calibrate curve baseline from RPC after buy confirms.
+      // The entry solInCurve may come from PumpPortal cache (vSol - 30) which can differ
+      // from RPC account lamports. Using RPC here ensures the baseline matches the
+      // checkCurvePosition monitoring path and prevents phantom PnL on first tick.
+      try {
+        const postBuyCurve = await fetchCurveState(params.bondingCurveAddress);
+        if (postBuyCurve?.exists && postBuyCurve.solBalance > 0) {
+          const rpcFillPct = estimateCurveFillPct(postBuyCurve.solBalance);
+          logger.debug({
+            token: tokenName,
+            oldSol: params.solInCurve.toFixed(2),
+            rpcSol: postBuyCurve.solBalance.toFixed(2),
+            oldFill: `${(params.curveFillPct * 100).toFixed(0)}%`,
+            rpcFill: `${(rpcFillPct * 100).toFixed(0)}%`,
+          }, 'Pump.fun entry baseline re-calibrated from RPC');
+          params.solInCurve = postBuyCurve.solBalance;
+          params.curveFillPct = rpcFillPct;
+        }
+      } catch { /* non-fatal — keep PumpPortal value */ }
     }
 
     const pos: PumpFunPosition = {
@@ -449,8 +469,10 @@ export class PumpFunTracker {
       return;
     }
 
-    // 6. Stop loss based on curve regression
-    if (pos.pnl_percent <= cfg.stopLoss) {
+    // 6. Stop loss based on curve regression — must hold ≥15s to avoid false SL on transient dips
+    //    PumpPortal events can briefly show low vSol on a single sell, then recover on the next buy.
+    //    Without this guard, the bot exits instantly on phantom dips and misses real winners.
+    if (holdMins >= 0.25 && pos.pnl_percent <= cfg.stopLoss) {
       await this.closePosition(pos, 'Stop loss');
       return;
     }
@@ -761,6 +783,8 @@ export class PumpFunTracker {
   async handleRealtimeCurveUpdate(tokenMint: string, vSolInBondingCurve: number): Promise<void> {
     for (const pos of this.positions.values()) {
       if (pos.token_address !== tokenMint || pos.status === PositionStatus.CLOSED || pos.graduated) continue;
+      // Don't update curve state while a sell is executing — prevents false "recovered" data in close messages
+      if (this.pendingSells.has(pos.id)) continue;
 
       const cfg = config.pumpFun;
 
@@ -820,8 +844,8 @@ export class PumpFunTracker {
         return;
       }
 
-      // Stop loss based on curve regression
-      if (pos.pnl_percent <= cfg.stopLoss) {
+      // Stop loss based on curve regression — must hold ≥15s (same guard as polling path)
+      if (holdMins >= 0.25 && pos.pnl_percent <= cfg.stopLoss) {
         await this.closePosition(pos, 'Stop loss');
         return;
       }

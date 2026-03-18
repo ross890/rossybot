@@ -772,13 +772,16 @@ export class PumpFunTracker {
       // Prevents false -100% PnL (transient sell dip) and false 100% fill (anomalous data).
       const prevSol = pos.last_curve_check_sol;
       const solDelta = Math.abs(realSol - prevSol);
-      if (solDelta > 20 && prevSol > 0) {
-        logger.debug({
+      // Reject absolute jumps > 20 SOL OR drops > 50% in a single event (likely bad data)
+      const isHugeDrop = prevSol > 0 && realSol < prevSol * 0.5;
+      if ((solDelta > 20 || isHugeDrop) && prevSol > 0) {
+        logger.warn({
           token: tokenMint.slice(0, 8),
           prevSol: prevSol.toFixed(1),
           newSol: realSol.toFixed(1),
           delta: solDelta.toFixed(1),
-        }, 'Curve update spike rejected — single event too large');
+          vSol: vSolInBondingCurve.toFixed(1),
+        }, 'Curve update spike rejected — anomalous single event');
         return;
       }
 
@@ -788,26 +791,30 @@ export class PumpFunTracker {
         pos.peak_curve_fill_pct = pos.current_curve_fill_pct;
       }
 
-      // Estimate PnL from curve progress
-      if (pos.curve_fill_pct_at_entry > 0) {
-        pos.pnl_percent = (pos.current_curve_fill_pct / pos.curve_fill_pct_at_entry) - 1;
+      // Estimate PnL from curve SOL balance change (bonding curve: price ∝ sqrt(solBalance))
+      if (pos.sol_in_curve_at_entry > 0 && realSol > 0) {
+        pos.pnl_percent = Math.sqrt(realSol / pos.sol_in_curve_at_entry) - 1;
+      } else if (realSol <= 0) {
+        pos.pnl_percent = -1; // Curve emptied — total loss
       }
+
+      const holdMins = (Date.now() - pos.entry_time.getTime()) / 60_000;
 
       // --- INSTANT CURVE SCALP EXITS ---
 
-      // Hard exit at 85% — NEVER hold through graduation
+      // Hard exit at curve hard exit threshold
       if (pos.current_curve_fill_pct >= cfg.curveHardExit) {
         await this.closePosition(pos, 'Curve hard exit (pre-graduation)');
         return;
       }
 
-      // PnL-based take profit at 25%
-      if (pos.pnl_percent >= 0.25) {
+      // PnL-based take profit — must hold ≥30s to avoid false TP on first tick
+      if (holdMins >= 0.5 && pos.pnl_percent >= cfg.profitTarget) {
         await this.closePosition(pos, 'Take profit');
         return;
       }
 
-      // Curve fill TP at 75%
+      // Curve fill TP at target
       if (pos.current_curve_fill_pct >= cfg.curveProfitTarget) {
         await this.closePosition(pos, 'Curve target hit');
         return;

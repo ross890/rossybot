@@ -4,7 +4,7 @@ import { query, getMany } from '../../db/database.js';
 import { config } from '../../config/index.js';
 import { PositionStatus } from '../../types/index.js';
 import { checkGraduation } from './detector.js';
-import { fetchCurveState, estimateCurveFillPct } from './detector.js';
+import { fetchCurveState, estimateCurveFillPct, deriveBondingCurveAddress } from './detector.js';
 import { fetchDexPair, getPriceUsd } from '../validation/dexscreener.js';
 import type { SwapExecutor, SwapResult } from '../trading/swap-executor.js';
 
@@ -301,14 +301,19 @@ export class PumpFunTracker {
 
   // Track last graduation check time per position to throttle DexScreener API calls
   private lastGradCheckAt: Map<string, number> = new Map();
-  private static readonly GRAD_CHECK_INTERVAL_MS = 30_000; // Check graduation every 30s, not 5s
+  private static readonly GRAD_CHECK_INTERVAL_MS = 10_000; // Check graduation every 10s (safety net if curve TP missed)
 
   /** Check a pre-graduation position on the bonding curve — CURVE SCALP STRATEGY */
   private async checkCurvePosition(pos: PumpFunPosition): Promise<void> {
     const holdMins = (Date.now() - pos.entry_time.getTime()) / 60_000;
     const cfg = config.pumpFun;
 
-    // 1. Update curve progress
+    // 1. Update curve progress — derive PDA if stored address is unknown
+    if (pos.bonding_curve_address === 'unknown' || !pos.bonding_curve_address) {
+      try {
+        pos.bonding_curve_address = deriveBondingCurveAddress(pos.token_address);
+      } catch { /* keep unknown */ }
+    }
     if (pos.bonding_curve_address && pos.bonding_curve_address !== 'unknown') {
       const curveState = await fetchCurveState(pos.bonding_curve_address);
       if (curveState?.exists) {
@@ -395,19 +400,7 @@ export class PumpFunTracker {
   /** Post-graduation fallback — we should have exited pre-grad, sell immediately */
   private async checkGraduatedPosition(pos: PumpFunPosition): Promise<void> {
     // Curve scalp strategy: we should NEVER be here. If we are, sell ASAP.
-    // Short cooldown to let Jupiter routing stabilize after migration.
-    const GRADUATION_COOLDOWN_SECS = 20;
-    const holdSinceGrad = pos.graduated_at
-      ? (Date.now() - pos.graduated_at.getTime()) / 1000
-      : 0;
-
-    if (holdSinceGrad < GRADUATION_COOLDOWN_SECS) {
-      logger.info({ token: pos.token_address.slice(0, 8), waitSecs: Math.round(GRADUATION_COOLDOWN_SECS - holdSinceGrad) },
-        'Post-grad cooldown — waiting to sell');
-      return;
-    }
-
-    // Sell everything — graduation was never the plan
+    // No cooldown — every second costs money post-graduation.
     await this.closePosition(pos, `Post-grad emergency exit (graduated while held — selling 100%)`);
   }
 
@@ -454,13 +447,13 @@ export class PumpFunTracker {
       const tokenName = pos.token_symbol || pos.token_address.slice(0, 8);
       logger.info({ token: tokenName, reason }, 'Pump.fun LIVE SELL — executing swap');
 
-      // Use pump.fun slippage (5%) as base, escalate on retries:
-      // Retry 0: 500 bps (5%), Retry 1: 800 bps (8%), Retry 2: 1200 bps (12%)
-      const baseSlippage = config.pumpFun.slippageBps;
+      // Use pump.fun slippage as base, higher for post-graduation (price volatile after migration)
+      // Pre-grad: 500→800→1100 bps | Post-grad: 1200→1500 bps (start high, routes are thin)
+      const baseSlippage = pos.graduated ? 1200 : config.pumpFun.slippageBps;
       const retryCount = pos.sell_retry_count || 0;
       const slippageBps = retryCount === 0
         ? baseSlippage
-        : Math.min(baseSlippage + retryCount * 300, 1500); // Cap at 15%
+        : Math.min(baseSlippage + retryCount * 300, 2000); // Cap at 20%
 
       const pair = await fetchDexPair(pos.token_address);
       const liquidityUsd = pair?.liquidity?.usd || 0;

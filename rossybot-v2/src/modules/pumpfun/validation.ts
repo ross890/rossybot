@@ -1,6 +1,6 @@
 import { logger } from '../../utils/logger.js';
 import { config } from '../../config/index.js';
-import { fetchCurveState, estimateCurveFillPct } from './detector.js';
+import { fetchCurveState, estimateCurveFillPct, deriveBondingCurveAddress } from './detector.js';
 import type { ParsedSignal, ValidationCheckResult } from '../../types/index.js';
 
 export interface PumpFunValidationResult {
@@ -25,15 +25,32 @@ export async function validatePumpFunSignal(
   const mint = signal.tokenMint;
 
   // 1. Check bonding curve progress
-  const bondingCurve = signal.pumpFunData?.bondingCurveAddress;
+  // Prefer PDA derivation (deterministic) over heuristic-detected address
+  let bondingCurve = signal.pumpFunData?.bondingCurveAddress;
+  if (!bondingCurve || bondingCurve === 'unknown') {
+    try {
+      bondingCurve = deriveBondingCurveAddress(mint);
+    } catch {
+      bondingCurve = undefined;
+    }
+  }
   let curveFillPct = 0;
   let solInCurve = 0;
 
-  if (bondingCurve && bondingCurve !== 'unknown') {
+  if (bondingCurve) {
     const curveState = await fetchCurveState(bondingCurve);
     if (curveState?.exists) {
       solInCurve = curveState.solBalance;
       curveFillPct = estimateCurveFillPct(solInCurve);
+    } else if (bondingCurve !== deriveBondingCurveAddress(mint)) {
+      // Heuristic address returned no data — retry with PDA
+      const pdaAddr = deriveBondingCurveAddress(mint);
+      const pdaState = await fetchCurveState(pdaAddr);
+      if (pdaState?.exists) {
+        bondingCurve = pdaAddr;
+        solInCurve = pdaState.solBalance;
+        curveFillPct = estimateCurveFillPct(solInCurve);
+      }
     }
   }
 

@@ -113,6 +113,23 @@ class RossyBotV2 {
   private pumpFunRejectionCache: Map<string, { reason: string; expiresAt: number }> = new Map();
   private static readonly PUMP_FUN_REJECTION_TTL_MS = 5 * 60_000; // 5 minutes
 
+  // Real-time curve state cache from PumpPortal (avoids 200-400ms RPC call in validation)
+  // Key: tokenMint, Value: { vSol (virtual), realSol, updatedAt }
+  private pumpFunCurveCache: Map<string, { vSol: number; realSol: number; updatedAt: number }> = new Map();
+
+  // Copy-trade stampede detection: count unique buyers per token from PumpPortal stream
+  // Key: tokenMint, Value: { buyers: Set<walletAddr>, firstBuyAt, totalSol }
+  private pumpFunBuyerTracker: Map<string, { buyers: Set<string>; firstBuyAt: number; totalSol: number }> = new Map();
+  private static readonly STAMPEDE_WINDOW_MS = 60_000; // 60s window
+  private static readonly STAMPEDE_BUYER_THRESHOLD = 8; // >8 unique buyers = stampede
+
+  // In-memory wallet quality cache (avoids 50-150ms DB query per signal)
+  private walletQualityCache: Map<string, {
+    label: string; our_total_trades: number; our_win_rate: number;
+    our_avg_pnl_percent: number; consecutive_losses: number; cachedAt: number;
+  } | null> = new Map();
+  private static readonly WALLET_QUALITY_CACHE_TTL_MS = 30 * 60_000; // 30 min
+
   // PumpPortal — real-time pump.fun trade stream for alpha wallet discovery
   private pumpPortal: PumpPortalClient;
   private pumpFunAlphaDiscovery: PumpFunAlphaDiscovery;
@@ -306,6 +323,38 @@ class RossyBotV2 {
         this.pumpFunTracker.handleRealtimeCurveUpdate(trade.mint, trade.vSolInBondingCurve).catch((err) =>
           logger.error({ err, token: trade.mint.slice(0, 8) }, 'Real-time curve update failed'),
         );
+
+        // Cache curve state from PumpPortal (used in validation to skip RPC call)
+        const realSol = Math.max(0, trade.vSolInBondingCurve - 30); // 30 SOL virtual reserve
+        this.pumpFunCurveCache.set(trade.mint, {
+          vSol: trade.vSolInBondingCurve,
+          realSol,
+          updatedAt: Date.now(),
+        });
+      }
+
+      // Track unique buyers per token for stampede detection
+      if (trade.txType === 'buy') {
+        const now = Date.now();
+        let tracker = this.pumpFunBuyerTracker.get(trade.mint);
+        if (!tracker || (now - tracker.firstBuyAt) > RossyBotV2.STAMPEDE_WINDOW_MS) {
+          tracker = { buyers: new Set(), firstBuyAt: now, totalSol: 0 };
+          this.pumpFunBuyerTracker.set(trade.mint, tracker);
+        }
+        tracker.buyers.add(trade.traderPublicKey);
+        // Estimate SOL from vSol change (rough but fast)
+        tracker.totalSol += Math.max(0, trade.vSolInBondingCurve - 30 - (this.pumpFunCurveCache.get(trade.mint)?.realSol || 0));
+      }
+
+      // Evict old entries from buyer tracker + curve cache periodically
+      if (Math.random() < 0.01) { // ~1% of trades, avoid per-trade overhead
+        const cutoff = Date.now() - 5 * 60_000;
+        for (const [mint, t] of this.pumpFunBuyerTracker) {
+          if (t.firstBuyAt < cutoff) this.pumpFunBuyerTracker.delete(mint);
+        }
+        for (const [mint, c] of this.pumpFunCurveCache) {
+          if (c.updatedAt < cutoff) this.pumpFunCurveCache.delete(mint);
+        }
       }
     });
 
@@ -1020,14 +1069,32 @@ class RossyBotV2 {
         return;
       }
 
-      // Wallet quality gate: check track record before burning a slot
-      const walletRow = await (await import('./db/database.js')).getOne<{
-        label: string; our_total_trades: number; our_win_rate: number;
-        our_avg_pnl_percent: number; consecutive_losses: number;
-      }>(
-        `SELECT label, our_total_trades, our_win_rate, our_avg_pnl_percent, consecutive_losses
-         FROM alpha_wallets WHERE address = $1`, [signal.walletAddress],
-      );
+      // Wallet quality gate: check in-memory cache first, then DB (saves 50-150ms)
+      let walletRow = this.walletQualityCache.get(signal.walletAddress);
+      if (walletRow === undefined) {
+        // Cache miss — fetch from DB and cache
+        const dbRow = await (await import('./db/database.js')).getOne<{
+          label: string; our_total_trades: number; our_win_rate: number;
+          our_avg_pnl_percent: number; consecutive_losses: number;
+        }>(
+          `SELECT label, our_total_trades, our_win_rate, our_avg_pnl_percent, consecutive_losses
+           FROM alpha_wallets WHERE address = $1`, [signal.walletAddress],
+        );
+        walletRow = dbRow ? { ...dbRow, cachedAt: Date.now() } : null;
+        this.walletQualityCache.set(signal.walletAddress, walletRow);
+      } else if (walletRow && (Date.now() - walletRow.cachedAt) > RossyBotV2.WALLET_QUALITY_CACHE_TTL_MS) {
+        // Stale cache — refresh in background, use cached value for now
+        (async () => {
+          const dbRow = await (await import('./db/database.js')).getOne<{
+            label: string; our_total_trades: number; our_win_rate: number;
+            our_avg_pnl_percent: number; consecutive_losses: number;
+          }>(
+            `SELECT label, our_total_trades, our_win_rate, our_avg_pnl_percent, consecutive_losses
+             FROM alpha_wallets WHERE address = $1`, [signal.walletAddress],
+          );
+          this.walletQualityCache.set(signal.walletAddress, dbRow ? { ...dbRow, cachedAt: Date.now() } : null);
+        })().catch(() => {});
+      }
       const walletLabel = walletRow?.label || signal.walletAddress.slice(0, 8);
 
       // Skip wallets with proven bad track records (3+ trades, <25% WR or 3+ consecutive losses)
@@ -1055,8 +1122,47 @@ class RossyBotV2 {
       // Multi-wallet confluence still gets a size bonus (see confluenceMultiplier below).
       const confluenceCount = confluence.wallets.size;
 
-      // Validate through pump.fun-specific gate
-      const validation = await validatePumpFunSignal(signal);
+      // Stampede detection: if too many unique buyers already, we're joining a crowded trade
+      const buyerTracker = this.pumpFunBuyerTracker.get(mint);
+      if (buyerTracker && buyerTracker.buyers.size >= RossyBotV2.STAMPEDE_BUYER_THRESHOLD) {
+        logger.info({
+          token: mint.slice(0, 8),
+          uniqueBuyers: buyerTracker.buyers.size,
+          wallet: walletLabel,
+        }, 'Pump.fun REJECTED — copy-trade stampede detected');
+        this.pumpFunRejectionCache.set(mint, {
+          reason: 'STAMPEDE',
+          expiresAt: Date.now() + RossyBotV2.PUMP_FUN_REJECTION_TTL_MS,
+        });
+        await this.telegram.send(
+          `🎰 PUMP.FUN rejected: ${mint.slice(0, 8)}\n` +
+          `├ Wallet: ${walletLabel}\n` +
+          `├ Reason: STAMPEDE (${buyerTracker.buyers.size} unique buyers in 60s)\n` +
+          `├ SOL spent: ${solSpent.toFixed(2)}\n` +
+          `└ <a href="https://pump.fun/coin/${mint}">pump.fun</a> · <a href="https://dexscreener.com/solana/${mint}">dex</a>`,
+          { parse_mode: 'HTML' },
+        );
+        return;
+      }
+
+      // Calculate position size early (needed for parallel quote)
+      const tierSize = this.capitalManager.getPositionSize();
+      let pumpSize = tierSize * cfg.positionSizeMultiplier;
+      const confluenceMultiplier = Math.min(1 + (confluenceCount - 1) * 0.25, 1.5);
+      pumpSize = pumpSize * confluenceMultiplier;
+
+      // Pass cached PumpPortal curve data to validation (avoids 200-400ms RPC call)
+      const cachedCurve = this.pumpFunCurveCache.get(mint);
+      const curveHint = cachedCurve && (Date.now() - cachedCurve.updatedAt) < 10_000
+        ? { realSol: cachedCurve.realSol }
+        : undefined;
+
+      // Run validation + Jupiter quote in parallel (saves 200-400ms)
+      const swapExec = this.pumpFunTracker.getSwapExecutor();
+      const [validation, prefetchedQuote] = await Promise.all([
+        validatePumpFunSignal(signal, curveHint),
+        swapExec ? swapExec.prefetchQuote(mint, pumpSize) : Promise.resolve(null),
+      ]);
 
       if (!validation.passed) {
         logger.info({
@@ -1101,16 +1207,10 @@ class RossyBotV2 {
         return;
       }
 
-      // Calculate position size: standard tier size × pump.fun multiplier
-      // Confluence bonus: 2 wallets = 1.25x, 3+ = 1.5x (capped)
-      const tierSize = this.capitalManager.getPositionSize();
-      let pumpSize = tierSize * cfg.positionSizeMultiplier;
-      const confluenceMultiplier = Math.min(1 + (confluenceCount - 1) * 0.25, 1.5);
-      pumpSize = pumpSize * confluenceMultiplier;
       logger.info({ token: mint.slice(0, 8), confluenceCount, totalSol: confluence.totalSol.toFixed(2), multiplier: confluenceMultiplier },
         'Pump.fun confluence confirmed — entering');
 
-      // Open pump.fun position
+      // Open pump.fun position (pass prefetched quote to skip re-fetching)
       const pos = await this.pumpFunTracker.openPosition({
         tokenMint: mint,
         tokenSymbol: signal.tokenMint.slice(0, 6),
@@ -1121,6 +1221,7 @@ class RossyBotV2 {
         alphaBuyTime: new Date(signal.blockTime * 1000),
         signalWallets: Array.from(confluence.wallets),
         capitalTier: this.capitalManager.tier,
+        prefetchedQuote: prefetchedQuote || undefined,
       });
 
       if (!pos) {
@@ -1150,13 +1251,7 @@ class RossyBotV2 {
         { parse_mode: 'HTML' },
       );
 
-      logger.info({
-        token: mint.slice(0, 8),
-        wallet: walletLabel,
-        size: pumpSize.toFixed(4),
-        curveFill: `${(validation.curveFillPct * 100).toFixed(0)}%`,
-        mode,
-      }, 'Pump.fun position opened');
+      // Position opened log is in tracker._executeOpen — no duplicate needed here
     } catch (err) {
       logger.error({ err, token: signal.tokenMint?.slice(0, 8) }, 'Error in pump.fun buy handler');
     }

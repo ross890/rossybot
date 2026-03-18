@@ -103,6 +103,11 @@ export class PumpFunTracker {
     }
   }
 
+  /** Expose swap executor for prefetching quotes */
+  getSwapExecutor(): SwapExecutor | null {
+    return this.swapExecutor;
+  }
+
   async openPosition(params: {
     tokenMint: string;
     tokenSymbol: string | null;
@@ -113,6 +118,7 @@ export class PumpFunTracker {
     alphaBuyTime: Date;
     signalWallets: string[];
     capitalTier: string;
+    prefetchedQuote?: unknown;
   }): Promise<PumpFunPosition | null> {
     // Dedup lock: prevent concurrent entries on the same token
     if (this.pendingEntries.has(params.tokenMint)) {
@@ -138,6 +144,7 @@ export class PumpFunTracker {
     alphaBuyTime: Date;
     signalWallets: string[];
     capitalTier: string;
+    prefetchedQuote?: unknown;
   }): Promise<PumpFunPosition | null> {
     let entryTx: string | null = null;
     let feesSol = 0;
@@ -161,6 +168,7 @@ export class PumpFunTracker {
           params.tokenMint,
           params.solAmount,
           0, // liquidityUsd=0 forces thinLiquiditySlippageBps in SwapExecutor
+          attempt === 0 ? params.prefetchedQuote : undefined, // Only use prefetched quote on first attempt
         );
 
         if (result.success) break;
@@ -447,7 +455,25 @@ export class PumpFunTracker {
     }
   }
 
+  // Sell lock: prevent concurrent sells for the same position (race condition guard)
+  private pendingSells: Set<string> = new Set();
+
   private async closePosition(pos: PumpFunPosition, reason: string): Promise<void> {
+    // Race condition guard: if a sell is already in progress for this position, skip
+    if (this.pendingSells.has(pos.id)) {
+      logger.debug({ token: pos.token_symbol || pos.token_address.slice(0, 8), reason },
+        'Pump.fun sell skipped — already selling this position');
+      return;
+    }
+    // Also skip if already closed (another concurrent path may have closed it)
+    if (pos.status === PositionStatus.CLOSED) {
+      logger.debug({ token: pos.token_symbol || pos.token_address.slice(0, 8) },
+        'Pump.fun sell skipped — position already closed');
+      return;
+    }
+    this.pendingSells.add(pos.id);
+
+    try {
     // LIVE MODE: execute real sell swap
     if (this.swapExecutor) {
       const tokenName = pos.token_symbol || pos.token_address.slice(0, 8);
@@ -540,6 +566,9 @@ export class PumpFunTracker {
     // Refresh wallet balance after sell
     if (this.swapExecutor && this.onBalanceRefresh) {
       try { await this.onBalanceRefresh(); } catch { /* ignore */ }
+    }
+    } finally {
+      this.pendingSells.delete(pos.id);
     }
   }
 

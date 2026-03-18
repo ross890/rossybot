@@ -20,36 +20,44 @@ export interface PumpFunValidationResult {
  */
 export async function validatePumpFunSignal(
   signal: ParsedSignal,
+  curveHint?: { realSol: number },
 ): Promise<PumpFunValidationResult> {
   const cfg = config.pumpFun;
   const mint = signal.tokenMint;
 
   // 1. Check bonding curve progress
-  // Prefer PDA derivation (deterministic) over heuristic-detected address
-  let bondingCurve = signal.pumpFunData?.bondingCurveAddress;
-  if (!bondingCurve || bondingCurve === 'unknown') {
-    try {
-      bondingCurve = deriveBondingCurveAddress(mint);
-    } catch {
-      bondingCurve = undefined;
-    }
-  }
+  // Use PumpPortal cache if available (saves 200-400ms RPC call), fall back to RPC
   let curveFillPct = 0;
   let solInCurve = 0;
 
-  if (bondingCurve) {
-    const curveState = await fetchCurveState(bondingCurve);
-    if (curveState?.exists) {
-      solInCurve = curveState.solBalance;
-      curveFillPct = estimateCurveFillPct(solInCurve);
-    } else if (bondingCurve !== deriveBondingCurveAddress(mint)) {
-      // Heuristic address returned no data — retry with PDA
-      const pdaAddr = deriveBondingCurveAddress(mint);
-      const pdaState = await fetchCurveState(pdaAddr);
-      if (pdaState?.exists) {
-        bondingCurve = pdaAddr;
-        solInCurve = pdaState.solBalance;
+  if (curveHint) {
+    // Fast path: use cached PumpPortal curve data (no RPC needed)
+    solInCurve = curveHint.realSol;
+    curveFillPct = estimateCurveFillPct(solInCurve);
+    logger.debug({ mint: mint.slice(0, 8), solInCurve, source: 'pumpportal_cache' }, 'Using cached curve state');
+  } else {
+    // Slow path: fetch from RPC (200-400ms)
+    let bondingCurve = signal.pumpFunData?.bondingCurveAddress;
+    if (!bondingCurve || bondingCurve === 'unknown') {
+      try {
+        bondingCurve = deriveBondingCurveAddress(mint);
+      } catch {
+        bondingCurve = undefined;
+      }
+    }
+
+    if (bondingCurve) {
+      const curveState = await fetchCurveState(bondingCurve);
+      if (curveState?.exists) {
+        solInCurve = curveState.solBalance;
         curveFillPct = estimateCurveFillPct(solInCurve);
+      } else if (bondingCurve !== deriveBondingCurveAddress(mint)) {
+        const pdaAddr = deriveBondingCurveAddress(mint);
+        const pdaState = await fetchCurveState(pdaAddr);
+        if (pdaState?.exists) {
+          solInCurve = pdaState.solBalance;
+          curveFillPct = estimateCurveFillPct(solInCurve);
+        }
       }
     }
   }

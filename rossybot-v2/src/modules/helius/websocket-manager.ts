@@ -41,7 +41,10 @@ export class HeliusWebSocketManager extends EventEmitter {
   // Track in-flight tx fetches to avoid overwhelming RPC
   private activeFetches = 0;
   private filteredTxCount = 0; // TXs skipped by log pre-filter (no token activity)
-  private static readonly MAX_CONCURRENT_FETCHES = 5;
+  private static readonly MAX_CONCURRENT_FETCHES = 10; // Increased from 5
+  // Queue for signals that arrive during high concurrency (instead of dropping them)
+  private fetchQueue: Array<{ signature: string; slot?: number }> = [];
+  private static readonly MAX_QUEUE_SIZE = 20;
 
   get connected(): boolean {
     return this.ws?.readyState === WebSocket.OPEN;
@@ -233,7 +236,13 @@ export class HeliusWebSocketManager extends EventEmitter {
    */
   private async fetchAndEmitTransaction(signature: string, slot?: number): Promise<void> {
     if (this.activeFetches >= HeliusWebSocketManager.MAX_CONCURRENT_FETCHES) {
-      logger.debug({ signature: signature.slice(0, 12) }, 'Skipping tx fetch — too many concurrent fetches');
+      // Queue instead of drop — process when a slot opens up
+      if (this.fetchQueue.length < HeliusWebSocketManager.MAX_QUEUE_SIZE) {
+        this.fetchQueue.push({ signature, slot });
+        logger.debug({ signature: signature.slice(0, 12), queueSize: this.fetchQueue.length }, 'Queued tx fetch — at concurrency limit');
+      } else {
+        logger.debug({ signature: signature.slice(0, 12) }, 'Dropping tx fetch — queue full');
+      }
       return;
     }
 
@@ -264,6 +273,11 @@ export class HeliusWebSocketManager extends EventEmitter {
       logger.debug({ err, sig: signature.slice(0, 12) }, 'Failed to fetch transaction for log notification');
     } finally {
       this.activeFetches--;
+      // Drain queue if there are pending fetches
+      if (this.fetchQueue.length > 0 && this.activeFetches < HeliusWebSocketManager.MAX_CONCURRENT_FETCHES) {
+        const next = this.fetchQueue.shift();
+        if (next) this.fetchAndEmitTransaction(next.signature, next.slot);
+      }
     }
   }
 

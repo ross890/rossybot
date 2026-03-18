@@ -103,6 +103,11 @@ export class PumpFunTracker {
     }
   }
 
+  /** Expose swap executor for prefetching quotes */
+  getSwapExecutor(): SwapExecutor | null {
+    return this.swapExecutor;
+  }
+
   async openPosition(params: {
     tokenMint: string;
     tokenSymbol: string | null;
@@ -113,6 +118,7 @@ export class PumpFunTracker {
     alphaBuyTime: Date;
     signalWallets: string[];
     capitalTier: string;
+    prefetchedQuote?: unknown;
   }): Promise<PumpFunPosition | null> {
     // Dedup lock: prevent concurrent entries on the same token
     if (this.pendingEntries.has(params.tokenMint)) {
@@ -138,6 +144,7 @@ export class PumpFunTracker {
     alphaBuyTime: Date;
     signalWallets: string[];
     capitalTier: string;
+    prefetchedQuote?: unknown;
   }): Promise<PumpFunPosition | null> {
     let entryTx: string | null = null;
     let feesSol = 0;
@@ -161,6 +168,7 @@ export class PumpFunTracker {
           params.tokenMint,
           params.solAmount,
           0, // liquidityUsd=0 forces thinLiquiditySlippageBps in SwapExecutor
+          attempt === 0 ? params.prefetchedQuote : undefined, // Only use prefetched quote on first attempt
         );
 
         if (result.success) break;

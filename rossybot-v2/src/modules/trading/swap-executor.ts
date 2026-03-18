@@ -34,7 +34,7 @@ export class SwapExecutor {
   }
 
   /** Buy token with SOL */
-  async buyToken(tokenMint: string, solAmount: number, liquidityUsd: number): Promise<SwapResult> {
+  async buyToken(tokenMint: string, solAmount: number, liquidityUsd: number, prefetchedQuote?: unknown): Promise<SwapResult> {
     const lamports = Math.round(solAmount * LAMPORTS_PER_SOL);
     const slippageBps = liquidityUsd < 50_000
       ? config.jupiter.thinLiquiditySlippageBps
@@ -46,6 +46,7 @@ export class SwapExecutor {
       amount: lamports,
       slippageBps,
       isBuy: true,
+      prefetchedQuote,
     });
   }
 
@@ -86,14 +87,42 @@ export class SwapExecutor {
     });
   }
 
+  /**
+   * Pre-fetch a Jupiter quote (used to parallelize quote with validation).
+   * Returns the raw quote response data, or null on failure.
+   */
+  async prefetchQuote(tokenMint: string, solAmount: number): Promise<unknown | null> {
+    try {
+      const lamports = Math.round(solAmount * LAMPORTS_PER_SOL);
+      const jupHeaders: Record<string, string> = {};
+      if (config.jupiter.apiKey) jupHeaders['x-api-key'] = config.jupiter.apiKey;
+
+      const resp = await axios.get(`${config.jupiter.apiUrl}/quote`, {
+        params: {
+          inputMint: SOL_MINT,
+          outputMint: tokenMint,
+          amount: lamports.toString(),
+          slippageBps: config.jupiter.thinLiquiditySlippageBps,
+          onlyDirectRoutes: false,
+        },
+        headers: jupHeaders,
+        timeout: 10_000,
+      });
+      return resp.data || null;
+    } catch {
+      return null;
+    }
+  }
+
   private async executeSwap(params: {
     inputMint: string;
     outputMint: string;
     amount: number;
     slippageBps: number;
     isBuy: boolean;
+    prefetchedQuote?: unknown;
   }): Promise<SwapResult> {
-    const { inputMint, outputMint, amount, slippageBps, isBuy } = params;
+    const { inputMint, outputMint, amount, slippageBps, isBuy, prefetchedQuote } = params;
 
     // Get priority fee + quote in parallel (independent calls)
     const jupHeaders: Record<string, string> = {};
@@ -103,17 +132,19 @@ export class SwapExecutor {
 
     const [priorityFee, quoteResponse] = await Promise.all([
       this.getPriorityFee(),
-      axios.get(`${config.jupiter.apiUrl}/quote`, {
-        params: {
-          inputMint,
-          outputMint,
-          amount: amount.toString(),
-          slippageBps,
-          onlyDirectRoutes: false,
-        },
-        headers: jupHeaders,
-        timeout: 10_000,
-      }),
+      prefetchedQuote
+        ? Promise.resolve({ data: prefetchedQuote })
+        : axios.get(`${config.jupiter.apiUrl}/quote`, {
+            params: {
+              inputMint,
+              outputMint,
+              amount: amount.toString(),
+              slippageBps,
+              onlyDirectRoutes: false,
+            },
+            headers: jupHeaders,
+            timeout: 10_000,
+          }),
     ]);
 
     for (let attempt = 0; attempt <= config.jupiter.maxRetries; attempt++) {
@@ -165,18 +196,36 @@ export class SwapExecutor {
           this.connection.getLatestBlockhash('confirmed'),
         ]);
 
-        // 4. Confirm transaction
-        const confirmation = await this.connection.confirmTransaction(
-          { signature, ...blockhash },
-          'confirmed',
-        );
-
-        if (confirmation.value.err) {
-          throw new Error(`Transaction failed on-chain: ${JSON.stringify(confirmation.value.err)}`);
-        }
-
         // Estimate fees from priority fee + base fee (skip pre/post balance RPC calls)
         const estimatedFees = (currentPriorityFee * 200_000 / 1e6 + 5000) / LAMPORTS_PER_SOL;
+
+        // 4. BUY = fire-and-forget confirmation (saves 5-30s latency)
+        //    SELL = wait for confirmation (need to verify SOL returned)
+        if (isBuy) {
+          // Confirm async — log result but don't block the caller
+          this.connection.confirmTransaction({ signature, ...blockhash }, 'confirmed')
+            .then((conf) => {
+              if (conf.value.err) {
+                logger.error({ signature: signature.slice(0, 16), err: conf.value.err },
+                  'BUY confirmation FAILED on-chain — position may not exist');
+              } else {
+                logger.info({ signature: signature.slice(0, 16) }, 'BUY confirmed on-chain');
+              }
+            })
+            .catch((err) => {
+              logger.warn({ signature: signature.slice(0, 16), err: String(err) },
+                'BUY confirmation check failed — will verify via balance scan');
+            });
+        } else {
+          // SELL: wait for confirmation
+          const confirmation = await this.connection.confirmTransaction(
+            { signature, ...blockhash },
+            'confirmed',
+          );
+          if (confirmation.value.err) {
+            throw new Error(`Transaction failed on-chain: ${JSON.stringify(confirmation.value.err)}`);
+          }
+        }
 
         logger.info({
           signature: signature.slice(0, 16),
@@ -187,6 +236,7 @@ export class SwapExecutor {
           outAmount: quote.outAmount,
           feesSol: estimatedFees.toFixed(6),
           attempt,
+          fireAndForget: isBuy,
         }, 'Swap executed');
 
         return {

@@ -486,6 +486,10 @@ export class WalletDiscovery {
         checked++;
 
         const isSeed = wallet.source === 'NANSEN_SEED' || wallet.source === 'PUMPFUN_SEED';
+        // Even seed wallets should be deactivated if dead for 30+ days — no wallet is worth
+        // watching after a month of silence (e.g. abandoned wallets, compromised keys)
+        const SEED_HARD_CUTOFF_DAYS = 30;
+        const seedCutoff = new Date(Date.now() - SEED_HARD_CUTOFF_DAYS * 24 * 60 * 60 * 1000);
 
         if (lastTxTime) {
           // Update last_active_at with actual on-chain activity time
@@ -494,7 +498,7 @@ export class WalletDiscovery {
             [new Date(lastTxTime * 1000), wallet.address],
           );
 
-          // Deactivate if inactive for too long (skip seed wallets)
+          // Deactivate if inactive for too long
           if (!isSeed && lastTxTime * 1000 < cutoff.getTime()) {
             await query(`UPDATE alpha_wallets SET active = FALSE WHERE address = $1`, [wallet.address]);
             deactivated++;
@@ -502,6 +506,15 @@ export class WalletDiscovery {
               address: wallet.address.slice(0, 8),
               lastActiveAgo: `${Math.round((Date.now() - lastTxTime * 1000) / 86400000)}d`,
             }, 'Deactivated inactive wallet');
+          } else if (isSeed && lastTxTime * 1000 < seedCutoff.getTime()) {
+            // Seed wallets inactive 30+ days — deactivate (likely abandoned)
+            await query(`UPDATE alpha_wallets SET active = FALSE WHERE address = $1`, [wallet.address]);
+            deactivated++;
+            logger.info({
+              address: wallet.address.slice(0, 8),
+              lastActiveAgo: `${Math.round((Date.now() - lastTxTime * 1000) / 86400000)}d`,
+              source: wallet.source,
+            }, 'Deactivated seed wallet — inactive >30d');
           }
         } else {
           // No transactions found at all — deactivate non-seeds
@@ -509,6 +522,12 @@ export class WalletDiscovery {
             await query(`UPDATE alpha_wallets SET active = FALSE WHERE address = $1`, [wallet.address]);
             deactivated++;
             logger.info({ address: wallet.address.slice(0, 8) }, 'Deactivated wallet — no on-chain activity found');
+          } else {
+            // Seed wallet with zero on-chain activity — deactivate
+            await query(`UPDATE alpha_wallets SET active = FALSE WHERE address = $1`, [wallet.address]);
+            deactivated++;
+            logger.info({ address: wallet.address.slice(0, 8), source: wallet.source },
+              'Deactivated seed wallet — no on-chain activity found');
           }
         }
 

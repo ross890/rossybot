@@ -585,6 +585,11 @@ export class PumpFunTracker {
       }
     }
 
+    // Shadow mode: simulate net PnL from curve-estimated pnl_percent
+    if (!this.swapExecutor) {
+      pos.net_pnl_sol = pos.entry_price_sol * pos.pnl_percent;
+    }
+
     pos.status = PositionStatus.CLOSED;
     pos.exit_reason = reason;
     pos.closed_at = new Date();

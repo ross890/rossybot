@@ -1049,17 +1049,9 @@ class RossyBotV2 {
         }
       }
 
-      // Require multi-wallet confluence before entry — single-wallet signals lose money.
-      // Accumulate wallets first, only validate & enter when 2+ wallets have bought.
+      // Confluence tracking: single wallet is enough now that exits work properly.
+      // Multi-wallet confluence still gets a size bonus (see confluenceMultiplier below).
       const confluenceCount = confluence.wallets.size;
-      if (confluenceCount < 2) {
-        // First wallet on this token — log and wait for more signals
-        logger.info({
-          token: mint.slice(0, 8), wallet: walletLabel,
-          confluenceCount, totalSol: confluence.totalSol.toFixed(2),
-        }, 'Pump.fun waiting for confluence (need 2+ wallets)');
-        return;
-      }
 
       // Validate through pump.fun-specific gate
       const validation = await validatePumpFunSignal(signal);

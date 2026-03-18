@@ -60,7 +60,10 @@ export class WalletDiscovery {
 
     for (const w of eligible) {
       const isPumpFun = w.pumpfunOnly === true;
-      const source = isPumpFun ? WalletSource.PUMPFUN_SEED : WalletSource.NANSEN_SEED;
+      const isGrad = w.label.startsWith('grad_');
+      const source = isGrad ? WalletSource.GRADUATION_SEED
+        : isPumpFun ? WalletSource.PUMPFUN_SEED
+        : WalletSource.NANSEN_SEED;
 
       await query(
         `INSERT INTO alpha_wallets (address, label, source, tier, min_capital_tier, active, helius_subscribed, pumpfun_only)
@@ -107,7 +110,7 @@ export class WalletDiscovery {
     const result = await query(
       `UPDATE alpha_wallets SET active = FALSE
        WHERE active = TRUE
-         AND source NOT IN ('NANSEN_SEED', 'PUMPFUN_SEED')
+         AND source NOT IN ('NANSEN_SEED', 'PUMPFUN_SEED', 'GRADUATION_SEED')
          AND COALESCE(nansen_pnl_usd, 0) < $1
        RETURNING address`,
       [MIN_PNL_USD],
@@ -128,7 +131,7 @@ export class WalletDiscovery {
     const result = await query(
       `UPDATE alpha_wallets SET active = FALSE
        WHERE active = TRUE
-         AND source NOT IN ('NANSEN_SEED', 'PUMPFUN_SEED')
+         AND source NOT IN ('NANSEN_SEED', 'PUMPFUN_SEED', 'GRADUATION_SEED')
          AND (
            -- No trade data AND past grace period (give new wallets time to prove themselves)
            (COALESCE(our_total_trades, 0) = 0 AND COALESCE(round_trips_analyzed, 0) = 0
@@ -412,7 +415,7 @@ export class WalletDiscovery {
     // Deactivate: 3 consecutive losses (was 5 — tighter)
     const deactivated = await query(
       `UPDATE alpha_wallets SET active = FALSE
-       WHERE active = TRUE AND source NOT IN ('NANSEN_SEED', 'PUMPFUN_SEED') AND consecutive_losses >= 3
+       WHERE active = TRUE AND source NOT IN ('NANSEN_SEED', 'PUMPFUN_SEED', 'GRADUATION_SEED') AND consecutive_losses >= 3
        RETURNING address`,
     );
 
@@ -420,7 +423,7 @@ export class WalletDiscovery {
     const pnlPurged = await query(
       `UPDATE alpha_wallets SET active = FALSE
        WHERE active = TRUE
-         AND source NOT IN ('NANSEN_SEED', 'PUMPFUN_SEED')
+         AND source NOT IN ('NANSEN_SEED', 'PUMPFUN_SEED', 'GRADUATION_SEED')
          AND COALESCE(nansen_pnl_usd, 0) < 1000
        RETURNING address`,
     );
@@ -485,7 +488,7 @@ export class WalletDiscovery {
         const lastTxTime = await this.getLastTransactionTime(wallet.address);
         checked++;
 
-        const isSeed = wallet.source === 'NANSEN_SEED' || wallet.source === 'PUMPFUN_SEED';
+        const isSeed = wallet.source === 'NANSEN_SEED' || wallet.source === 'PUMPFUN_SEED' || wallet.source === 'GRADUATION_SEED';
         // Even seed wallets should be deactivated if dead for 30+ days — no wallet is worth
         // watching after a month of silence (e.g. abandoned wallets, compromised keys)
         const SEED_HARD_CUTOFF_DAYS = 30;
@@ -586,7 +589,7 @@ export class WalletDiscovery {
     const staleResult = await query(
       `UPDATE alpha_wallets SET active = FALSE
        WHERE active = TRUE
-         AND source NOT IN ('NANSEN_SEED', 'PUMPFUN_SEED')
+         AND source NOT IN ('NANSEN_SEED', 'PUMPFUN_SEED', 'GRADUATION_SEED')
          AND COALESCE(our_total_trades, 0) = 0
          AND COALESCE(round_trips_analyzed, 0) = 0
          AND discovered_at < $1
@@ -604,7 +607,7 @@ export class WalletDiscovery {
     const slowResult = await query(
       `UPDATE alpha_wallets SET active = FALSE
        WHERE active = TRUE
-         AND source NOT IN ('NANSEN_SEED', 'PUMPFUN_SEED')
+         AND source NOT IN ('NANSEN_SEED', 'PUMPFUN_SEED', 'GRADUATION_SEED')
          AND COALESCE(median_hold_time_mins, 0) > 720
          AND COALESCE(round_trips_analyzed, 0) >= 3
        RETURNING address`,
@@ -628,7 +631,7 @@ export class WalletDiscovery {
         `UPDATE alpha_wallets SET active = FALSE
          WHERE address IN (
            SELECT address FROM alpha_wallets
-           WHERE active = TRUE AND source NOT IN ('NANSEN_SEED', 'PUMPFUN_SEED')
+           WHERE active = TRUE AND source NOT IN ('NANSEN_SEED', 'PUMPFUN_SEED', 'GRADUATION_SEED')
            ORDER BY
              COALESCE(short_term_alpha_score, 0) ASC,
              COALESCE(nansen_pnl_usd, 0) ASC
@@ -662,9 +665,11 @@ export class WalletDiscovery {
          (
            -- Seed wallets get base priority (reduced for non-pumpfun seeds in curve scalp mode)
            CASE
+             WHEN source = 'GRADUATION_SEED' THEN 60
              WHEN source IN ('NANSEN_SEED', 'PUMPFUN_SEED') AND pumpfun_only = TRUE THEN 50
              WHEN source IN ('NANSEN_SEED', 'PUMPFUN_SEED') AND $1 = TRUE THEN 20
              WHEN source IN ('NANSEN_SEED', 'PUMPFUN_SEED') THEN 50
+             WHEN source = 'GRADUATION_DISCOVERY' THEN 35
              ELSE 0
            END
            -- Pump.fun wallet bonus in curve scalp mode (+25 for pumpfun_only wallets)

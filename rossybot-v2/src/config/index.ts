@@ -243,6 +243,29 @@ export const SEED_WALLETS: Array<{
   { address: '4Be9CvxqHW6BYiRAxW9Q3xu1ycTMWaL5z8NX4HR3ha7t', label: 'pf_axiom_50x_flipper', minTier: CapitalTier.MICRO, pumpfunOnly: true },
   // High win rates on Dune "Solana Alpha Wallets" dashboard. Active across trading bots. (Dune Analytics)
   { address: '8zFZHuSRuDpuAR7J6FzwyF3vKNx4CVW3DFHJerQhc7Zd', label: 'pf_dune_high_wr', minTier: CapitalTier.MICRO, pumpfunOnly: true },
+
+  // --- Top pump.fun graduation wallets (30-day realized profit leaders) ---
+  { address: 'ARu4n5mFdZogZAravu7CcizaojWnS6oqka37gdLT5SZn', label: 'grad_587m_top1', minTier: CapitalTier.MICRO, pumpfunOnly: true },
+  { address: 'j1oeQoPeuEDmjvyMwBmCWexzCQup77kbKKxV59CnYbd', label: 'grad_43m_top2', minTier: CapitalTier.MICRO, pumpfunOnly: true },
+  { address: 'suqh5sHtr8HyJ7q8scBimULPkPpA557prMG47xCHQfK', label: 'grad_27m_top3', minTier: CapitalTier.MICRO, pumpfunOnly: true },
+  { address: 'j1oAbxxiDUWvoHxEDhWE7THLjEkDQW2cSHYn2vttxTF', label: 'grad_17m_top4', minTier: CapitalTier.MICRO, pumpfunOnly: true },
+  { address: '7dGrdJRYtsNR8UYxZ3TnifXGjGc9eRYLq9sELwYpuuUu', label: 'grad_16m_top5', minTier: CapitalTier.MICRO, pumpfunOnly: true },
+  { address: 'DfMxre4cKmvogbLrPigxmibVTTQDuzjdXojWzjCXXhzj', label: 'grad_10m_top6', minTier: CapitalTier.MICRO, pumpfunOnly: true },
+  { address: '73LnJ7G9ffBDjEBGgJDdgvLUhD5APLonKrNiHsKDCw5B', label: 'grad_8m_top7', minTier: CapitalTier.MICRO, pumpfunOnly: true },
+  { address: 'CyaE1VxvBrahnPWkqm5VsdCvyS2QmNht2UFrKJHga54o', label: 'grad_7m_top8', minTier: CapitalTier.MICRO, pumpfunOnly: true },
+  { address: '54Pz1e35z9uoFdnxtzjp7xZQoFiofqhdayQWBMN7dsuy', label: 'grad_6m_top9', minTier: CapitalTier.MICRO, pumpfunOnly: true },
+  { address: '56S29mZ3wqvw8hATuUUFqKhGcSGYFASRRFNT38W8q7G3', label: 'grad_6m_top10', minTier: CapitalTier.MICRO, pumpfunOnly: true },
+  { address: '2ezv4U5HmPpkt2xLsKnw1FyyGmjFBeW7c166p99Hw2xB', label: 'grad_6m_top11', minTier: CapitalTier.MICRO, pumpfunOnly: true },
+  { address: 'JDd3hy3gQn2V982mi1zqhNqUw1GfV2UL6g76STojCJPN', label: 'grad_5m_top13', minTier: CapitalTier.MICRO, pumpfunOnly: true },
+  { address: '4DdrfiDHpmx55i4SPssxVzS9ZaKLb8qr45NKY9Er9nNh', label: 'grad_4m_top16', minTier: CapitalTier.MICRO, pumpfunOnly: true },
+  { address: '4hSXPtxZgXFpo6Vxq9yqxNjcBoqWN3VoaPJWonUtupzD', label: 'grad_4m_top17', minTier: CapitalTier.MICRO, pumpfunOnly: true },
+  { address: '9FNz4MjPUmnJqTf6yEDbL1D4SsHVh7uA8zRHhR5K138r', label: 'grad_3m_top18', minTier: CapitalTier.MICRO, pumpfunOnly: true },
+  { address: '4BdKaxN8G6ka4GYtQQWk4G4dZRUTX2vQH9GcXdBREFUk', label: 'grad_3m_top19', minTier: CapitalTier.MICRO, pumpfunOnly: true },
+  { address: '9ZzjXiwkGRDBwVHJitfx8AmnN2YUbnqW6M1tH38juEeJ', label: 'grad_3m_top20', minTier: CapitalTier.MICRO, pumpfunOnly: true },
+  { address: '2rbMgYvzAb3xDk6vXrzKkY3VwsmyDZsJTkvB3JJYsRzA', label: 'grad_3m_top22', minTier: CapitalTier.MICRO, pumpfunOnly: true },
+  { address: 'AJ6MGExeK7FXmeKkKPmALjcdXVStXYokYNv9uVfDRtvo', label: 'grad_3m_top23', minTier: CapitalTier.MICRO, pumpfunOnly: true },
+  { address: '3tc4BVAdzjr1JpeZu6NAjLHyp4kK3iic7TexMBYGJ4Xk', label: 'grad_3m_top24', minTier: CapitalTier.MICRO, pumpfunOnly: true },
+  { address: '86AEJExyjeNNgcp7GrAvCXTDicf5aGWgoERbXFiG1EdD', label: 'grad_3m_top25', minTier: CapitalTier.MICRO, pumpfunOnly: true },
 ];
 
 export function getTierForCapital(capitalSol: number): CapitalTier {

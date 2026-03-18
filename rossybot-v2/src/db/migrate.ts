@@ -346,6 +346,19 @@ async function migrate() {
   // --- Add peak curve fill tracking for analytics ---
   await pool.query(`ALTER TABLE pumpfun_positions ADD COLUMN IF NOT EXISTS peak_curve_fill_pct DECIMAL DEFAULT 0`);
 
+  // 10. graduated_tokens — tracks analyzed graduated tokens for retroanalysis
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS graduated_tokens (
+      mint TEXT PRIMARY KEY,
+      symbol TEXT,
+      name TEXT,
+      market_cap_sol DECIMAL DEFAULT 0,
+      created_at TIMESTAMPTZ,
+      analyzed_at TIMESTAMPTZ DEFAULT NOW(),
+      early_buyers_found INT DEFAULT 0
+    )
+  `);
+
   console.log('✅ All migrations complete');
   await pool.end();
 }

@@ -1043,7 +1043,9 @@ class RossyBotV2 {
             `🎰 PUMP.FUN rejected: ${mint.slice(0, 8)}\n` +
             `├ Wallet: ${walletLabel}\n` +
             `├ Reason: WALLET_QUALITY (WR ${(wr * 100).toFixed(0)}%, ${consLosses} consecutive losses)\n` +
-            `└ SOL spent: ${solSpent.toFixed(2)}`,
+            `├ SOL spent: ${solSpent.toFixed(2)}\n` +
+            `└ <a href="https://pump.fun/coin/${mint}">pump.fun</a> · <a href="https://dexscreener.com/solana/${mint}">dex</a>`,
+            { parse_mode: 'HTML' },
           );
           return;
         }
@@ -1079,7 +1081,9 @@ class RossyBotV2 {
               `├ Wallet: ${walletLabel}\n` +
               `├ Reason: ${validation.failReason}\n` +
               `├ Curve: ${(validation.curveFillPct * 100).toFixed(0)}% (${validation.solInCurve.toFixed(1)} SOL)\n` +
-              `└ SOL spent: ${solSpent.toFixed(2)}`,
+              `├ SOL spent: ${solSpent.toFixed(2)}\n` +
+              `└ <a href="https://pump.fun/coin/${mint}">pump.fun</a> · <a href="https://dexscreener.com/solana/${mint}">dex</a>`,
+              { parse_mode: 'HTML' },
             );
           }
         } else {
@@ -1089,7 +1093,9 @@ class RossyBotV2 {
             `├ Wallet: ${walletLabel}\n` +
             `├ Reason: ${validation.failReason}\n` +
             `├ Curve: ${(validation.curveFillPct * 100).toFixed(0)}% (${validation.solInCurve.toFixed(1)} SOL)\n` +
-            `└ SOL spent: ${solSpent.toFixed(2)}`,
+            `├ SOL spent: ${solSpent.toFixed(2)}\n` +
+            `└ <a href="https://pump.fun/coin/${mint}">pump.fun</a> · <a href="https://dexscreener.com/solana/${mint}">dex</a>`,
+            { parse_mode: 'HTML' },
           );
         }
         return;
@@ -1139,7 +1145,9 @@ class RossyBotV2 {
         `├ Alpha spent: ${solSpent.toFixed(2)} SOL\n` +
         `├ Exits: stall ${cfg.staleTimeKillMins}min | SL ${(cfg.stopLoss * 100).toFixed(0)}% | hard ${cfg.maxTokenAgeMins}min\n` +
         (pos.entry_tx ? `├ TX: ${pos.entry_tx.slice(0, 16)}...\n` : '') +
+        `├ <a href="https://pump.fun/coin/${mint}">pump.fun</a> · <a href="https://dexscreener.com/solana/${mint}">dex</a>\n` +
         `└ Mode: ${mode} | Strategy: PRE-GRAD SCALP`,
+        { parse_mode: 'HTML' },
       );
 
       logger.info({

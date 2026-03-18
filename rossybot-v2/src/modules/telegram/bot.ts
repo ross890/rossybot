@@ -1046,10 +1046,10 @@ export class TelegramService {
 
   // --- Helpers ---
 
-  async send(text: string): Promise<void> {
+  async send(text: string, opts?: { parse_mode?: 'HTML' | 'Markdown' | 'MarkdownV2' }): Promise<void> {
     try {
       for (const chunk of this.chunkMessage(text)) {
-        await this.bot.sendMessage(this.chatId, chunk, { parse_mode: undefined });
+        await this.bot.sendMessage(this.chatId, chunk, { parse_mode: opts?.parse_mode });
       }
     } catch (err) {
       logger.error({ err }, 'Failed to send Telegram message');

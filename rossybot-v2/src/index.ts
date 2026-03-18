@@ -14,7 +14,7 @@ import { LiveTracker } from './modules/positions/live-tracker.js';
 import { CapitalManager } from './modules/trading/capital-manager.js';
 import { SwapExecutor } from './modules/trading/swap-executor.js';
 import { TelegramService } from './modules/telegram/index.js';
-import { PumpFunTracker, validatePumpFunSignal, PumpPortalClient, PumpFunAlphaDiscovery, deriveBondingCurveAddress } from './modules/pumpfun/index.js';
+import { PumpFunTracker, validatePumpFunSignal, PumpPortalClient, PumpFunAlphaDiscovery, deriveBondingCurveAddress, MoversTracker, type MoverToken } from './modules/pumpfun/index.js';
 import { GraduationAnalyzer } from './modules/analysis/graduation-analyzer.js';
 import { fetchDexPair } from './modules/validation/dexscreener.js';
 import { SignalType, type ParsedSignal, type PositionView } from './types/index.js';
@@ -154,6 +154,9 @@ class RossyBotV2 {
   private pumpPortal: PumpPortalClient;
   private pumpFunAlphaDiscovery: PumpFunAlphaDiscovery;
 
+  // Movers tracker — detects high-velocity tokens from PumpPortal trade stream
+  private moversTracker: MoversTracker;
+
   // Graduation retroanalysis — discovers wallets that buy early on tokens that graduate
   private graduationAnalyzer: GraduationAnalyzer;
 
@@ -184,6 +187,7 @@ class RossyBotV2 {
     this.pumpFunTracker = new PumpFunTracker();
     this.pumpPortal = new PumpPortalClient();
     this.pumpFunAlphaDiscovery = new PumpFunAlphaDiscovery();
+    this.moversTracker = new MoversTracker();
     this.graduationAnalyzer = new GraduationAnalyzer();
 
     // Initialize position tracker based on mode
@@ -342,10 +346,21 @@ class RossyBotV2 {
     });
     this.pumpFunAlphaDiscovery.start();
 
+    // Wire movers tracker: detect high-velocity tokens and accelerate deferred entries
+    this.moversTracker.setMoverCallback((mover: MoverToken) => {
+      this.handleMoverDetected(mover).catch((err) =>
+        logger.error({ err, token: mover.mint.slice(0, 8) }, 'Mover handler error'),
+      );
+    });
+    this.moversTracker.start();
+
     this.pumpPortal.on('trade', (trade) => {
       this.pumpFunAlphaDiscovery.processTrade(trade).catch((err) =>
         logger.error({ err }, 'PumpPortal alpha discovery error'),
       );
+
+      // Feed trade to movers tracker for velocity detection
+      this.moversTracker.processTrade(trade.mint, trade.txType, trade.vSolInBondingCurve, trade.traderPublicKey);
 
       // Real-time curve fill updates for open positions — reacts instantly instead of 2s polling.
       // PumpPortal trade events include vSolInBondingCurve which we use to check TP/exits.
@@ -1420,6 +1435,99 @@ class RossyBotV2 {
     } catch (err) {
       logger.error({ err, token: signal.tokenMint?.slice(0, 8) }, 'Error in pump.fun buy handler');
     }
+  }
+
+  /**
+   * Handle a mover detection from the velocity tracker.
+   * If we have a deferred entry watchlisted for this token, enter immediately —
+   * the movers signal IS the momentum confirmation, even if curve is below 28%.
+   */
+  private async handleMoverDetected(mover: MoverToken): Promise<void> {
+    const deferred = this.deferredEntries.get(mover.mint);
+    if (!deferred) {
+      // No deferred entry — log for awareness but don't enter without alpha signal
+      logger.info({
+        token: mover.mint.slice(0, 8),
+        velocity: `${mover.velocitySolPerMin.toFixed(2)} SOL/min`,
+        curveFill: `${(mover.curveFillPct * 100).toFixed(0)}%`,
+        buyers: mover.uniqueBuyers,
+      }, 'Mover detected — no deferred entry (no alpha signal)');
+      return;
+    }
+
+    // We have an alpha signal + mover confirmation — this is high conviction
+    // Enter even if below the normal 28% threshold (movers signal = momentum confirmation)
+    const mint = mover.mint;
+    this.deferredEntries.delete(mint);
+
+    // Pre-flight checks
+    if (this.pumpFunTracker.hasPosition(mint) || this.hasPosition(mint)) return;
+    if (this.blockedTokens.has(mint)) return;
+    if (this.pumpFunTracker.getOpenCount() >= config.pumpFun.maxPositions) return;
+
+    // Reject if curve is too early even for movers (below 20%) or too late (above 40%)
+    if (mover.curveFillPct < 0.20 || mover.curveFillPct > 0.40) {
+      logger.info({ token: mint.slice(0, 8), curveFill: `${(mover.curveFillPct * 100).toFixed(0)}%` },
+        'Mover + alpha signal but curve outside 20-40% range');
+      return;
+    }
+
+    const cfg = config.pumpFun;
+    const tierSize = this.capitalManager.getPositionSize();
+    let pumpSize = tierSize * cfg.positionSizeMultiplier;
+    const confluenceCount = deferred.confluence.wallets.size;
+    // Movers get a bigger position boost — high conviction signal
+    const moversBonus = 1.15; // 15% size boost for mover confirmation
+    const confluenceMultiplier = Math.min(1 + (confluenceCount - 1) * 0.25, 1.5);
+    pumpSize = pumpSize * confluenceMultiplier * moversBonus;
+
+    const waitSecs = Math.round((Date.now() - deferred.addedAt) / 1000);
+
+    logger.info({
+      token: mint.slice(0, 8),
+      curveFill: `${(mover.curveFillPct * 100).toFixed(0)}%`,
+      velocity: `${mover.velocitySolPerMin.toFixed(2)} SOL/min`,
+      buyers: mover.uniqueBuyers,
+      wallet: deferred.walletLabel,
+      waitSecs,
+      pumpSize: pumpSize.toFixed(4),
+    }, 'MOVER + ALPHA ENTRY — high conviction deferred entry triggered');
+
+    const realSol = mover.curveFillPct * 85; // Approximate from fill %
+    const swapExec = this.pumpFunTracker.getSwapExecutor();
+    const prefetchedQuote = swapExec ? await swapExec.prefetchQuote(mint, pumpSize) : null;
+
+    const pos = await this.pumpFunTracker.openPosition({
+      tokenMint: mint,
+      tokenSymbol: mint.slice(0, 6),
+      bondingCurveAddress: deferred.signal.pumpFunData?.bondingCurveAddress || deriveBondingCurveAddress(mint),
+      solAmount: pumpSize,
+      curveFillPct: mover.curveFillPct,
+      solInCurve: realSol,
+      alphaBuyTime: new Date(deferred.signal.blockTime * 1000),
+      signalWallets: Array.from(deferred.confluence.wallets),
+      capitalTier: this.capitalManager.tier,
+      prefetchedQuote: prefetchedQuote || undefined,
+    });
+
+    if (!pos) {
+      await this.telegram.send(
+        `⚠️ MOVER BUY FAILED · ${mint.slice(0, 8)} · ${pumpSize.toFixed(4)} SOL\n` +
+        `└ ${deferred.walletLabel} · swap failed`,
+      );
+      return;
+    }
+
+    const mode = this.pumpFunTracker.isLive ? 'LIVE' : 'SHADOW';
+    await this.telegram.send(
+      `🔥 MOVER BUY · ${mint.slice(0, 8)} · ${pumpSize.toFixed(4)} SOL\n` +
+      `├ Alpha: ${deferred.walletLabel} · Velocity: ${mover.velocitySolPerMin.toFixed(1)} SOL/min\n` +
+      `├ Curve: ${(mover.curveFillPct * 100).toFixed(0)}% · ${mover.uniqueBuyers} buyers · Waited ${waitSecs}s\n` +
+      `├ TP ${(cfg.curveProfitTarget * 100).toFixed(0)}% · SL ${(cfg.stopLoss * 100).toFixed(0)}%\n` +
+      (pos.entry_tx ? `├ TX: ${pos.entry_tx.slice(0, 16)}...\n` : '') +
+      `└ <a href="https://pump.fun/coin/${mint}">pump.fun</a> · <a href="https://dexscreener.com/solana/${mint}">dex</a> · ${mode}`,
+      { parse_mode: 'HTML' },
+    );
   }
 
   /**

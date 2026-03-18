@@ -331,6 +331,9 @@ async function migrate() {
   await pool.query(`ALTER TABLE pumpfun_positions ADD COLUMN IF NOT EXISTS graduation_price DECIMAL DEFAULT 0`);
   await pool.query(`ALTER TABLE pumpfun_positions ADD COLUMN IF NOT EXISTS sol_in_curve_at_entry DECIMAL DEFAULT 0`);
 
+  // --- Add peak curve fill tracking for analytics ---
+  await pool.query(`ALTER TABLE pumpfun_positions ADD COLUMN IF NOT EXISTS peak_curve_fill_pct DECIMAL DEFAULT 0`);
+
   console.log('✅ All migrations complete');
   await pool.end();
 }

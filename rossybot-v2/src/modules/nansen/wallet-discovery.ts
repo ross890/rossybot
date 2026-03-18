@@ -633,13 +633,25 @@ export class WalletDiscovery {
     return { removed: totalRemoved, reasons };
   }
 
-  /** Get all active wallet addresses — ranked by composite performance score */
-  async getActiveWallets(): Promise<string[]> {
+  /** Get all active wallet addresses — ranked by composite performance score.
+   *  When pumpFunOnlyMode is true, heavily prioritize wallets that trade on bonding curves. */
+  async getActiveWallets(pumpFunOnlyMode = false): Promise<string[]> {
+    const isPumpFunOnlyMode = pumpFunOnlyMode;
+
     const rows = await getMany<{ address: string }>(
       `SELECT address,
          (
-           -- Seed wallets get base priority
-           CASE WHEN source IN ('NANSEN_SEED', 'PUMPFUN_SEED') THEN 50 ELSE 0 END
+           -- Seed wallets get base priority (reduced for non-pumpfun seeds in curve scalp mode)
+           CASE
+             WHEN source IN ('NANSEN_SEED', 'PUMPFUN_SEED') AND pumpfun_only = TRUE THEN 50
+             WHEN source IN ('NANSEN_SEED', 'PUMPFUN_SEED') AND $1 = TRUE THEN 20
+             WHEN source IN ('NANSEN_SEED', 'PUMPFUN_SEED') THEN 50
+             ELSE 0
+           END
+           -- Pump.fun wallet bonus in curve scalp mode (+25 for pumpfun_only wallets)
+           + CASE WHEN $1 = TRUE AND pumpfun_only = TRUE THEN 25 ELSE 0 END
+           -- PumpPortal-discovered wallets get extra bump (real-time validated on curves)
+           + CASE WHEN $1 = TRUE AND source = 'PUMPFUN_DISCOVERY' THEN 15 ELSE 0 END
            -- Tier A wallets get priority
            + CASE WHEN tier = 'A' THEN 30 ELSE 0 END
            -- SHORT-TERM ALPHA SCORE (0-100 → 0-40 pts) — biggest weight
@@ -667,9 +679,24 @@ export class WalletDiscovery {
                WHEN COALESCE(median_hold_time_mins, 0) > 240 AND COALESCE(round_trips_analyzed, 0) >= 3 THEN 15
                ELSE 0
              END
+           -- Stale wallet penalty: inactive 3+ days with no tracked trades = dead weight
+           - CASE
+               WHEN COALESCE(our_total_trades, 0) = 0
+                 AND last_active_at < NOW() - INTERVAL '3 days' THEN 40
+               WHEN COALESCE(our_total_trades, 0) = 0
+                 AND last_active_at < NOW() - INTERVAL '1 day' THEN 20
+               ELSE 0
+             END
+           -- In curve scalp mode, penalize non-pumpfun wallets with zero signal history
+           - CASE
+               WHEN $1 = TRUE AND pumpfun_only = FALSE
+                 AND COALESCE(our_total_trades, 0) = 0 THEN 25
+               ELSE 0
+             END
          ) as score
        FROM alpha_wallets WHERE active = TRUE
        ORDER BY score DESC`,
+      [isPumpFunOnlyMode],
     );
     return rows.map((r) => r.address);
   }

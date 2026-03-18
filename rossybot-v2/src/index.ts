@@ -230,7 +230,8 @@ class RossyBotV2 {
       console.log(`Auto-cleanup removed ${cleanup.removed} wallets:`, cleanup.reasons);
     }
 
-    const allActiveWallets = await this.walletDiscovery.getActiveWallets();
+    const isPumpFunOnlyMode = this.capitalManager.capital < config.minCapitalForStandardTrading;
+    const allActiveWallets = await this.walletDiscovery.getActiveWallets(isPumpFunOnlyMode);
 
     // Helius WS monitors top N wallets (tier-limited)
     this.walletAddresses = allActiveWallets.slice(0, tierCfg.walletsMonitored);
@@ -861,8 +862,9 @@ class RossyBotV2 {
     // --- Wallet Discovery → Helius subscription ---
     this.walletDiscovery.setNewWalletCallback(async (address: string) => {
       try {
+        const isPfOnly = this.capitalManager.capital < config.minCapitalForStandardTrading;
         this.entryEngine.updateAllTrackedWallets(
-          await this.walletDiscovery.getActiveWallets(),
+          await this.walletDiscovery.getActiveWallets(isPfOnly),
         );
 
         const tierCfg = getTierConfig(this.capitalManager.tier);

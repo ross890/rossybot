@@ -1260,10 +1260,13 @@ class RossyBotV2 {
         `SELECT COUNT(*) as count FROM signal_events WHERE first_detected_at >= $1`, [today],
       );
 
-      // Count from whichever table is active
+      // Count from all trade tables (standard + pump.fun)
       const tradeTable = this.isLive ? 'positions' : 'shadow_positions';
       const tradeRow = await (await import('./db/database.js')).getOne<{ count: string }>(
-        `SELECT COUNT(*) as count FROM ${tradeTable}`,
+        `SELECT (
+           (SELECT COUNT(*) FROM ${tradeTable}) +
+           (SELECT COUNT(*) FROM pumpfun_positions WHERE status = 'CLOSED')
+         ) as count`,
       );
 
       const discoveryRow = await (await import('./db/database.js')).getOne<{

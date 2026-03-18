@@ -1251,13 +1251,7 @@ class RossyBotV2 {
         { parse_mode: 'HTML' },
       );
 
-      logger.info({
-        token: mint.slice(0, 8),
-        wallet: walletLabel,
-        size: pumpSize.toFixed(4),
-        curveFill: `${(validation.curveFillPct * 100).toFixed(0)}%`,
-        mode,
-      }, 'Pump.fun position opened');
+      // Position opened log is in tracker._executeOpen — no duplicate needed here
     } catch (err) {
       logger.error({ err, token: signal.tokenMint?.slice(0, 8) }, 'Error in pump.fun buy handler');
     }

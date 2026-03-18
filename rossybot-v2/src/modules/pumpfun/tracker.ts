@@ -455,7 +455,25 @@ export class PumpFunTracker {
     }
   }
 
+  // Sell lock: prevent concurrent sells for the same position (race condition guard)
+  private pendingSells: Set<string> = new Set();
+
   private async closePosition(pos: PumpFunPosition, reason: string): Promise<void> {
+    // Race condition guard: if a sell is already in progress for this position, skip
+    if (this.pendingSells.has(pos.id)) {
+      logger.debug({ token: pos.token_symbol || pos.token_address.slice(0, 8), reason },
+        'Pump.fun sell skipped — already selling this position');
+      return;
+    }
+    // Also skip if already closed (another concurrent path may have closed it)
+    if (pos.status === PositionStatus.CLOSED) {
+      logger.debug({ token: pos.token_symbol || pos.token_address.slice(0, 8) },
+        'Pump.fun sell skipped — position already closed');
+      return;
+    }
+    this.pendingSells.add(pos.id);
+
+    try {
     // LIVE MODE: execute real sell swap
     if (this.swapExecutor) {
       const tokenName = pos.token_symbol || pos.token_address.slice(0, 8);
@@ -548,6 +566,9 @@ export class PumpFunTracker {
     // Refresh wallet balance after sell
     if (this.swapExecutor && this.onBalanceRefresh) {
       try { await this.onBalanceRefresh(); } catch { /* ignore */ }
+    }
+    } finally {
+      this.pendingSells.delete(pos.id);
     }
   }
 

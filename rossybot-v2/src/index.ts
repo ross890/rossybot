@@ -14,7 +14,7 @@ import { LiveTracker } from './modules/positions/live-tracker.js';
 import { CapitalManager } from './modules/trading/capital-manager.js';
 import { SwapExecutor } from './modules/trading/swap-executor.js';
 import { TelegramService } from './modules/telegram/index.js';
-import { PumpFunTracker, validatePumpFunSignal, PumpPortalClient, PumpFunAlphaDiscovery } from './modules/pumpfun/index.js';
+import { PumpFunTracker, validatePumpFunSignal, PumpPortalClient, PumpFunAlphaDiscovery, deriveBondingCurveAddress } from './modules/pumpfun/index.js';
 import { fetchDexPair } from './modules/validation/dexscreener.js';
 import { SignalType, type ParsedSignal, type PositionView } from './types/index.js';
 
@@ -1106,7 +1106,7 @@ class RossyBotV2 {
       const pos = await this.pumpFunTracker.openPosition({
         tokenMint: mint,
         tokenSymbol: signal.tokenMint.slice(0, 6),
-        bondingCurveAddress: signal.pumpFunData?.bondingCurveAddress || 'unknown',
+        bondingCurveAddress: signal.pumpFunData?.bondingCurveAddress || deriveBondingCurveAddress(mint),
         solAmount: pumpSize,
         curveFillPct: validation.curveFillPct,
         solInCurve: validation.solInCurve,

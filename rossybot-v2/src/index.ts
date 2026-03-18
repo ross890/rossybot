@@ -1039,6 +1039,18 @@ class RossyBotV2 {
         }
       }
 
+      // Require multi-wallet confluence before entry — single-wallet signals lose money.
+      // Accumulate wallets first, only validate & enter when 2+ wallets have bought.
+      const confluenceCount = confluence.wallets.size;
+      if (confluenceCount < 2) {
+        // First wallet on this token — log and wait for more signals
+        logger.info({
+          token: mint.slice(0, 8), wallet: walletLabel,
+          confluenceCount, totalSol: confluence.totalSol.toFixed(2),
+        }, 'Pump.fun waiting for confluence (need 2+ wallets)');
+        return;
+      }
+
       // Validate through pump.fun-specific gate
       const validation = await validatePumpFunSignal(signal);
 
@@ -1050,16 +1062,26 @@ class RossyBotV2 {
           curveFill: `${(validation.curveFillPct * 100).toFixed(0)}%`,
         }, `Pump.fun signal rejected: ${validation.failReason}`);
 
-        // Cache curve-range rejections to avoid re-fetching RPC for every signal on the same token
-        const curveRangeReasons = ['CURVE_TOO_EARLY', 'CURVE_NEARLY_GRADUATED'];
-        if (curveRangeReasons.includes(validation.failReason || '')) {
+        // Cache curve-range AND low-conviction rejections to stop spam
+        // Curve-range: avoid re-fetching RPC. Low-conviction: same wallet+token spams 50+ alerts.
+        const cacheableReasons = ['CURVE_TOO_EARLY', 'CURVE_NEARLY_GRADUATED', 'LOW_CONVICTION'];
+        if (cacheableReasons.includes(validation.failReason || '')) {
           this.pumpFunRejectionCache.set(mint, {
             reason: validation.failReason!,
             expiresAt: Date.now() + RossyBotV2.PUMP_FUN_REJECTION_TTL_MS,
           });
-          // No Telegram message for curve-range rejections — these are noise, not actionable
+          // Only send Telegram for LOW_CONVICTION once (first occurrence gets through, rest cached)
+          if (validation.failReason === 'LOW_CONVICTION') {
+            await this.telegram.send(
+              `🎰 PUMP.FUN rejected: ${mint.slice(0, 8)}\n` +
+              `├ Wallet: ${walletLabel}\n` +
+              `├ Reason: ${validation.failReason}\n` +
+              `├ Curve: ${(validation.curveFillPct * 100).toFixed(0)}% (${validation.solInCurve.toFixed(1)} SOL)\n` +
+              `└ SOL spent: ${solSpent.toFixed(2)}`,
+            );
+          }
         } else {
-          // Other rejections (LOW_CONVICTION, etc.) still get Telegram alerts
+          // Other rejections (WALLET_QUALITY, etc.) still get Telegram alerts
           await this.telegram.send(
             `🎰 PUMP.FUN rejected: ${mint.slice(0, 8)}\n` +
             `├ Wallet: ${walletLabel}\n` +
@@ -1072,17 +1094,13 @@ class RossyBotV2 {
       }
 
       // Calculate position size: standard tier size × pump.fun multiplier
-      // Confluence bonus: if 2+ alpha wallets bought same token, size up
+      // Confluence bonus: 2 wallets = 1.25x, 3+ = 1.5x (capped)
       const tierSize = this.capitalManager.getPositionSize();
       let pumpSize = tierSize * cfg.positionSizeMultiplier;
-      const confluenceCount = confluence.wallets.size;
-      if (cfg.confluenceBonus && confluenceCount >= 2) {
-        // 2 wallets: 1.25x, 3+: 1.5x (capped)
-        const confluenceMultiplier = Math.min(1 + (confluenceCount - 1) * 0.25, 1.5);
-        pumpSize = pumpSize * confluenceMultiplier;
-        logger.info({ token: mint.slice(0, 8), confluenceCount, totalSol: confluence.totalSol.toFixed(2), multiplier: confluenceMultiplier },
-          'Pump.fun confluence detected — sizing up');
-      }
+      const confluenceMultiplier = Math.min(1 + (confluenceCount - 1) * 0.25, 1.5);
+      pumpSize = pumpSize * confluenceMultiplier;
+      logger.info({ token: mint.slice(0, 8), confluenceCount, totalSol: confluence.totalSol.toFixed(2), multiplier: confluenceMultiplier },
+        'Pump.fun confluence confirmed — entering');
 
       // Open pump.fun position
       const pos = await this.pumpFunTracker.openPosition({

@@ -13,7 +13,8 @@
     "db:migrate": "tsx src/db/migrate.ts",
     "db:migrate:market-analyzer": "tsx src/modules/market-analyzer/migrate.ts",
     "market-analyzer": "tsx src/modules/market-analyzer/run.ts",
-    "market-analyzer:cron": "tsx src/modules/market-analyzer/run.ts --cron"
+    "market-analyzer:cron": "tsx src/modules/market-analyzer/run.ts --cron",
+    "import-wallets": "tsx src/scripts/import-wallets.ts"
   },
   "dependencies": {
     "@solana/web3.js": "^1.95.0",

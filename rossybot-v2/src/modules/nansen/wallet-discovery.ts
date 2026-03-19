@@ -16,8 +16,8 @@ interface WalletCandidate {
   score: number;
 }
 
-// Cap total active wallets — no point tracking hundreds we can't monitor
-const MAX_ACTIVE_WALLETS = 75;
+// Cap total active wallets — raised to 200 for larger seed lists
+const MAX_ACTIVE_WALLETS = 200;
 // Wallets with no trade data after 3 days get cut
 const STALE_WALLET_DAYS = 3;
 

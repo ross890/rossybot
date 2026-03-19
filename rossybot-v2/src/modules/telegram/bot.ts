@@ -473,6 +473,7 @@ export class TelegramService {
       { command: 'tuning', description: 'Aggregate tuning report' },
       { command: 'stats', description: 'Performance stats (7d)' },
       { command: 'wallets', description: 'Alpha wallets' },
+      { command: 'pump_wallets', description: 'Pump.fun wallet roster & discovery' },
       { command: 'kill', description: 'Force close position' },
       { command: 'health', description: 'System health check' },
       { command: 'discover', description: 'Trigger wallet discovery' },
@@ -521,7 +522,7 @@ export class TelegramService {
       await this.bot.sendMessage(msg.chat.id, `📊 POSITIONS\n${lines.join('\n')}`);
     });
 
-    this.bot.onText(/\/wallets/, async (msg) => {
+    this.bot.onText(/\/wallets(?!_)/, async (msg) => {
       if (msg.chat.id.toString() !== this.chatId) return;
       try {
         const wallets = await getMany<Record<string, unknown>>(
@@ -966,6 +967,160 @@ export class TelegramService {
       } catch (err) {
         logger.error({ err }, 'Failed to generate pump.fun stats');
         await this.bot.sendMessage(msg.chat.id, '❌ Failed to load pump.fun stats');
+      }
+    });
+
+    // /pump_wallets — dedicated view of pump.fun wallet roster with discovery paths
+    this.bot.onText(/\/pump_wallets/, async (msg) => {
+      if (msg.chat.id.toString() !== this.chatId) return;
+      try {
+        // All pump.fun wallets (active + inactive) with performance and discovery source
+        const wallets = await getMany<Record<string, unknown>>(
+          `SELECT address, label, source, tier, active, helius_subscribed, pumpfun_only,
+                  COALESCE(our_total_trades, 0) as our_total_trades,
+                  COALESCE(our_win_rate, 0) as our_win_rate,
+                  COALESCE(our_avg_pnl_percent, 0) as our_avg_pnl_percent,
+                  COALESCE(our_avg_hold_time_mins, 0) as our_avg_hold_time_mins,
+                  COALESCE(consecutive_losses, 0) as consecutive_losses,
+                  COALESCE(short_term_alpha_score, 0) as alpha_score,
+                  COALESCE(nansen_pnl_usd, 0) as nansen_pnl_usd,
+                  COALESCE(avg_buy_size_sol, 0) as avg_buy_size_sol,
+                  discovered_at, last_active_at
+           FROM alpha_wallets
+           WHERE pumpfun_only = TRUE
+           ORDER BY active DESC, source, our_win_rate DESC`,
+        );
+
+        if (wallets.length === 0) {
+          await this.bot.sendMessage(msg.chat.id, '📭 No pump.fun wallets found');
+          return;
+        }
+
+        // --- Summary counts ---
+        const active = wallets.filter((w) => w.active);
+        const inactive = wallets.filter((w) => !w.active);
+        const subscribed = active.filter((w) => w.helius_subscribed);
+        const withTrades = wallets.filter((w) => Number(w.our_total_trades) > 0);
+        const totalTrades = withTrades.reduce((s, w) => s + Number(w.our_total_trades), 0);
+        const avgWr = withTrades.length > 0
+          ? (withTrades.reduce((s, w) => s + Number(w.our_win_rate), 0) / withTrades.length * 100).toFixed(0)
+          : 'N/A';
+
+        // --- Group by discovery source ---
+        const sourceMap: Record<string, typeof wallets> = {};
+        for (const w of wallets) {
+          const src = w.source as string;
+          if (!sourceMap[src]) sourceMap[src] = [];
+          sourceMap[src].push(w);
+        }
+
+        const sourceLabels: Record<string, string> = {
+          PUMPFUN_SEED: '🌱 Pump.fun Seeds (manual)',
+          GRADUATION_SEED: '🎓 Graduation Leaders (top profit)',
+          PUMPFUN_DISCOVERY: '🔍 PumpPortal Discovery (auto)',
+          GRADUATION_DISCOVERY: '🔎 Graduation Discovery (auto)',
+          NANSEN_SEED: '📊 Nansen Seeds',
+          NANSEN_DISCOVERY: '📊 Nansen Discovery',
+          MANUAL: '✋ Manual',
+        };
+
+        // --- Per-source wallet lines ---
+        const sourceBlocks: string[] = [];
+        for (const [src, srcWallets] of Object.entries(sourceMap)) {
+          const srcActive = srcWallets.filter((w) => w.active).length;
+          const srcLabel = sourceLabels[src] || src;
+          sourceBlocks.push(`├─ ${srcLabel} (${srcActive}/${srcWallets.length} active)`);
+
+          for (const w of srcWallets) {
+            const trades = Number(w.our_total_trades);
+            const wr = trades > 0 ? `${(Number(w.our_win_rate) * 100).toFixed(0)}%` : '-';
+            const pnl = trades > 0 ? `${(Number(w.our_avg_pnl_percent) * 100).toFixed(1)}%` : '-';
+            const hold = trades > 0 ? this.formatHoldTime(Number(w.our_avg_hold_time_mins)) : '-';
+            const losses = Number(w.consecutive_losses);
+            const alpha = Number(w.alpha_score);
+            const status = w.active ? (w.helius_subscribed ? '📡' : '⏸️') : '❌';
+            const tierTag = `[${w.tier}]`;
+            const streak = losses >= 2 ? ` 🔥${losses}L` : '';
+            const alphaTag = alpha > 0 ? ` α${alpha}` : '';
+
+            // Last active relative time
+            let lastActiveStr = '';
+            if (w.last_active_at) {
+              const ago = Math.round((Date.now() - new Date(w.last_active_at as string).getTime()) / 86400000);
+              lastActiveStr = ago === 0 ? ' (today)' : ago === 1 ? ' (1d ago)' : ` (${ago}d ago)`;
+            }
+
+            const label = w.label as string;
+            const shortAddr = (w.address as string).slice(0, 6);
+            const displayName = label.length > 20 ? `${label.slice(0, 20)}…` : label;
+
+            sourceBlocks.push(
+              `│  ${status} ${tierTag} ${displayName} [${shortAddr}] | ${trades}t ${wr}W ${pnl}pnl | hold ${hold}${streak}${alphaTag}${lastActiveStr}`,
+            );
+          }
+          sourceBlocks.push(`│`);
+        }
+
+        // --- Pump.fun signal performance from positions ---
+        const pfPerf = await getOne<Record<string, unknown>>(
+          `SELECT
+             COUNT(*) as total,
+             COUNT(*) FILTER (WHERE pnl_percent > 0) as wins,
+             COALESCE(AVG(pnl_percent), 0) as avg_pnl,
+             COUNT(*) FILTER (WHERE graduated = TRUE) as graduated
+           FROM pumpfun_positions WHERE status = 'CLOSED'`,
+        );
+        const pfTotal = Number(pfPerf?.total || 0);
+        const pfWins = Number(pfPerf?.wins || 0);
+        const pfWr = pfTotal > 0 ? `${(pfWins / pfTotal * 100).toFixed(0)}%` : 'N/A';
+        const pfPnl = (Number(pfPerf?.avg_pnl || 0) * 100).toFixed(1);
+        const pfGrad = Number(pfPerf?.graduated || 0);
+
+        // --- Discovery pipeline stats ---
+        const recentDiscoveries = await getMany<Record<string, unknown>>(
+          `SELECT address, label, source, discovered_at
+           FROM alpha_wallets
+           WHERE pumpfun_only = TRUE AND discovered_at > NOW() - INTERVAL '7 days'
+           ORDER BY discovered_at DESC LIMIT 5`,
+        );
+        const recentLines = recentDiscoveries.length > 0
+          ? recentDiscoveries.map((d) => {
+              const ago = Math.round((Date.now() - new Date(d.discovered_at as string).getTime()) / 86400000);
+              return `│  ${d.label} [${(d.address as string).slice(0, 6)}] via ${d.source} (${ago}d ago)`;
+            })
+          : ['│  (none in last 7d)'];
+
+        const response = [
+          `🎯 PUMP.FUN WALLETS`,
+          ``,
+          `┌─ OVERVIEW`,
+          `│ Total: ${wallets.length} (${active.length} active, ${inactive.length} inactive)`,
+          `│ Subscribed: ${subscribed.length}/${active.length} on Helius WS`,
+          `│ With trades: ${withTrades.length} (${totalTrades} total trades, ${avgWr}% avg WR)`,
+          `│`,
+          `├─ SIGNAL PERFORMANCE (all pump.fun trades)`,
+          `│ ${pfTotal} trades | WR ${pfWr} | Avg PnL ${pfPnl}% | ${pfGrad} graduated`,
+          `│`,
+          `├─ DISCOVERY PATHS`,
+          ...Object.entries(sourceMap).map(([src, ws]) => {
+            const label = sourceLabels[src] || src;
+            const act = ws.filter((w) => w.active).length;
+            return `│  ${label}: ${act}/${ws.length}`;
+          }),
+          `│`,
+          ...sourceBlocks,
+          `├─ RECENT DISCOVERIES (7d)`,
+          ...recentLines,
+          `│`,
+          `└─ /pumpfun for trade dashboard · /wallets for all wallets`,
+        ].join('\n');
+
+        for (const chunk of this.chunkMessage(response)) {
+          await this.bot.sendMessage(msg.chat.id, chunk);
+        }
+      } catch (err) {
+        logger.error({ err }, 'Failed to generate pump wallets view');
+        await this.bot.sendMessage(msg.chat.id, '❌ Failed to load pump wallets');
       }
     });
 

@@ -19,7 +19,7 @@ export class TelegramService {
   private onKill: ((token: string) => Promise<{ success: boolean; token?: string; error?: string }>) | null = null;
   private onDrop: ((token: string) => Promise<{ success: boolean; token?: string; error?: string }>) | null = null;
   private onGraduationAnalysis: (() => Promise<{ tokensAnalyzed: number; walletsFound: number; walletsPromoted: number }>) | null = null;
-  private onMarketAnalysis: ((force: boolean) => Promise<void>) | null = null;
+  private onMarketAnalysis: ((force: boolean) => Promise<{ status: string; message: string; totalGraduated: number; tokensAnalyzed: number; newDiscoveries: number; durationSeconds: number }>) | null = null;
   private getPumpFunPositions: (() => Array<Record<string, unknown>>) | null = null;
 
   constructor() {
@@ -53,7 +53,7 @@ export class TelegramService {
   setKillCallback(cb: (token: string) => Promise<{ success: boolean; token?: string; error?: string }>): void { this.onKill = cb; }
   setDropCallback(cb: (token: string) => Promise<{ success: boolean; token?: string; error?: string }>): void { this.onDrop = cb; }
   setGraduationCallback(cb: () => Promise<{ tokensAnalyzed: number; walletsFound: number; walletsPromoted: number }>): void { this.onGraduationAnalysis = cb; }
-  setMarketAnalysisCallback(cb: (force: boolean) => Promise<void>): void { this.onMarketAnalysis = cb; }
+  setMarketAnalysisCallback(cb: (force: boolean) => Promise<{ status: string; message: string; totalGraduated: number; tokensAnalyzed: number; newDiscoveries: number; durationSeconds: number }>): void { this.onMarketAnalysis = cb; }
   setPumpFunPositionsCallback(cb: () => Array<Record<string, unknown>>): void { this.getPumpFunPositions = cb; }
 
   get isPaused(): boolean { return this.paused; }
@@ -769,8 +769,18 @@ export class TelegramService {
       await this.bot.sendMessage(msg.chat.id,
         `📊 Running pump.fun market analysis${force ? ' (FORCE re-run)' : ''} — this takes several minutes. Report will be sent when complete...`);
       try {
-        await this.onMarketAnalysis(force);
-        await this.bot.sendMessage(msg.chat.id, '✅ Market analysis complete — report sent above');
+        const result = await this.onMarketAnalysis(force);
+        if (result.status === 'skipped') {
+          await this.bot.sendMessage(msg.chat.id, `⏭️ ${result.message}`);
+        } else if (result.status === 'empty') {
+          await this.bot.sendMessage(msg.chat.id, `📭 ${result.message}`);
+        } else {
+          await this.bot.sendMessage(msg.chat.id,
+            `✅ Market analysis complete (${result.durationSeconds}s)\n` +
+            `├ Graduated tokens: ${result.totalGraduated}\n` +
+            `├ Analyzed: ${result.tokensAnalyzed}\n` +
+            `└ New discoveries: ${result.newDiscoveries}`);
+        }
       } catch (err) {
         await this.bot.sendMessage(msg.chat.id, `❌ Market analysis failed: ${err instanceof Error ? err.message : 'unknown error'}`);
       }

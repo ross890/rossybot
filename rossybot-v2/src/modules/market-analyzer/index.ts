@@ -2,9 +2,6 @@ import { logger } from '../../utils/logger.js';
 import { query, getOne, testConnection } from '../../db/database.js';
 import {
   fetchGraduatedTokens24h,
-  fetchGraduatedViaHelius,
-  parseGraduationTxs,
-  enrichTokenWithDex,
   type GraduatedToken,
 } from './graduated-fetcher.js';
 import { findEarlyBuyersEnhanced, type EarlyBuyer } from './early-buyer-analyzer.js';
@@ -91,7 +88,16 @@ async function ensureTables(): Promise<void> {
  * This is the main entry point — designed to run once per day (end of day UTC).
  * It analyzes EVERY graduated pump.fun token from the last 24 hours.
  */
-export async function runDailyAnalysis(opts?: { force?: boolean }): Promise<void> {
+export interface AnalysisResult {
+  status: 'skipped' | 'empty' | 'complete';
+  message: string;
+  totalGraduated: number;
+  tokensAnalyzed: number;
+  newDiscoveries: number;
+  durationSeconds: number;
+}
+
+export async function runDailyAnalysis(opts?: { force?: boolean }): Promise<AnalysisResult> {
   const startTime = Date.now();
 
   // Auto-create tables on first run
@@ -108,7 +114,7 @@ export async function runDailyAnalysis(opts?: { force?: boolean }): Promise<void
   );
   if (existing && !opts?.force) {
     logger.warn({ analysisDate }, 'Analysis already run today — skipping (use force to re-run)');
-    return;
+    return { status: 'skipped', message: 'Already run today — use /market force to re-run', totalGraduated: 0, tokensAnalyzed: 0, newDiscoveries: 0, durationSeconds: 0 };
   }
   if (existing && opts?.force) {
     // Delete previous run so we can re-analyze
@@ -127,49 +133,19 @@ export async function runDailyAnalysis(opts?: { force?: boolean }): Promise<void
   );
 
   // ===== PHASE 1: Fetch graduated tokens =====
-  logger.info('Phase 1: Fetching graduated tokens...');
+  // Primary: Helius on-chain graduation sigs → enrich with DexScreener
+  // Secondary: DexScreener token-boosts for any missed
+  logger.info('Phase 1: Fetching graduated tokens (Helius + DexScreener)...');
 
-  let graduatedTokens: GraduatedToken[] = [];
-
-  // Strategy A: DexScreener search for pumpswap/raydium pairs
-  const dexTokens = await fetchGraduatedTokens24h();
-  for (const t of dexTokens) {
-    graduatedTokens.push(t);
-  }
-
-  // Strategy B: Helius on-chain graduation signatures
-  // This catches tokens DexScreener might miss
-  const gradSigs = await fetchGraduatedViaHelius();
-  if (gradSigs.length > 0) {
-    const heliusMints = await parseGraduationTxs(gradSigs.slice(0, 50));
-    const existingMints = new Set(graduatedTokens.map((t) => t.mint));
-
-    for (const mint of heliusMints) {
-      if (existingMints.has(mint)) continue;
-
-      const enriched = await enrichTokenWithDex(mint);
-      if (enriched) {
-        graduatedTokens.push(enriched);
-        existingMints.add(mint);
-      }
-    }
-  }
-
-  // Deduplicate by mint
-  const uniqueTokens = new Map<string, GraduatedToken>();
-  for (const t of graduatedTokens) {
-    if (!uniqueTokens.has(t.mint)) {
-      uniqueTokens.set(t.mint, t);
-    }
-  }
-  graduatedTokens = Array.from(uniqueTokens.values());
+  const graduatedTokens = await fetchGraduatedTokens24h();
 
   logger.info({ count: graduatedTokens.length }, 'Phase 1 complete: graduated tokens fetched');
 
   if (graduatedTokens.length === 0) {
     logger.warn('No graduated tokens found — ending analysis');
     await updateSummary(analysisDate, 0, 0, 0, startTime);
-    return;
+    const dur = Math.round((Date.now() - startTime) / 1000);
+    return { status: 'empty', message: 'No graduated tokens found in last 24h — Helius may be rate-limited or no tokens graduated', totalGraduated: 0, tokensAnalyzed: 0, newDiscoveries: 0, durationSeconds: dur };
   }
 
   // ===== PHASE 2: Save graduated tokens & analyze early buyers =====
@@ -359,6 +335,15 @@ export async function runDailyAnalysis(opts?: { force?: boolean }): Promise<void
     durationSeconds,
     newDiscoveries,
   }, 'Daily market analysis complete');
+
+  return {
+    status: 'complete',
+    message: `Analyzed ${tokensAnalyzed} graduated tokens, found ${newDiscoveries} new high-confluence wallets`,
+    totalGraduated: graduatedTokens.length,
+    tokensAnalyzed,
+    newDiscoveries,
+    durationSeconds,
+  };
 }
 
 async function updateSummary(

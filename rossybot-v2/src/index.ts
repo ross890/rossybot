@@ -16,6 +16,7 @@ import { SwapExecutor } from './modules/trading/swap-executor.js';
 import { TelegramService } from './modules/telegram/index.js';
 import { PumpFunTracker, validatePumpFunSignal, PumpPortalClient, PumpFunAlphaDiscovery, deriveBondingCurveAddress, MoversTracker, type MoverToken } from './modules/pumpfun/index.js';
 import { GraduationAnalyzer } from './modules/analysis/graduation-analyzer.js';
+import { runDailyAnalysis } from './modules/market-analyzer/index.js';
 import { fetchDexPair } from './modules/validation/dexscreener.js';
 import { SignalType, type ParsedSignal, type PositionView } from './types/index.js';
 
@@ -1075,6 +1076,7 @@ class RossyBotV2 {
     this.telegram.setNansenUsageCallback(() => this.nansen.usage);
     this.telegram.setDiscoveryCallback(() => this.walletDiscovery.runDiscovery());
     this.telegram.setGraduationCallback(() => this.graduationAnalyzer.runAnalysis());
+    this.telegram.setMarketAnalysisCallback((force) => runDailyAnalysis({ force }));
     this.telegram.setPauseCallback(() => logger.info('Trading PAUSED via Telegram'));
     this.telegram.setResumeCallback(() => logger.info('Trading RESUMED via Telegram'));
 

@@ -1073,7 +1073,6 @@ class RossyBotV2 {
       this.pumpFunTracker.getOpenPositions().map((p) => ({ ...p } as Record<string, unknown>)),
     );
     this.telegram.setWsHealthCallback(() => this.wsManager.getStatus());
-    this.telegram.setNansenUsageCallback(() => this.nansen.usage);
     this.telegram.setDiscoveryCallback(() => this.walletDiscovery.runDiscovery());
     this.telegram.setGraduationCallback(() => this.graduationAnalyzer.runAnalysis());
     this.telegram.setMarketAnalysisCallback((force) => runDailyAnalysis({ force }));
@@ -1099,13 +1098,6 @@ class RossyBotV2 {
         ).catch(() => {});
       });
     }
-
-    // /holdtime command — run hold-time analysis on demand
-    this.telegram.setHoldTimeCallback(async () => {
-      const analyzer = this.walletDiscovery.getHoldTimeAnalyzer();
-      const profiles = await analyzer.analyzeAllWallets();
-      return profiles.map((p) => analyzer.formatProfileForTelegram(p));
-    });
 
     // Hold-time enforcement alerts
     this.walletDiscovery.setHoldTimeCallback(async (results) => {

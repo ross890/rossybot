@@ -16,10 +16,8 @@ export class TelegramService {
   private getStatus: (() => Record<string, unknown>) | null = null;
   private getPositions: (() => PositionView[]) | null = null;
   private getWsHealth: (() => Record<string, unknown>) | null = null;
-  private getNansenUsage: (() => Record<string, unknown>) | null = null;
   private onKill: ((token: string) => Promise<{ success: boolean; token?: string; error?: string }>) | null = null;
   private onDrop: ((token: string) => Promise<{ success: boolean; token?: string; error?: string }>) | null = null;
-  private onHoldTimeAnalysis: (() => Promise<string[]>) | null = null;
   private onGraduationAnalysis: (() => Promise<{ tokensAnalyzed: number; walletsFound: number; walletsPromoted: number }>) | null = null;
   private onMarketAnalysis: ((force: boolean) => Promise<void>) | null = null;
   private getPumpFunPositions: (() => Array<Record<string, unknown>>) | null = null;
@@ -38,6 +36,7 @@ export class TelegramService {
   async startPolling(): Promise<void> {
     try {
       await this.bot.startPolling();
+      await this.setBotMenu();
       logger.info('Telegram bot polling started');
     } catch (err) {
       logger.error({ err }, 'Failed to start Telegram polling — bot commands unavailable');
@@ -51,10 +50,8 @@ export class TelegramService {
   setStatusCallback(cb: () => Record<string, unknown>): void { this.getStatus = cb; }
   setPositionsCallback(cb: () => PositionView[]): void { this.getPositions = cb; }
   setWsHealthCallback(cb: () => Record<string, unknown>): void { this.getWsHealth = cb; }
-  setNansenUsageCallback(cb: () => Record<string, unknown>): void { this.getNansenUsage = cb; }
   setKillCallback(cb: (token: string) => Promise<{ success: boolean; token?: string; error?: string }>): void { this.onKill = cb; }
   setDropCallback(cb: (token: string) => Promise<{ success: boolean; token?: string; error?: string }>): void { this.onDrop = cb; }
-  setHoldTimeCallback(cb: () => Promise<string[]>): void { this.onHoldTimeAnalysis = cb; }
   setGraduationCallback(cb: () => Promise<{ tokensAnalyzed: number; walletsFound: number; walletsPromoted: number }>): void { this.onGraduationAnalysis = cb; }
   setMarketAnalysisCallback(cb: (force: boolean) => Promise<void>): void { this.onMarketAnalysis = cb; }
   setPumpFunPositionsCallback(cb: () => Array<Record<string, unknown>>): void { this.getPumpFunPositions = cb; }
@@ -465,6 +462,33 @@ export class TelegramService {
 
   // --- Command handlers ---
 
+  private async setBotMenu(): Promise<void> {
+    const commands: TelegramBot.BotCommand[] = [
+      { command: 'status', description: 'Bot status & strategy info' },
+      { command: 'pumpfun', description: 'Pump.fun dashboard' },
+      { command: 'positions', description: 'Open positions with PnL' },
+      { command: 'pnl', description: 'P&L report (open + closed)' },
+      { command: 'signals', description: 'Recent signals & outcomes' },
+      { command: 'curve', description: 'Curve fill distribution analysis' },
+      { command: 'tuning', description: 'Aggregate tuning report' },
+      { command: 'stats', description: 'Performance stats (7d)' },
+      { command: 'wallets', description: 'Alpha wallets' },
+      { command: 'kill', description: 'Force close position' },
+      { command: 'health', description: 'System health check' },
+      { command: 'discover', description: 'Trigger wallet discovery' },
+      { command: 'market', description: 'Pump.fun market analysis' },
+      { command: 'graduation', description: 'Graduation retroanalysis' },
+      { command: 'pause', description: 'Pause trading' },
+      { command: 'resume', description: 'Resume trading' },
+    ];
+    try {
+      await this.bot.setMyCommands(commands);
+      logger.info(`Bot command menu set (${commands.length} commands)`);
+    } catch (err) {
+      logger.error({ err }, 'Failed to set bot command menu');
+    }
+  }
+
   private setupCommands(): void {
     this.bot.onText(/\/status/, async (msg) => {
       if (msg.chat.id.toString() !== this.chatId) return;
@@ -562,24 +586,9 @@ export class TelegramService {
       await this.bot.sendMessage(msg.chat.id, '🔍 Discovery cycle triggered');
     });
 
-    this.bot.onText(/\/api/, async (msg) => {
-      if (msg.chat.id.toString() !== this.chatId) return;
-      const nansen = this.getNansenUsage?.() || {};
-      const ws = this.getWsHealth?.() || {};
-      await this.bot.sendMessage(msg.chat.id, [
-        `📡 API USAGE`,
-        `├ Nansen: ${nansen.callsLastMinute || 0}/${nansen.maxPerMinute || 80} calls/min`,
-        `├ Nansen queue: ${nansen.queueLength || 0}`,
-        `├ Helius WS: ${(ws.connected as boolean) ? '✅' : '❌'}`,
-        `├ Helius wallets: ${ws.subscribedWallets || 0}`,
-        `└ Last message: ${ws.lastMessageAgoMs ? `${((ws.lastMessageAgoMs as number) / 1000).toFixed(0)}s ago` : 'N/A'}`,
-      ].join('\n'));
-    });
-
     this.bot.onText(/\/health/, async (msg) => {
       if (msg.chat.id.toString() !== this.chatId) return;
       const ws = this.getWsHealth?.() || {};
-      const nansen = this.getNansenUsage?.() || {};
       const status = this.getStatus?.() || {};
       await this.bot.sendMessage(msg.chat.id, [
         `🏥 SYSTEM HEALTH`,
@@ -589,7 +598,6 @@ export class TelegramService {
         `├ Subscribed: ${ws.subscribedWallets || 0} wallets`,
         `├ Last msg: ${ws.lastMessageAgoMs ? Math.round((ws.lastMessageAgoMs as number) / 1000) + 's ago' : '?'} | Last TX: ${(ws.lastTxAgoMs as number) > 0 ? Math.round((ws.lastTxAgoMs as number) / 1000) + 's ago' : 'none yet'}`,
         `├ WS msgs: ${ws.totalMessages || 0} total | ${ws.txNotifications || 0} txs`,
-        `├ Nansen: ${nansen.callsLastMinute || 0}/${nansen.maxPerMinute || 80}/min`,
         `├ Positions: ${status.openPositions || 0}/${status.maxPositions || 2}`,
         `├ Capital: ${(status.capitalSol as number || 0).toFixed(2)} SOL [${status.tier || 'MICRO'}]`,
         `└ Paused: ${this.paused ? 'YES' : 'NO'}`,
@@ -728,28 +736,6 @@ export class TelegramService {
         await this.bot.sendMessage(msg.chat.id, lines.join('\n'));
       } catch (err) {
         await this.bot.sendMessage(msg.chat.id, '❌ Failed to load PnL data');
-      }
-    });
-
-    this.bot.onText(/\/holdtime/, async (msg) => {
-      if (msg.chat.id.toString() !== this.chatId) return;
-      if (!this.onHoldTimeAnalysis) {
-        await this.bot.sendMessage(msg.chat.id, '❌ Hold-time analysis not available');
-        return;
-      }
-      await this.bot.sendMessage(msg.chat.id, '🔍 Running hold-time analysis...');
-      try {
-        const lines = await this.onHoldTimeAnalysis();
-        if (lines.length === 0) {
-          await this.bot.sendMessage(msg.chat.id, '📭 No wallet trade data to analyze yet');
-          return;
-        }
-        const output = `📊 HOLD-TIME ANALYSIS\n\n${lines.join('\n\n')}`;
-        for (const chunk of this.chunkMessage(output)) {
-          await this.bot.sendMessage(msg.chat.id, chunk);
-        }
-      } catch (err) {
-        await this.bot.sendMessage(msg.chat.id, '❌ Hold-time analysis failed');
       }
     });
 

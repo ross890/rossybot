@@ -80,26 +80,29 @@ export const config = {
   pumpFun: {
     programId: '6EF8rrecthR5Dkzon8Nwu78hRvfCKubJ14M5uBEwF6P',
     positionSizeMultiplier: 1.20,      // 120% of normal tier sizing — tighter entry/exit controls justify bigger bets
-    staleTimeKillMins: 1.5,            // Exit if no movement in 90s (was 3min — data shows avg hold is 2min, stalls resolve faster)
+    staleTimeKillMins: 1.0,            // Exit if no movement in 60s (was 90s — avg hold is 1min, stalls at 20-30% are dead weight)
     profitTarget: 0.10,                 // 10% PnL take profit (realistic for curve scalps)
     stopLoss: -0.15,                   // 15% stop loss (tighter — cut losers fast)
     hardKill: -0.20,                   // 20% hard kill
     // --- Curve scalp strategy: DEFERRED ENTRY (don't enter at alpha's entry, wait for momentum) ---
-    curveProfitTarget: 0.40,           // Sell when curve hits 40% filled (was 30% — now entering higher, need room to TP)
-    curveHardExit: 0.50,              // Force-exit at 50% (was 45% — adjusted for higher entry)
-    curveEntryMin: 0.28,              // MINIMUM 28% curve fill to enter — below this is 1-11% WR death zone
+    // Data: 40-50% peak = 93% WR. Wins avg 41% peak. Losses avg 25% peak.
+    // 20-30% bucket = 8% WR / -60% avg (132 trades). 30-40% = 14% WR / -64% avg.
+    // Strategy: enter higher (30%), TP earlier (36%), gate on velocity to filter stalls.
+    curveProfitTarget: 0.36,           // Sell at 36% curve fill (was 40% — most tokens stall at 30-35%, take profit earlier)
+    curveHardExit: 0.45,              // Force-exit at 45% (was 50% — tighter to capture gains before momentum fades)
+    curveEntryMin: 0.30,              // MINIMUM 30% curve fill (was 28% — 20-30% bucket is 8% WR death zone)
     curveEntryMax: 0.38,              // Maximum 38% curve fill — above this no room for TP
-    curveVelocityMin: 0.3,            // Minimum 0.3 SOL/min curve growth rate to confirm momentum
+    curveVelocityMin: 0.5,            // Minimum 0.5 SOL/min velocity to enter (was 0.3 — filter stalling tokens)
     graduationSellPct: 100,            // Sell 100% on any graduation (no lottery holds)
-    minConvictionSol: 0.50,            // Alpha must spend ≥0.50 SOL — raised to filter throwaway buys causing -100% wipeouts
+    minConvictionSol: 0.75,            // Alpha must spend ≥0.75 SOL (was 0.50 — filter throwaway buys causing -100% wipeouts)
     minCurveVelocity: 0.1,            // 0.1 SOL/min curve velocity (legacy — curveVelocityMin is the active check)
-    maxTokenAgeMins: 15,               // Only tokens <15min old (was 30 — tighter, curve plays resolve fast)
+    maxTokenAgeMins: 10,               // Only tokens <10min old (was 15 — curve scalps resolve in 2-5min, stale tokens = stalls)
     maxPositions: 3,                   // Max 3 pump.fun positions
     slippageBps: 500,                  // 5% slippage for bonding curve
     confluenceBonus: true,             // Track multi-wallet convergence on same token
     // --- Deferred entry watchlist ---
     deferredEntryEnabled: true,        // When alpha buys early, add to watchlist instead of entering immediately
-    deferredEntryMaxWaitMs: 5 * 60_000, // Max 5 min to wait for curve to reach entry zone
+    deferredEntryMaxWaitMs: 3 * 60_000, // Max 3 min to wait (was 5 — if curve hasn't moved in 3min it's stalled)
   },
 } as const;
 

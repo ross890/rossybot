@@ -139,8 +139,8 @@ export class MoversTracker {
     if (uniqueBuyerCount < MoversTracker.MIN_UNIQUE_BUYERS) return;
 
     // Must be in a useful curve range (not too early, not too late)
-    // Movers below 15% are still too risky; above 40% is too late
-    if (tracker.curveFillPct < 0.15 || tracker.curveFillPct > 0.40) return;
+    // Movers below 25% are still too risky; above 38% is too late (matches curveEntryMax)
+    if (tracker.curveFillPct < 0.25 || tracker.curveFillPct > 0.38) return;
 
     // This is a mover!
     this.firedMovers.add(tracker.mint);

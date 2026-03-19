@@ -45,11 +45,11 @@ export class PumpFunAlphaDiscovery {
 
   // --- Promotion thresholds ---
   /** Minimum completed round-trips to evaluate */
-  private static readonly MIN_TRADES = 5;
+  private static readonly MIN_TRADES = 8;
   /** Minimum win rate to promote */
-  private static readonly MIN_WIN_RATE = 0.60;
+  private static readonly MIN_WIN_RATE = 0.70;
   /** Minimum average PnL % per trade */
-  private static readonly MIN_AVG_PNL = 0.10; // 10%
+  private static readonly MIN_AVG_PNL = 0.15; // 15%
   /** Max average hold time (ms) — reject bag-holders at discovery time */
   private static readonly MAX_AVG_HOLD_MS = 30 * 60 * 1000; // 30 minutes
   /** Max wallets to track in memory (evict oldest) */

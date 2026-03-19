@@ -112,7 +112,7 @@ export const TIER_CONFIGS: Record<CapitalTier, TierConfig> = {
   [CapitalTier.MICRO]: {
     tier: CapitalTier.MICRO,
     maxPositions: 4,
-    walletsMonitored: 50,
+    walletsMonitored: 80,
     positionSizePct: 0.30,            // 30% per position (was 25% — small capital needs more concentration)
     minPositionSol: 0.003,            // 0.003 SOL min (was 0.3 — bot couldn't trade with 0.025 SOL balance)
     profitTarget: 0.40,                // 40% TP (was 50% — take profits slightly earlier)

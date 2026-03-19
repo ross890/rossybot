@@ -18,6 +18,8 @@ interface WalletCandidate {
 
 // Cap total active wallets — no point tracking hundreds we can't monitor
 const MAX_ACTIVE_WALLETS = 75;
+// Separate cap for PumpPortal-discovered wallets (don't compete with Nansen for slots)
+const MAX_PUMPFUN_DISCOVERY_WALLETS = 30;
 // Wallets with no trade data after 3 days get cut
 const STALE_WALLET_DAYS = 3;
 
@@ -110,7 +112,7 @@ export class WalletDiscovery {
     const result = await query(
       `UPDATE alpha_wallets SET active = FALSE
        WHERE active = TRUE
-         AND source NOT IN ('NANSEN_SEED', 'PUMPFUN_SEED', 'GRADUATION_SEED')
+         AND source NOT IN ('NANSEN_SEED', 'PUMPFUN_SEED', 'GRADUATION_SEED', 'PUMPFUN_DISCOVERY')
          AND COALESCE(nansen_pnl_usd, 0) < $1
        RETURNING address`,
       [MIN_PNL_USD],
@@ -419,11 +421,11 @@ export class WalletDiscovery {
        RETURNING address`,
     );
 
-    // Deactivate wallets below $1K PnL minimum (skip seed wallets which may lack PnL data)
+    // Deactivate wallets below $1K PnL minimum (skip seed + PumpPortal wallets which have no Nansen data)
     const pnlPurged = await query(
       `UPDATE alpha_wallets SET active = FALSE
        WHERE active = TRUE
-         AND source NOT IN ('NANSEN_SEED', 'PUMPFUN_SEED', 'GRADUATION_SEED')
+         AND source NOT IN ('NANSEN_SEED', 'PUMPFUN_SEED', 'GRADUATION_SEED', 'PUMPFUN_DISCOVERY')
          AND COALESCE(nansen_pnl_usd, 0) < 1000
        RETURNING address`,
     );
@@ -489,6 +491,7 @@ export class WalletDiscovery {
         checked++;
 
         const isSeed = wallet.source === 'NANSEN_SEED' || wallet.source === 'PUMPFUN_SEED' || wallet.source === 'GRADUATION_SEED';
+      const isPumpPortalDiscovery = wallet.source === 'PUMPFUN_DISCOVERY';
         // Even seed wallets should be deactivated if dead for 30+ days — no wallet is worth
         // watching after a month of silence (e.g. abandoned wallets, compromised keys)
         const SEED_HARD_CUTOFF_DAYS = 30;
@@ -501,8 +504,8 @@ export class WalletDiscovery {
             [new Date(lastTxTime * 1000), wallet.address],
           );
 
-          // Deactivate if inactive for too long
-          if (!isSeed && lastTxTime * 1000 < cutoff.getTime()) {
+          // Deactivate if inactive for too long (skip PumpPortal — validated via real-time stream)
+          if (!isSeed && !isPumpPortalDiscovery && lastTxTime * 1000 < cutoff.getTime()) {
             await query(`UPDATE alpha_wallets SET active = FALSE WHERE address = $1`, [wallet.address]);
             deactivated++;
             logger.info({
@@ -520,8 +523,8 @@ export class WalletDiscovery {
             }, 'Deactivated seed wallet — inactive >30d');
           }
         } else {
-          // No transactions found at all — deactivate non-seeds
-          if (!isSeed) {
+          // No transactions found at all — deactivate non-seeds (skip PumpPortal)
+          if (!isSeed && !isPumpPortalDiscovery) {
             await query(`UPDATE alpha_wallets SET active = FALSE WHERE address = $1`, [wallet.address]);
             deactivated++;
             logger.info({ address: wallet.address.slice(0, 8) }, 'Deactivated wallet — no on-chain activity found');
@@ -584,12 +587,13 @@ export class WalletDiscovery {
     const reasons: Record<string, number> = {};
     let totalRemoved = 0;
 
-    // 1. Stale wallets: discovered >3 days ago, no trade data from us, not a seed
+    // 1. Stale wallets: discovered >3 days ago, no trade data from us, not a seed/PumpPortal
+    //    PumpPortal wallets are exempt — they were validated via real-time stream before promotion
     const staleCutoff = new Date(Date.now() - STALE_WALLET_DAYS * 24 * 60 * 60 * 1000);
     const staleResult = await query(
       `UPDATE alpha_wallets SET active = FALSE
        WHERE active = TRUE
-         AND source NOT IN ('NANSEN_SEED', 'PUMPFUN_SEED', 'GRADUATION_SEED')
+         AND source NOT IN ('NANSEN_SEED', 'PUMPFUN_SEED', 'GRADUATION_SEED', 'PUMPFUN_DISCOVERY')
          AND COALESCE(our_total_trades, 0) = 0
          AND COALESCE(round_trips_analyzed, 0) = 0
          AND discovered_at < $1
@@ -603,11 +607,11 @@ export class WalletDiscovery {
       logger.info({ count: staleCount }, 'Removed stale wallets with no trade data');
     }
 
-    // 2. Proven slow holders: median hold >12h with 3+ analyzed trips (not seeds)
+    // 2. Proven slow holders: median hold >12h with 3+ analyzed trips (not seeds/PumpPortal)
     const slowResult = await query(
       `UPDATE alpha_wallets SET active = FALSE
        WHERE active = TRUE
-         AND source NOT IN ('NANSEN_SEED', 'PUMPFUN_SEED', 'GRADUATION_SEED')
+         AND source NOT IN ('NANSEN_SEED', 'PUMPFUN_SEED', 'GRADUATION_SEED', 'PUMPFUN_DISCOVERY')
          AND COALESCE(median_hold_time_mins, 0) > 720
          AND COALESCE(round_trips_analyzed, 0) >= 3
        RETURNING address`,
@@ -648,6 +652,60 @@ export class WalletDiscovery {
       }
     }
 
+    // 4. Separate cap for PumpPortal-discovered wallets
+    const pfActiveCount = await getMany<{ count: string }>(
+      `SELECT COUNT(*) as count FROM alpha_wallets WHERE active = TRUE AND source = 'PUMPFUN_DISCOVERY'`,
+    );
+    const currentPfActive = parseInt(pfActiveCount[0]?.count || '0');
+    if (currentPfActive > MAX_PUMPFUN_DISCOVERY_WALLETS) {
+      const pfExcess = currentPfActive - MAX_PUMPFUN_DISCOVERY_WALLETS;
+      const pfCapResult = await query(
+        `UPDATE alpha_wallets SET active = FALSE
+         WHERE address IN (
+           SELECT address FROM alpha_wallets
+           WHERE active = TRUE AND source = 'PUMPFUN_DISCOVERY'
+           ORDER BY
+             COALESCE(our_win_rate, 0) ASC,
+             COALESCE(our_avg_pnl_percent, 0) ASC,
+             COALESCE(our_total_trades, 0) ASC
+           LIMIT $1
+         )
+         RETURNING address`,
+        [pfExcess],
+      );
+      const pfCapCount = pfCapResult.rowCount || 0;
+      if (pfCapCount > 0) {
+        reasons[`pf cap exceeded (>${MAX_PUMPFUN_DISCOVERY_WALLETS})`] = pfCapCount;
+        totalRemoved += pfCapCount;
+        logger.info({ count: pfCapCount, cap: MAX_PUMPFUN_DISCOVERY_WALLETS }, 'Removed lowest-scoring PumpPortal wallets to enforce cap');
+      }
+    }
+
+    // 5. Auto-reactivate top PumpPortal performers that were deactivated
+    //    Criteria: ≥80% WR, ≥20% avg PnL, ≥5 trades (from discovery stats)
+    if (currentPfActive < MAX_PUMPFUN_DISCOVERY_WALLETS) {
+      const slotsAvailable = MAX_PUMPFUN_DISCOVERY_WALLETS - currentPfActive;
+      const reactivated = await query(
+        `UPDATE alpha_wallets SET active = TRUE
+         WHERE address IN (
+           SELECT address FROM alpha_wallets
+           WHERE active = FALSE
+             AND source = 'PUMPFUN_DISCOVERY'
+             AND COALESCE(our_win_rate, 0) >= 0.80
+             AND COALESCE(our_avg_pnl_percent, 0) >= 0.20
+             AND COALESCE(our_total_trades, 0) >= 5
+           ORDER BY our_win_rate DESC, our_avg_pnl_percent DESC
+           LIMIT $1
+         )
+         RETURNING address`,
+        [slotsAvailable],
+      );
+      const reactivatedCount = reactivated.rowCount || 0;
+      if (reactivatedCount > 0) {
+        logger.info({ count: reactivatedCount }, 'Auto-reactivated top PumpPortal performers');
+      }
+    }
+
     if (totalRemoved > 0) {
       logger.info({ totalRemoved, reasons }, 'Auto-cleanup complete');
     }
@@ -675,7 +733,7 @@ export class WalletDiscovery {
            -- Pump.fun wallet bonus in curve scalp mode (+25 for pumpfun_only wallets)
            + CASE WHEN $1 = TRUE AND pumpfun_only = TRUE THEN 25 ELSE 0 END
            -- PumpPortal-discovered wallets get extra bump (real-time validated on curves)
-           + CASE WHEN $1 = TRUE AND source = 'PUMPFUN_DISCOVERY' THEN 15 ELSE 0 END
+           + CASE WHEN $1 = TRUE AND source = 'PUMPFUN_DISCOVERY' THEN 30 ELSE 0 END
            -- Tier A wallets get priority
            + CASE WHEN tier = 'A' THEN 30 ELSE 0 END
            -- SHORT-TERM ALPHA SCORE (0-100 → 0-40 pts) — biggest weight

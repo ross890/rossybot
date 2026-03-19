@@ -1024,39 +1024,76 @@ export class TelegramService {
           MANUAL: '✋ Manual',
         };
 
-        // --- Per-source wallet lines ---
+        // --- Per-source wallet lines (capped for large sources) ---
         const sourceBlocks: string[] = [];
+        const MAX_DISPLAY_ACTIVE = 20;
+        const MAX_DISPLAY_INACTIVE = 5;
+
+        const formatWalletLine = (w: Record<string, unknown>): string => {
+          const trades = Number(w.our_total_trades);
+          const wr = trades > 0 ? `${(Number(w.our_win_rate) * 100).toFixed(0)}%` : '-';
+          const pnl = trades > 0 ? `${(Number(w.our_avg_pnl_percent) * 100).toFixed(1)}%` : '-';
+          const hold = trades > 0 ? this.formatHoldTime(Number(w.our_avg_hold_time_mins)) : '-';
+          const losses = Number(w.consecutive_losses);
+          const alpha = Number(w.alpha_score);
+          const status = w.active ? (w.helius_subscribed ? '📡' : '⏸️') : '❌';
+          const tierTag = `[${w.tier}]`;
+          const streak = losses >= 2 ? ` 🔥${losses}L` : '';
+          const alphaTag = alpha > 0 ? ` α${alpha}` : '';
+          let lastActiveStr = '';
+          if (w.last_active_at) {
+            const ago = Math.round((Date.now() - new Date(w.last_active_at as string).getTime()) / 86400000);
+            lastActiveStr = ago === 0 ? ' (today)' : ago === 1 ? ' (1d ago)' : ` (${ago}d ago)`;
+          }
+          const label = w.label as string;
+          const shortAddr = (w.address as string).slice(0, 6);
+          const displayName = label.length > 20 ? `${label.slice(0, 20)}…` : label;
+          return `│  ${status} ${tierTag} ${displayName} [${shortAddr}] | ${trades}t ${wr}W ${pnl}pnl | hold ${hold}${streak}${alphaTag}${lastActiveStr}`;
+        };
+
         for (const [src, srcWallets] of Object.entries(sourceMap)) {
-          const srcActive = srcWallets.filter((w) => w.active).length;
+          const srcActiveWallets = srcWallets.filter((w) => w.active);
+          const srcInactiveWallets = srcWallets.filter((w) => !w.active);
           const srcLabel = sourceLabels[src] || src;
-          sourceBlocks.push(`├─ ${srcLabel} (${srcActive}/${srcWallets.length} active)`);
+          sourceBlocks.push(`├─ ${srcLabel} (${srcActiveWallets.length}/${srcWallets.length} active)`);
 
-          for (const w of srcWallets) {
-            const trades = Number(w.our_total_trades);
-            const wr = trades > 0 ? `${(Number(w.our_win_rate) * 100).toFixed(0)}%` : '-';
-            const pnl = trades > 0 ? `${(Number(w.our_avg_pnl_percent) * 100).toFixed(1)}%` : '-';
-            const hold = trades > 0 ? this.formatHoldTime(Number(w.our_avg_hold_time_mins)) : '-';
-            const losses = Number(w.consecutive_losses);
-            const alpha = Number(w.alpha_score);
-            const status = w.active ? (w.helius_subscribed ? '📡' : '⏸️') : '❌';
-            const tierTag = `[${w.tier}]`;
-            const streak = losses >= 2 ? ` 🔥${losses}L` : '';
-            const alphaTag = alpha > 0 ? ` α${alpha}` : '';
+          // For large sources (PumpPortal Discovery), cap display and show summary
+          const isLargeSource = srcWallets.length > MAX_DISPLAY_ACTIVE + MAX_DISPLAY_INACTIVE + 5;
 
-            // Last active relative time
-            let lastActiveStr = '';
-            if (w.last_active_at) {
-              const ago = Math.round((Date.now() - new Date(w.last_active_at as string).getTime()) / 86400000);
-              lastActiveStr = ago === 0 ? ' (today)' : ago === 1 ? ' (1d ago)' : ` (${ago}d ago)`;
+          if (isLargeSource) {
+            // Show top active wallets by win rate
+            const topActive = srcActiveWallets.slice(0, MAX_DISPLAY_ACTIVE);
+            for (const w of topActive) {
+              sourceBlocks.push(formatWalletLine(w));
+            }
+            if (srcActiveWallets.length > MAX_DISPLAY_ACTIVE) {
+              sourceBlocks.push(`│  ... +${srcActiveWallets.length - MAX_DISPLAY_ACTIVE} more active`);
             }
 
-            const label = w.label as string;
-            const shortAddr = (w.address as string).slice(0, 6);
-            const displayName = label.length > 20 ? `${label.slice(0, 20)}…` : label;
+            // Show top inactive by win rate (already sorted by our_win_rate DESC)
+            const topInactive = srcInactiveWallets.slice(0, MAX_DISPLAY_INACTIVE);
+            if (topInactive.length > 0) {
+              sourceBlocks.push(`│  ── top inactive:`);
+              for (const w of topInactive) {
+                sourceBlocks.push(formatWalletLine(w));
+              }
+              if (srcInactiveWallets.length > MAX_DISPLAY_INACTIVE) {
+                sourceBlocks.push(`│  ... +${srcInactiveWallets.length - MAX_DISPLAY_INACTIVE} more inactive`);
+              }
+            }
 
-            sourceBlocks.push(
-              `│  ${status} ${tierTag} ${displayName} [${shortAddr}] | ${trades}t ${wr}W ${pnl}pnl | hold ${hold}${streak}${alphaTag}${lastActiveStr}`,
-            );
+            // Summary stats for the source
+            const withTradesSrc = srcWallets.filter((w) => Number(w.our_total_trades) > 0);
+            if (withTradesSrc.length > 0) {
+              const avgWrSrc = (withTradesSrc.reduce((s, w) => s + Number(w.our_win_rate), 0) / withTradesSrc.length * 100).toFixed(0);
+              const avgPnlSrc = (withTradesSrc.reduce((s, w) => s + Number(w.our_avg_pnl_percent), 0) / withTradesSrc.length * 100).toFixed(1);
+              sourceBlocks.push(`│  📊 Source avg: ${avgWrSrc}% WR, ${avgPnlSrc}% PnL across ${withTradesSrc.length} wallets w/ trades`);
+            }
+          } else {
+            // Small sources: show all wallets
+            for (const w of srcWallets) {
+              sourceBlocks.push(formatWalletLine(w));
+            }
           }
           sourceBlocks.push(`│`);
         }

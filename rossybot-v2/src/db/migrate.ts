@@ -346,6 +346,9 @@ async function migrate() {
   // --- Add peak curve fill tracking for analytics ---
   await pool.query(`ALTER TABLE pumpfun_positions ADD COLUMN IF NOT EXISTS peak_curve_fill_pct DECIMAL DEFAULT 0`);
 
+  // --- Add entry_type for tuning analytics (DIRECT / DEFERRED / MOVER) ---
+  await pool.query(`ALTER TABLE pumpfun_positions ADD COLUMN IF NOT EXISTS entry_type TEXT DEFAULT 'DIRECT'`);
+
   // 10. graduated_tokens — tracks analyzed graduated tokens for retroanalysis
   await pool.query(`
     CREATE TABLE IF NOT EXISTS graduated_tokens (

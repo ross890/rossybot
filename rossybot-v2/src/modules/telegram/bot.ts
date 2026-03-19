@@ -895,6 +895,24 @@ export class TelegramService {
             })
           : ['│  (no data yet)'];
 
+        // --- Entry type breakdown ---
+        const entryTypesRaw = await getMany<Record<string, unknown>>(
+          `SELECT COALESCE(entry_type, 'DIRECT') as entry_type, COUNT(*) as total,
+                  COUNT(*) FILTER (WHERE pnl_percent > 0) as wins,
+                  COALESCE(AVG(pnl_percent), 0) as avg_pnl
+           FROM pumpfun_positions WHERE status = 'CLOSED'
+           GROUP BY COALESCE(entry_type, 'DIRECT') ORDER BY total DESC`,
+        );
+        const entryTypeLines = entryTypesRaw.length > 0
+          ? entryTypesRaw.map((et) => {
+              const etT = Number(et.total);
+              const etW = Number(et.wins);
+              const etWr = etT > 0 ? (etW / etT * 100).toFixed(0) : '0';
+              const etPnl = (Number(et.avg_pnl) * 100).toFixed(1);
+              return `│  ${et.entry_type}: ${etT}t ${etWr}%W avg ${etPnl}%`;
+            })
+          : ['│  (all DIRECT)'];
+
         // --- Recent signals (accepted + rejected) ---
         const recentSignals = await getMany<Record<string, unknown>>(
           `SELECT token_address, status, pnl_percent, graduated, hold_time_mins, exit_reason, entry_time
@@ -924,6 +942,9 @@ export class TelegramService {
           `│`,
           `├─ EXIT REASONS`,
           ...(exitLines.length > 0 ? exitLines : ['│  (no exits yet)']),
+          `│`,
+          `├─ ENTRY TYPES`,
+          ...entryTypeLines,
           `│`,
           `├─ WALLET PERFORMANCE (pump.fun)`,
           ...walletLines,
@@ -1032,6 +1053,245 @@ export class TelegramService {
       } catch (err) {
         logger.error({ err }, 'Failed to generate curve analysis');
         await this.bot.sendMessage(msg.chat.id, '❌ Failed to load curve data');
+      }
+    });
+
+    // /tuning — aggregate tuning report for copy-paste analysis
+    this.bot.onText(/\/tuning/, async (msg) => {
+      if (msg.chat.id.toString() !== this.chatId) return;
+      try {
+        // 1. Overall performance
+        const overall = await getOne<Record<string, unknown>>(
+          `SELECT
+             COUNT(*) as total,
+             COUNT(*) FILTER (WHERE pnl_percent > 0) as wins,
+             COALESCE(AVG(pnl_percent), 0) as avg_pnl,
+             COALESCE(SUM(net_pnl_sol), 0) as total_pnl_sol,
+             COALESCE(AVG(hold_time_mins), 0) as avg_hold,
+             COALESCE(AVG(peak_curve_fill_pct), 0) as avg_peak_curve,
+             COALESCE(AVG(curve_fill_pct_at_entry), 0) as avg_entry_curve,
+             COALESCE(AVG(EXTRACT(EPOCH FROM (entry_time - alpha_buy_time))), 0) as avg_alpha_lag_secs,
+             COUNT(*) FILTER (WHERE graduated = TRUE) as graduated
+           FROM pumpfun_positions WHERE status = 'CLOSED'`,
+        );
+
+        const total = Number(overall?.total || 0);
+        if (total === 0) {
+          await this.bot.sendMessage(msg.chat.id, '📭 No closed trades yet');
+          return;
+        }
+
+        const wins = Number(overall?.wins || 0);
+        const losses = total - wins;
+        const wr = (wins / total * 100).toFixed(0);
+        const avgPnl = (Number(overall?.avg_pnl || 0) * 100).toFixed(1);
+        const totalPnlSol = Number(overall?.total_pnl_sol || 0).toFixed(4);
+        const avgHold = Number(overall?.avg_hold || 0).toFixed(0);
+        const avgPeakCurve = (Number(overall?.avg_peak_curve || 0) * 100).toFixed(0);
+        const avgEntryCurve = (Number(overall?.avg_entry_curve || 0) * 100).toFixed(0);
+        const avgAlphaLag = Number(overall?.avg_alpha_lag_secs || 0).toFixed(0);
+        const gradCount = Number(overall?.graduated || 0);
+
+        // 2. Entry type breakdown
+        const entryTypes = await getMany<Record<string, unknown>>(
+          `SELECT
+             COALESCE(entry_type, 'DIRECT') as entry_type,
+             COUNT(*) as total,
+             COUNT(*) FILTER (WHERE pnl_percent > 0) as wins,
+             COALESCE(AVG(pnl_percent), 0) as avg_pnl,
+             COALESCE(SUM(net_pnl_sol), 0) as total_pnl_sol,
+             COALESCE(AVG(hold_time_mins), 0) as avg_hold,
+             COALESCE(AVG(peak_curve_fill_pct), 0) as avg_peak,
+             COALESCE(AVG(EXTRACT(EPOCH FROM (entry_time - alpha_buy_time))), 0) as avg_lag
+           FROM pumpfun_positions WHERE status = 'CLOSED'
+           GROUP BY COALESCE(entry_type, 'DIRECT')
+           ORDER BY total DESC`,
+        );
+
+        const entryTypeLines = entryTypes.map((et) => {
+          const etTotal = Number(et.total);
+          const etWins = Number(et.wins);
+          const etWr = etTotal > 0 ? (etWins / etTotal * 100).toFixed(0) : '0';
+          const etPnl = (Number(et.avg_pnl) * 100).toFixed(1);
+          const etSol = Number(et.total_pnl_sol).toFixed(4);
+          const etHold = Number(et.avg_hold).toFixed(0);
+          const etPeak = (Number(et.avg_peak) * 100).toFixed(0);
+          const etLag = Number(et.avg_lag).toFixed(0);
+          return `│ ${et.entry_type}: ${etTotal}t ${etWr}%W avg${etPnl}% ${etSol}SOL hold${etHold}m peak${etPeak}% lag${etLag}s`;
+        });
+
+        // 3. Exit reason breakdown with WR
+        const exitReasons = await getMany<Record<string, unknown>>(
+          `SELECT
+             exit_reason,
+             COUNT(*) as total,
+             COUNT(*) FILTER (WHERE pnl_percent > 0) as wins,
+             COALESCE(AVG(pnl_percent), 0) as avg_pnl
+           FROM pumpfun_positions WHERE status = 'CLOSED' AND exit_reason IS NOT NULL
+           GROUP BY exit_reason ORDER BY total DESC LIMIT 8`,
+        );
+
+        const exitLines = exitReasons.map((r) => {
+          const rTotal = Number(r.total);
+          const rWins = Number(r.wins);
+          const rWr = rTotal > 0 ? (rWins / rTotal * 100).toFixed(0) : '0';
+          const rPnl = (Number(r.avg_pnl) * 100).toFixed(1);
+          return `│ ${rTotal}x ${r.exit_reason} (${rWr}%W, avg ${rPnl}%)`;
+        });
+
+        // 4. Curve entry zone analysis — where do wins vs losses enter?
+        const curveZones = await getMany<Record<string, unknown>>(
+          `SELECT
+             CASE
+               WHEN curve_fill_pct_at_entry < 0.20 THEN '<20%'
+               WHEN curve_fill_pct_at_entry < 0.25 THEN '20-25%'
+               WHEN curve_fill_pct_at_entry < 0.30 THEN '25-30%'
+               WHEN curve_fill_pct_at_entry < 0.35 THEN '30-35%'
+               WHEN curve_fill_pct_at_entry < 0.40 THEN '35-40%'
+               ELSE '40%+'
+             END as zone,
+             COUNT(*) as total,
+             COUNT(*) FILTER (WHERE pnl_percent > 0) as wins,
+             COALESCE(AVG(pnl_percent), 0) as avg_pnl,
+             COALESCE(AVG(peak_curve_fill_pct), 0) as avg_peak
+           FROM pumpfun_positions WHERE status = 'CLOSED'
+           GROUP BY zone ORDER BY zone`,
+        );
+
+        const zoneLines = curveZones.map((z) => {
+          const zTotal = Number(z.total);
+          const zWins = Number(z.wins);
+          const zWr = zTotal > 0 ? (zWins / zTotal * 100).toFixed(0) : '0';
+          const zPnl = (Number(z.avg_pnl) * 100).toFixed(1);
+          const zPeak = (Number(z.avg_peak) * 100).toFixed(0);
+          return `│ ${(z.zone as string).padEnd(6)} ${String(zTotal).padStart(3)}t ${zWr}%W avg${zPnl}% peak${zPeak}%`;
+        });
+
+        // 5. Alpha lag buckets — how does lag correlate with outcomes?
+        const lagBuckets = await getMany<Record<string, unknown>>(
+          `SELECT
+             CASE
+               WHEN EXTRACT(EPOCH FROM (entry_time - alpha_buy_time)) < 5 THEN '<5s'
+               WHEN EXTRACT(EPOCH FROM (entry_time - alpha_buy_time)) < 15 THEN '5-15s'
+               WHEN EXTRACT(EPOCH FROM (entry_time - alpha_buy_time)) < 30 THEN '15-30s'
+               WHEN EXTRACT(EPOCH FROM (entry_time - alpha_buy_time)) < 60 THEN '30-60s'
+               ELSE '60s+'
+             END as lag_bucket,
+             COUNT(*) as total,
+             COUNT(*) FILTER (WHERE pnl_percent > 0) as wins,
+             COALESCE(AVG(pnl_percent), 0) as avg_pnl
+           FROM pumpfun_positions WHERE status = 'CLOSED'
+           GROUP BY lag_bucket ORDER BY lag_bucket`,
+        );
+
+        const lagLines = lagBuckets.map((l) => {
+          const lTotal = Number(l.total);
+          const lWins = Number(l.wins);
+          const lWr = lTotal > 0 ? (lWins / lTotal * 100).toFixed(0) : '0';
+          const lPnl = (Number(l.avg_pnl) * 100).toFixed(1);
+          return `│ ${(l.lag_bucket as string).padEnd(6)} ${String(lTotal).padStart(3)}t ${lWr}%W avg${lPnl}%`;
+        });
+
+        // 6. Peak curve fill — wins vs losses
+        const peakStats = await getOne<Record<string, unknown>>(
+          `SELECT
+             COALESCE(AVG(peak_curve_fill_pct) FILTER (WHERE pnl_percent > 0), 0) as avg_peak_wins,
+             COALESCE(AVG(peak_curve_fill_pct) FILTER (WHERE pnl_percent <= 0), 0) as avg_peak_losses,
+             COALESCE(PERCENTILE_CONT(0.5) WITHIN GROUP (ORDER BY peak_curve_fill_pct) FILTER (WHERE pnl_percent > 0), 0) as median_peak_wins,
+             COALESCE(PERCENTILE_CONT(0.5) WITHIN GROUP (ORDER BY peak_curve_fill_pct) FILTER (WHERE pnl_percent <= 0), 0) as median_peak_losses
+           FROM pumpfun_positions WHERE status = 'CLOSED' AND peak_curve_fill_pct > 0`,
+        );
+
+        const avgPeakWins = (Number(peakStats?.avg_peak_wins || 0) * 100).toFixed(0);
+        const avgPeakLosses = (Number(peakStats?.avg_peak_losses || 0) * 100).toFixed(0);
+        const medPeakWins = (Number(peakStats?.median_peak_wins || 0) * 100).toFixed(0);
+        const medPeakLosses = (Number(peakStats?.median_peak_losses || 0) * 100).toFixed(0);
+
+        // 7. Recent trades detail (last 15 for context)
+        const recent = await getMany<Record<string, unknown>>(
+          `SELECT token_address, pnl_percent, net_pnl_sol, hold_time_mins, exit_reason,
+                  curve_fill_pct_at_entry, peak_curve_fill_pct, graduated,
+                  COALESCE(entry_type, 'DIRECT') as entry_type,
+                  EXTRACT(EPOCH FROM (entry_time - alpha_buy_time)) as alpha_lag_secs,
+                  entry_time
+           FROM pumpfun_positions WHERE status = 'CLOSED'
+           ORDER BY closed_at DESC LIMIT 15`,
+        );
+
+        const recentLines = recent.map((r) => {
+          const rPnl = (Number(r.pnl_percent) * 100).toFixed(1);
+          const icon = Number(r.pnl_percent) > 0 ? '✅' : '❌';
+          const entry = (Number(r.curve_fill_pct_at_entry) * 100).toFixed(0);
+          const peak = (Number(r.peak_curve_fill_pct) * 100).toFixed(0);
+          const lag = Number(r.alpha_lag_secs || 0).toFixed(0);
+          const hold = Number(r.hold_time_mins || 0);
+          const grad = r.graduated ? '🎓' : '';
+          const type = String(r.entry_type).charAt(0); // D/M/D
+          return `│ ${icon} ${(r.token_address as string).slice(0, 6)} ${rPnl}% ${hold}m e${entry}% p${peak}% ${type} ${lag}s ${r.exit_reason}${grad}`;
+        });
+
+        // 8. Per-wallet performance
+        const walletPerf = await getMany<Record<string, unknown>>(
+          `SELECT w.label, COUNT(*) as trades,
+                  COUNT(*) FILTER (WHERE p.pnl_percent > 0) as wins,
+                  COALESCE(AVG(p.pnl_percent), 0) as avg_pnl,
+                  COALESCE(SUM(p.net_pnl_sol), 0) as total_pnl
+           FROM pumpfun_positions p
+           JOIN wallets w ON w.address = ANY(p.signal_wallets)
+           WHERE p.status = 'CLOSED'
+           GROUP BY w.label ORDER BY trades DESC LIMIT 10`,
+        );
+
+        const walletLines = walletPerf.map((w) => {
+          const wTotal = Number(w.trades);
+          const wWins = Number(w.wins);
+          const wWr = wTotal > 0 ? (wWins / wTotal * 100).toFixed(0) : '0';
+          const wPnl = (Number(w.avg_pnl) * 100).toFixed(1);
+          const wSol = Number(w.total_pnl).toFixed(4);
+          return `│ ${w.label}: ${wTotal}t ${wWr}%W avg${wPnl}% ${wSol}SOL`;
+        });
+
+        // Build the full report
+        const lines = [
+          `🔧 TUNING REPORT (${total} trades)`,
+          ``,
+          `┌─ OVERVIEW`,
+          `│ ${wins}W/${losses}L (${wr}%) · Avg PnL: ${avgPnl}% · Total: ${totalPnlSol} SOL`,
+          `│ Avg hold: ${avgHold}min · Avg entry curve: ${avgEntryCurve}% · Avg peak: ${avgPeakCurve}%`,
+          `│ Avg alpha lag: ${avgAlphaLag}s · Graduated: ${gradCount}/${total}`,
+          `│`,
+          `├─ ENTRY TYPE BREAKDOWN`,
+          ...(entryTypeLines.length > 0 ? entryTypeLines : ['│  (all DIRECT)']),
+          `│`,
+          `├─ EXIT REASONS`,
+          ...(exitLines.length > 0 ? exitLines : ['│  (none)']),
+          `│`,
+          `├─ ENTRY CURVE ZONE → OUTCOME`,
+          ...zoneLines,
+          `│`,
+          `├─ ALPHA LAG → OUTCOME`,
+          ...lagLines,
+          `│`,
+          `├─ PEAK CURVE (wins vs losses)`,
+          `│ Wins: avg ${avgPeakWins}% median ${medPeakWins}%`,
+          `│ Losses: avg ${avgPeakLosses}% median ${medPeakLosses}%`,
+          `│`,
+          `├─ WALLET PERFORMANCE`,
+          ...(walletLines.length > 0 ? walletLines : ['│  (none)']),
+          `│`,
+          `├─ RECENT TRADES (newest first)`,
+          `│ [icon token pnl hold entry peak type lag exit]`,
+          ...recentLines,
+          `│`,
+          `└─ Copy this entire message for tuning analysis`,
+        ];
+
+        for (const chunk of this.chunkMessage(lines.join('\n'))) {
+          await this.bot.sendMessage(msg.chat.id, chunk);
+        }
+      } catch (err) {
+        logger.error({ err }, 'Failed to generate tuning report');
+        await this.bot.sendMessage(msg.chat.id, '❌ Failed to load tuning data');
       }
     });
 

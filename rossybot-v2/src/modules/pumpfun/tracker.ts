@@ -41,6 +41,8 @@ export interface PumpFunPosition {
   entry_tx: string | null;
   fees_paid_sol: number;
   net_pnl_sol: number;
+  // Entry type for tuning analytics
+  entry_type: 'DIRECT' | 'DEFERRED' | 'MOVER';
   // Retry tracking
   sell_retry_count: number;
 }
@@ -164,6 +166,7 @@ export class PumpFunTracker {
     signalWallets: string[];
     capitalTier: string;
     prefetchedQuote?: unknown;
+    entryType?: 'DIRECT' | 'DEFERRED' | 'MOVER';
   }): Promise<PumpFunPosition | null> {
     // Dedup lock: prevent concurrent entries on the same token
     if (this.pendingEntries.has(params.tokenMint)) {
@@ -190,6 +193,7 @@ export class PumpFunTracker {
     signalWallets: string[];
     capitalTier: string;
     prefetchedQuote?: unknown;
+    entryType?: 'DIRECT' | 'DEFERRED' | 'MOVER';
   }): Promise<PumpFunPosition | null> {
     let entryTx: string | null = null;
     let feesSol = 0;
@@ -297,6 +301,7 @@ export class PumpFunTracker {
       entry_tx: entryTx,
       fees_paid_sol: feesSol,
       net_pnl_sol: -feesSol, // Start negative due to entry fees
+      entry_type: params.entryType || 'DIRECT',
       sell_retry_count: 0,
     };
 
@@ -306,14 +311,14 @@ export class PumpFunTracker {
       `INSERT INTO pumpfun_positions (id, token_address, token_symbol, bonding_curve_address,
          entry_price_sol, entry_time, alpha_buy_time, signal_wallets, capital_tier,
          simulated_entry_sol, status, curve_fill_pct_at_entry, current_curve_fill_pct, peak_curve_fill_pct,
-         sol_in_curve_at_entry, last_curve_check_sol, graduated, graduation_price, entry_tx, fees_paid_sol, net_pnl_sol)
-       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21)`,
+         sol_in_curve_at_entry, last_curve_check_sol, graduated, graduation_price, entry_tx, fees_paid_sol, net_pnl_sol, entry_type)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22)`,
       [pos.id, pos.token_address, pos.token_symbol, pos.bonding_curve_address,
        pos.entry_price_sol, pos.entry_time, pos.alpha_buy_time, pos.signal_wallets,
        pos.capital_tier, pos.simulated_entry_sol, pos.status,
        pos.curve_fill_pct_at_entry, pos.current_curve_fill_pct, pos.peak_curve_fill_pct,
        pos.sol_in_curve_at_entry, pos.last_curve_check_sol, pos.graduated, pos.graduation_price,
-       pos.entry_tx, pos.fees_paid_sol, pos.net_pnl_sol],
+       pos.entry_tx, pos.fees_paid_sol, pos.net_pnl_sol, pos.entry_type],
     );
 
     logger.info({
@@ -773,6 +778,7 @@ export class PumpFunTracker {
           entry_tx: (row.entry_tx as string) || null,
           fees_paid_sol: Number(row.fees_paid_sol || 0),
           net_pnl_sol: Number(row.net_pnl_sol || 0),
+          entry_type: (row.entry_type as 'DIRECT' | 'DEFERRED' | 'MOVER') || 'DIRECT',
           sell_retry_count: 0,
         };
         this.positions.set(pos.id, pos);

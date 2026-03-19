@@ -1465,10 +1465,10 @@ class RossyBotV2 {
     if (this.blockedTokens.has(mint)) return;
     if (this.pumpFunTracker.getOpenCount() >= config.pumpFun.maxPositions) return;
 
-    // Reject if curve is too early even for movers (below 20%) or too late (above 40%)
-    if (mover.curveFillPct < 0.20 || mover.curveFillPct > 0.40) {
+    // Reject if curve is too early (below 25%) or too late (above 38%)
+    if (mover.curveFillPct < 0.25 || mover.curveFillPct > 0.38) {
       logger.info({ token: mint.slice(0, 8), curveFill: `${(mover.curveFillPct * 100).toFixed(0)}%` },
-        'Mover + alpha signal but curve outside 20-40% range');
+        'Mover + alpha signal but curve outside 25-38% range');
       return;
     }
 

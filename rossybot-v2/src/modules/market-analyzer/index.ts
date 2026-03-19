@@ -30,7 +30,7 @@ const NEW_DISCOVERY_MIN_SCORE = 25;
  * This is the main entry point — designed to run once per day (end of day UTC).
  * It analyzes EVERY graduated pump.fun token from the last 24 hours.
  */
-export async function runDailyAnalysis(): Promise<void> {
+export async function runDailyAnalysis(opts?: { force?: boolean }): Promise<void> {
   const startTime = Date.now();
   const analysisDate = new Date().toISOString().split('T')[0]; // YYYY-MM-DD
 
@@ -41,9 +41,17 @@ export async function runDailyAnalysis(): Promise<void> {
     `SELECT analysis_date FROM ma_daily_summary WHERE analysis_date = $1`,
     [analysisDate],
   );
-  if (existing) {
-    logger.warn({ analysisDate }, 'Analysis already run today — skipping');
+  if (existing && !opts?.force) {
+    logger.warn({ analysisDate }, 'Analysis already run today — skipping (use force to re-run)');
     return;
+  }
+  if (existing && opts?.force) {
+    // Delete previous run so we can re-analyze
+    await query(`DELETE FROM ma_early_buyers WHERE analysis_date = $1`, [analysisDate]);
+    await query(`DELETE FROM ma_wallet_confluence WHERE analysis_date = $1`, [analysisDate]);
+    await query(`DELETE FROM ma_graduated_tokens WHERE analysis_date = $1`, [analysisDate]);
+    await query(`DELETE FROM ma_daily_summary WHERE analysis_date = $1`, [analysisDate]);
+    logger.info({ analysisDate }, 'Force mode: cleared previous analysis');
   }
 
   // Create summary row

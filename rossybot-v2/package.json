@@ -10,7 +10,10 @@
     "build": "tsc",
     "start": "node dist/index.js",
     "dev": "tsx watch src/index.ts",
-    "db:migrate": "tsx src/db/migrate.ts"
+    "db:migrate": "tsx src/db/migrate.ts",
+    "db:migrate:market-analyzer": "tsx src/modules/market-analyzer/migrate.ts",
+    "market-analyzer": "tsx src/modules/market-analyzer/run.ts",
+    "market-analyzer:cron": "tsx src/modules/market-analyzer/run.ts --cron"
   },
   "dependencies": {
     "@solana/web3.js": "^1.95.0",

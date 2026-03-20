@@ -107,6 +107,39 @@ export const config = {
     deferredEntryEnabled: true,        // When alpha buys early, add to watchlist instead of entering immediately
     deferredEntryMaxWaitMs: 2 * 60_000, // Max 2 min to wait (was 3 — data shows deferred entries underperform, faster timeout)
   },
+  // --- Graduation Bounce Discovery ---
+  // Monitors freshly graduated pump.fun tokens for the post-graduation dip/recovery pattern.
+  // Thesis: tokens dump 30-60% after graduation, then bounce 50-200% as new buyers enter.
+  graduationDiscovery: {
+    enabled: true,
+    // --- Detection ---
+    maxMonitored: 50,                    // Max tokens to monitor simultaneously
+    priceCheckIntervalMs: 15_000,        // Check prices every 15s (DexScreener rate-friendly)
+    monitorWindowMins: 60,               // Monitor for up to 60 min post-graduation
+    // --- Graduation filters ---
+    minGraduationMcap: 30_000,           // $30K min mcap at graduation (most are ~$69K)
+    minGraduationLiquidity: 5_000,       // $5K min liquidity
+    // --- Dip/Recovery signal thresholds ---
+    minDipPct: 0.25,                     // Must dip at least 25% from graduation price
+    minRecoveryPct: 0.15,               // Must bounce at least 15% from the bottom
+    minStabilityChecks: 2,               // 2 consecutive stable/rising price checks (~30s)
+    minBuyRatio: 0.45,                   // At least 45% of txns are buys (not still dumping)
+    minTimeSinceGradMins: 3,             // Wait at least 3 min after graduation (let the initial dump play out)
+    // --- Entry gate ---
+    minEntryMcap: 20_000,               // $20K min mcap at entry (post-dip, may be lower than graduation)
+    minEntryLiquidity: 5_000,            // $5K min liquidity at entry
+    // --- Position management ---
+    maxPositions: 2,                     // Max 2 concurrent graduation bounce positions
+    positionSizeMultiplier: 0.80,        // 80% of normal tier sizing (higher risk than alpha-led trades)
+    profitTarget: 0.50,                  // 50% take profit (graduated tokens can run big)
+    stopLoss: -0.20,                     // 20% stop loss
+    hardKill: -0.30,                     // 30% hard kill
+    trailingActivationPct: 0.25,         // Activate trailing stop at +25%
+    trailingStopPct: 0.15,              // Trail by 15% from peak (sell if drops 15% from highest PnL)
+    staleTimeMins: 30,                   // Cut if still losing after 30 min
+    hardTimeHours: 4,                    // 4h max hold (graduation bounces resolve within hours)
+    slippageBps: 300,                    // 3% slippage (freshly graduated = thin liquidity)
+  },
 } as const;
 
 // --- Capital Tier Configurations ---

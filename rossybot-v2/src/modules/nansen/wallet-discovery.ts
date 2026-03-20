@@ -212,6 +212,18 @@ export class WalletDiscovery {
 
     try {
       const result = await this.discoverTopTraders();
+
+      // Also discover DEX-active smart money wallets — uses the smart-money/dex-trades
+      // endpoint to find wallets actively trading small-cap memecoins on DEXes.
+      // This fills the gap: existing discovery finds PnL leaders per token (skews pump.fun),
+      // while this targets the exact DEX-trading profile that generates our best signals.
+      let dexResult = { added: 0, candidates: 0 };
+      try {
+        dexResult = await this.discoverDexTraders();
+      } catch (err) {
+        logger.warn({ err }, 'DEX smart money discovery failed (non-fatal)');
+      }
+
       const walletsRemoved = await this.validateExistingWallets();
 
       // Run hold-time analysis on all active wallets
@@ -229,15 +241,19 @@ export class WalletDiscovery {
       // Auto-cleanup: remove stale, slow, and excess wallets
       const cleanup = await this.autoCleanup();
 
+      const totalAdded = result.added + dexResult.added;
+      const totalRemoved = walletsRemoved + holdTimeResults.deactivated.length + cleanup.removed;
       const duration = Date.now() - start;
-      await this.logDiscovery(result.tokensScreened, result.candidates, result.added,
-        walletsRemoved + holdTimeResults.deactivated.length + cleanup.removed, duration);
+      await this.logDiscovery(result.tokensScreened, result.candidates + dexResult.candidates, totalAdded,
+        totalRemoved, duration);
 
       logger.info({
         tokensScreened: result.tokensScreened,
-        candidates: result.candidates,
-        added: result.added,
-        removed: walletsRemoved + holdTimeResults.deactivated.length + cleanup.removed,
+        pnlCandidates: result.candidates,
+        pnlAdded: result.added,
+        dexCandidates: dexResult.candidates,
+        dexAdded: dexResult.added,
+        removed: totalRemoved,
         holdTimeDemoted: holdTimeResults.demoted.length,
         cleanupReasons: cleanup.reasons,
         durationMs: duration,
@@ -375,6 +391,119 @@ export class WalletDiscovery {
       added,
     }, 'Discovery complete — top PnL traders identified');
     return { added, candidates: candidates.length, tokensScreened: tokensProcessed };
+  }
+
+  /**
+   * Discover DEX-active smart money wallets via Nansen's smart-money/dex-trades endpoint.
+   * This targets wallets actively trading small-cap memecoins on DEXes (not bonding curves),
+   * which is the exact profile that generates our best DEX signals.
+   *
+   * Strategy: Pull 3 pages of recent smart money DEX trades filtered to our mcap range,
+   * then score wallets by trade frequency, diversity, and volume.
+   */
+  private async discoverDexTraders(): Promise<{ added: number; candidates: number }> {
+    const walletActivity = new Map<string, {
+      label: string;
+      tradeCount: number;
+      totalValueUsd: number;
+      tokensTraded: Set<string>;
+      avgMcap: number;
+      mcapSum: number;
+    }>();
+
+    // Pull 3 pages of recent smart money DEX trades in our target mcap range
+    const pages = 3;
+    for (let page = 1; page <= pages; page++) {
+      try {
+        const trades = await this.nansen.smartMoneyDexTrades({
+          mcapMin: 30_000,      // $30K — catch micro-cap winners
+          mcapMax: 10_000_000,  // $10M — our upper bound
+          tradeValueMin: 200,   // $200+ trades (filters noise)
+          tokenAgeMax: 30,      // Tokens < 30 days old (fresh memecoins)
+          limit: 100,
+          page,
+        });
+
+        if (trades.length === 0) break;
+
+        for (const trade of trades) {
+          if (!trade.trader_address) continue;
+          // Skip SOL/USDC buys (only count memecoin token buys)
+          if (trade.token_bought_symbol === 'SOL' || trade.token_bought_symbol === 'USDC') continue;
+
+          const existing = walletActivity.get(trade.trader_address) || {
+            label: trade.trader_address_label || trade.trader_address.slice(0, 8),
+            tradeCount: 0,
+            totalValueUsd: 0,
+            tokensTraded: new Set<string>(),
+            avgMcap: 0,
+            mcapSum: 0,
+          };
+
+          existing.tradeCount++;
+          existing.totalValueUsd += trade.trade_value_usd;
+          existing.tokensTraded.add(trade.token_bought_address);
+          existing.mcapSum += trade.token_bought_market_cap || 0;
+          walletActivity.set(trade.trader_address, existing);
+        }
+
+        logger.info({ page, trades: trades.length, wallets: walletActivity.size }, 'Smart money DEX trades page fetched');
+      } catch (err: unknown) {
+        const axErr = err as { response?: { status?: number }; message?: string };
+        if (axErr.response?.status === 403 || axErr.response?.status === 429) {
+          logger.warn({ page, status: axErr.response.status }, 'Smart money DEX trades rate limited');
+          break;
+        }
+        logger.warn({ page, err: axErr.message }, 'Smart money DEX trades page failed');
+      }
+    }
+
+    if (walletActivity.size === 0) {
+      logger.info('No smart money DEX traders found');
+      return { added: 0, candidates: 0 };
+    }
+
+    // Score and rank: prioritize wallets trading multiple small-cap tokens
+    const candidates: WalletCandidate[] = [];
+    for (const [addr, data] of walletActivity) {
+      const tokensTraded = data.tokensTraded.size;
+      // Require: 2+ trades across 2+ different tokens, $500+ total volume
+      if (data.tradeCount < 2 || tokensTraded < 2 || data.totalValueUsd < 500) continue;
+
+      // Compute average mcap — prefer wallets trading smaller caps (our sweet spot)
+      const avgMcap = data.tradeCount > 0 ? data.mcapSum / data.tradeCount : 0;
+      const mcapBonus = avgMcap > 0 && avgMcap < 500_000 ? 0.15 : 0; // Bonus for sub-$500K avg
+
+      // Score: diversity (40%) + trade volume (30%) + activity (30%)
+      const diversityScore = Math.min(tokensTraded / 5, 1) * 0.40;
+      const volumeScore = Math.min(Math.log10(Math.max(data.totalValueUsd, 1)) / 5, 1) * 0.30;
+      const activityScore = Math.min(data.tradeCount / 10, 1) * 0.30;
+
+      candidates.push({
+        address: addr,
+        label: `dex_sm_${data.label.slice(0, 6)} | ${tokensTraded}tok $${data.totalValueUsd >= 1000 ? (data.totalValueUsd / 1000).toFixed(0) + 'K' : data.totalValueUsd.toFixed(0)}`,
+        tradeCount: data.tradeCount,
+        totalVolumeUsd: data.totalValueUsd,
+        tokensTraded,
+        bestRoi: 0,
+        score: diversityScore + volumeScore + activityScore + mcapBonus,
+      });
+    }
+
+    candidates.sort((a, b) => b.score - a.score);
+
+    // Add top candidates (cap at 20 per cycle to avoid flooding)
+    let added = 0;
+    for (const c of candidates.slice(0, 20)) {
+      if (await this.addWallet(c)) added++;
+    }
+
+    logger.info({
+      tradersFound: walletActivity.size,
+      qualified: candidates.length,
+      added,
+    }, 'DEX smart money discovery complete');
+    return { added, candidates: candidates.length };
   }
 
   private async addWallet(candidate: WalletCandidate): Promise<boolean> {

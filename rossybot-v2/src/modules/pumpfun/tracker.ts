@@ -415,6 +415,20 @@ export class PumpFunTracker {
       const curveState = await fetchCurveState(pos.bonding_curve_address);
       if (curveState?.exists) {
         const prevSol = pos.last_curve_check_sol;
+
+        // Spike protection (mirrors realtime path): reject single-tick drops > 50%
+        // Prevents false -100% PnL from transient RPC data or closed accounts
+        const solDelta = Math.abs(curveState.solBalance - prevSol);
+        const isHugeDrop = prevSol > 0 && curveState.solBalance < prevSol * 0.5;
+        if ((solDelta > 20 || isHugeDrop) && prevSol > 0) {
+          logger.warn({
+            token: pos.token_symbol || pos.token_address.slice(0, 8),
+            prevSol: prevSol.toFixed(1),
+            newSol: curveState.solBalance.toFixed(1),
+          }, 'RPC curve update spike rejected');
+          return;
+        }
+
         pos.last_curve_check_sol = curveState.solBalance;
         pos.current_curve_fill_pct = estimateCurveFillPct(curveState.solBalance);
         if (pos.current_curve_fill_pct > pos.peak_curve_fill_pct) {
@@ -427,6 +441,15 @@ export class PumpFunTracker {
           pos.pnl_percent = Math.sqrt(curveState.solBalance / pos.sol_in_curve_at_entry) - 1;
         } else if (curveState.solBalance <= 0) {
           pos.pnl_percent = -1; // Curve emptied — total loss
+        }
+
+        // --- EMERGENCY EXIT: no hold time guard ---
+        // The 15s hold guard on stop loss was causing -99% wipeouts:
+        // Curve drops from 30% to 0% in 2-5s, guard prevents exit, position hits -99%.
+        // Fix: exit IMMEDIATELY if PnL < hardKill, regardless of hold time.
+        if (pos.pnl_percent <= cfg.hardKill) {
+          await this.closePosition(pos, `Hard kill (${(pos.pnl_percent * 100).toFixed(0)}%)`);
+          return;
         }
 
         // --- CURVE SCALP EXITS (highest priority — take profit before graduation) ---
@@ -851,6 +874,13 @@ export class PumpFunTracker {
         pos.pnl_percent = Math.sqrt(realSol / pos.sol_in_curve_at_entry) - 1;
       } else if (realSol <= 0) {
         pos.pnl_percent = -1; // Curve emptied — total loss
+      }
+
+      // --- EMERGENCY EXIT: no hold time guard ---
+      // Prevents -99% wipeouts when curve drains in first 15s (before normal SL guard expires)
+      if (pos.pnl_percent <= cfg.hardKill) {
+        await this.closePosition(pos, `Hard kill (${(pos.pnl_percent * 100).toFixed(0)}%)`);
+        return;
       }
 
       const holdMins = (Date.now() - pos.entry_time.getTime()) / 60_000;

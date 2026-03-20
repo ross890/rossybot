@@ -1763,13 +1763,15 @@ class RossyBotV2 {
         ? sq.passed * 2 + (sq.count > 0 ? sq.totalScore / sq.count / 20 : 0) // normalize score (0-100) to 0-5 range
         : 0; // no signals at all = 0 quality
 
-      // Noise penalty: wallets with high skip:signal ratios get quality reduced
-      // A wallet with 500+ skipped TXs and <2 signals is burning a slot for nothing
+      // Noise penalty: wallets with terrible skip:signal ratios are burning WS slots
+      // Real alpha wallets have >5% signal rate; anything <1% is pure noise
       const noise = noiseMap.get(addr.slice(0, 8));
-      if (noise && noise.skipped > 200 && noise.signals < 3) {
-        quality -= 2; // Heavy penalty — these are bots/market makers, not traders
-      } else if (noise && noise.skipped > 100 && noise.ratio < 0.01) {
-        quality -= 1; // Moderate penalty — very noisy, almost no signal
+      if (noise && noise.skipped > 500 && noise.ratio < 0.005) {
+        quality = -10; // Force evict — catastrophically noisy (e.g. 10K skips, <0.5% signal)
+      } else if (noise && noise.skipped > 200 && noise.ratio < 0.01) {
+        quality -= 3; // Heavy penalty — very noisy, almost no signal
+      } else if (noise && noise.skipped > 100 && noise.ratio < 0.03) {
+        quality -= 1; // Moderate penalty
       }
 
       if (quality < RossyBotV2.WS_MIN_QUALITY_FOR_KEEP) {

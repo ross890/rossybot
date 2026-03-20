@@ -327,6 +327,16 @@ export class EntryEngine {
     }
   }
 
+  /**
+   * Allow a previously processed token to be re-evaluated.
+   * Called when a position closes and re-entry conditions are met.
+   */
+  allowReentry(tokenMint: string): void {
+    this.processedTokens.delete(tokenMint);
+    this.pendingBuys.delete(tokenMint); // Clear any stale pending state
+    logger.info({ token: tokenMint.slice(0, 8) }, 'Token cleared for re-entry — removed from processedTokens');
+  }
+
   /** Get pending buy status for debugging */
   getPendingBuys(): Array<{ token: string; wallets: number; ageMs: number }> {
     return Array.from(this.pendingBuys.entries()).map(([mint, p]) => ({

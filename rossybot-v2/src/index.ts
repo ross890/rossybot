@@ -18,7 +18,7 @@ import { PumpFunTracker, validatePumpFunSignal, PumpPortalClient, PumpFunAlphaDi
 import { GraduationAnalyzer } from './modules/analysis/graduation-analyzer.js';
 import { runDailyAnalysis } from './modules/market-analyzer/index.js';
 import { fetchDexPair } from './modules/validation/dexscreener.js';
-import { SignalType, type ParsedSignal, type PositionView } from './types/index.js';
+import { SignalType, type ParsedSignal, type PositionView, type BlockedTokenMeta } from './types/index.js';
 
 /** Convert ShadowPosition to common PositionView */
 function shadowToView(p: ReturnType<ShadowTracker['getOpenPositions']>[number]): PositionView {
@@ -135,8 +135,8 @@ class RossyBotV2 {
   // Quick symbol cache for BUY/SELL notifications
   private symbolCache: Map<string, string> = new Map();
 
-  // Tokens we've closed/dropped — never re-buy in this session
-  private blockedTokens: Set<string> = new Set();
+  // Tokens we've closed/dropped — tracks exit metadata for conditional re-entry
+  private blockedTokens: Map<string, BlockedTokenMeta> = new Map();
 
   // Pump.fun position tracking (runs alongside standard tracker)
   private pumpFunTracker: PumpFunTracker;
@@ -267,6 +267,40 @@ class RossyBotV2 {
     return this.liveTracker?.hasPosition(tokenMint) ?? this.shadowTracker!.hasPosition(tokenMint);
   }
 
+  /**
+   * Check if a blocked token is eligible for re-entry.
+   * Returns true if re-entry conditions are met, false if still hard-blocked.
+   */
+  private isReentryEligible(tokenMint: string, tierCfg: import('./types/index.js').TierConfig): boolean {
+    const meta = this.blockedTokens.get(tokenMint);
+    if (!meta) return true; // Not blocked at all
+
+    // Hard-blocked tokens (stop loss, hard kill, manual sell) are never re-entered
+    if (meta.hardBlocked) return false;
+
+    // Re-entry disabled for this tier
+    if (!tierCfg.reentryEnabled) return false;
+
+    // Max re-entries reached
+    if (meta.reentryCount >= tierCfg.reentryMaxPerToken) return false;
+
+    // Cooldown not elapsed
+    const cooldownMs = tierCfg.reentryCooldownMins * 60 * 1000;
+    if (Date.now() - meta.closedAt < cooldownMs) return false;
+
+    return true;
+  }
+
+  /**
+   * Mark a blocked token as re-entered (increment count, update metadata).
+   */
+  private markReentry(tokenMint: string): void {
+    const meta = this.blockedTokens.get(tokenMint);
+    if (meta) {
+      meta.reentryCount += 1;
+    }
+  }
+
   /** Quick symbol lookup — cached, 2s timeout, falls back to mint prefix */
   private async resolveSymbol(tokenMint: string): Promise<string> {
     const cached = this.symbolCache.get(tokenMint);
@@ -357,7 +391,13 @@ class RossyBotV2 {
          SELECT DISTINCT token_address FROM graduated_positions WHERE status = 'CLOSED' AND closed_at > NOW() - INTERVAL '24 hours'`,
       );
       for (const row of closedMints) {
-        this.blockedTokens.add(row.token_address);
+        this.blockedTokens.set(row.token_address, {
+          closedAt: Date.now(), // Approximate — loaded from DB
+          pnlPercent: 0,
+          exitReason: 'loaded from DB',
+          reentryCount: 0,
+          hardBlocked: true, // Conservative: hard-block DB-loaded tokens (no exit context)
+        });
       }
       if (this.blockedTokens.size > 0) {
         logger.info({ count: this.blockedTokens.size }, 'Loaded blocked tokens from recent closed positions');
@@ -851,12 +891,37 @@ class RossyBotV2 {
           return;
         }
 
+        // Check if token is blocked — allow re-entry if conditions are met
+        let isReentry = false;
         if (this.blockedTokens.has(signal.tokenMint)) {
-          logger.info({ token: signal.tokenMint.slice(0, 8) }, 'Skipping signal — token was previously closed/dropped');
-          return;
+          if (this.isReentryEligible(signal.tokenMint, signal.tierConfig)) {
+            isReentry = true;
+            const meta = this.blockedTokens.get(signal.tokenMint)!;
+            const cooldownMins = Math.round((Date.now() - meta.closedAt) / 60000);
+            logger.info({
+              token: signal.tokenMint.slice(0, 8),
+              prevExit: meta.exitReason,
+              prevPnl: `${(meta.pnlPercent * 100).toFixed(1)}%`,
+              cooldownMins,
+              reentryNum: meta.reentryCount + 1,
+            }, 'RE-ENTRY eligible — previously closed token, fresh alpha signal');
+          } else {
+            logger.info({ token: signal.tokenMint.slice(0, 8) }, 'Skipping signal — token was previously closed/dropped');
+            return;
+          }
         }
 
         let positionSize = this.capitalManager.getPositionSize();
+
+        // Re-entry: reduce position size for risk management
+        if (isReentry) {
+          positionSize = positionSize * signal.tierConfig.reentrySizeMultiplier;
+          logger.info({
+            token: signal.tokenMint.slice(0, 8),
+            multiplier: signal.tierConfig.reentrySizeMultiplier,
+            adjustedSize: positionSize.toFixed(3),
+          }, 'Re-entry — reduced position size');
+        }
 
         // Bid-size matching: scale position relative to alpha wallet's buy size.
         // If the alpha spent 2 SOL and we have 6.5 SOL, don't blindly use 20% (1.3 SOL).
@@ -907,6 +972,7 @@ class RossyBotV2 {
           // LIVE: Execute real swap
           const pos = await this.liveTracker.openPosition(signal, positionSize);
           if (!pos) return; // Swap failed — already logged
+          if (isReentry) pos.reentry_count = (this.blockedTokens.get(signal.tokenMint)?.reentryCount || 0) + 1;
           posView = liveToView(pos);
 
           // Refresh balance after trade
@@ -914,7 +980,15 @@ class RossyBotV2 {
         } else {
           // SHADOW: Simulated
           const pos = await this.shadowTracker!.openPosition(signal, positionSize);
+          if (isReentry) pos.reentry_count = (this.blockedTokens.get(signal.tokenMint)?.reentryCount || 0) + 1;
           posView = shadowToView(pos);
+        }
+
+        // Track re-entry in blocked tokens metadata
+        if (isReentry) {
+          this.markReentry(signal.tokenMint);
+          // Remove from blocked tokens so it's treated as a live position
+          this.blockedTokens.delete(signal.tokenMint);
         }
 
         // Send Telegram alert
@@ -962,8 +1036,34 @@ class RossyBotV2 {
 
     // --- Position close callback (works for both trackers) ---
     const handlePositionClose = async (posView: PositionView) => {
-      // Block token from being re-bought this session
-      this.blockedTokens.add(posView.token_address);
+      // Track exit metadata for conditional re-entry
+      const existingMeta = this.blockedTokens.get(posView.token_address);
+      const reentryCount = existingMeta ? existingMeta.reentryCount : 0;
+      // Hard-block tokens that exited due to hard kill / stop loss (bad fundamentals, don't re-enter)
+      const hardBlockReasons = ['Hard kill', 'Stop loss', 'Hard time kill', 'Force close', 'Manual sell'];
+      const isHardBlock = hardBlockReasons.some(r => (posView.exit_reason || '').includes(r));
+      this.blockedTokens.set(posView.token_address, {
+        closedAt: Date.now(),
+        pnlPercent: posView.pnl_percent,
+        exitReason: posView.exit_reason || 'unknown',
+        reentryCount,
+        hardBlocked: isHardBlock,
+      });
+
+      // If not hard-blocked and re-entry is possible, clear the token in the entry engine
+      // so fresh alpha signals can be processed for this token
+      if (!isHardBlock) {
+        const tierCfg = getTierConfig(this.capitalManager.tier);
+        if (tierCfg.reentryEnabled && reentryCount < tierCfg.reentryMaxPerToken) {
+          this.entryEngine.allowReentry(posView.token_address);
+          logger.info({
+            token: posView.token_address.slice(0, 8),
+            exitReason: posView.exit_reason,
+            cooldownMins: tierCfg.reentryCooldownMins,
+          }, 'Token eligible for re-entry — cleared in entry engine');
+        }
+      }
+
       try {
         const pnl = posView.pnl_percent;
         if (pnl >= 0) {
@@ -1102,7 +1202,14 @@ class RossyBotV2 {
     });
 
     this.pumpFunTracker.setCloseCallback(async (pos) => {
-      this.blockedTokens.add(pos.token_address);
+      // Pump.fun positions are always hard-blocked (curve scalps don't benefit from re-entry)
+      this.blockedTokens.set(pos.token_address, {
+        closedAt: Date.now(),
+        pnlPercent: pos.pnl_percent,
+        exitReason: pos.exit_reason || 'unknown',
+        reentryCount: 0,
+        hardBlocked: true,
+      });
       try {
         const pnl = pos.pnl_percent;
         const isWin = pnl > 0;
@@ -1277,7 +1384,7 @@ class RossyBotV2 {
         return;
       }
 
-      // Skip tokens we've previously closed/dropped
+      // Skip tokens we've previously closed/dropped (pump.fun = no re-entry)
       if (this.blockedTokens.has(mint)) {
         logger.info({ token: mint.slice(0, 8) }, 'Pump.fun skip — token was previously closed/dropped');
         return;

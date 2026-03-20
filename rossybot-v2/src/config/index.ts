@@ -49,7 +49,7 @@ export const config = {
     apiKey: env.NANSEN_API_KEY,
     baseUrl: 'https://api.nansen.ai/v1',
     maxCallsPerMin: 80,
-    discoveryIntervalMs: 1 * 60 * 60 * 1000, // 1 hour
+    discoveryIntervalMs: 30 * 60 * 1000, // 30 min (was 1h — faster discovery for DEX smart money wallets)
     flowMonitorIntervalMs: 2 * 60 * 60 * 1000, // 2 hours
     screenerIntervalMs: 5 * 60 * 1000, // 5 min
     leaderboardIntervalMs: 15 * 60 * 1000, // 15 min

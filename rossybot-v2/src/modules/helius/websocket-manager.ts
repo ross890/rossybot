@@ -267,7 +267,29 @@ export class HeliusWebSocketManager extends EventEmitter {
         };
         this.emit('transaction', result);
       } else {
-        logger.warn({ sig: signature.slice(0, 12), error: resp.data?.error }, 'getTransaction returned null — tx may not be confirmed yet');
+        // TX may not be confirmed yet — wait 500ms and retry once
+        await new Promise((r) => setTimeout(r, 500));
+        const retry = await axios.post(config.helius.rpcUrl, {
+          jsonrpc: '2.0',
+          id: `getTx-retry-${signature.slice(0, 12)}`,
+          method: 'getTransaction',
+          params: [signature, {
+            encoding: 'jsonParsed',
+            commitment: 'confirmed',
+            maxSupportedTransactionVersion: 0,
+          }],
+        }, { timeout: 10_000 });
+
+        if (retry.data?.result) {
+          const result = {
+            signature,
+            slot: slot || retry.data.result.slot,
+            transaction: retry.data.result,
+          };
+          this.emit('transaction', result);
+        } else {
+          logger.warn({ sig: signature.slice(0, 12), error: resp.data?.error }, 'getTransaction returned null after retry — tx dropped or not confirmed');
+        }
       }
     } catch (err) {
       logger.debug({ err, sig: signature.slice(0, 12) }, 'Failed to fetch transaction for log notification');

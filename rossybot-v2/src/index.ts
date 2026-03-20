@@ -805,6 +805,29 @@ class RossyBotV2 {
 
         let positionSize = this.capitalManager.getPositionSize();
 
+        // Bid-size matching: scale position relative to alpha wallet's buy size.
+        // If the alpha spent 2 SOL and we have 6.5 SOL, don't blindly use 20% (1.3 SOL).
+        // Instead, cap our position to a reasonable ratio of their bid so we don't
+        // over-size on small-cap tokens where the alpha was cautious.
+        if (signal.alphaSolSpent > 0) {
+          const capitalSol = this.capitalManager.capital;
+          // Our max should be proportional: we spend at most (our capital / alpha capital estimate) × their bid
+          // Use their avg buy size if known, otherwise use this signal's spend
+          const alphaBid = signal.alphaSolSpent;
+          // Cap: don't exceed 50% of the alpha's bid (we're smaller, ride their wave)
+          // Floor: don't go below the tier minimum
+          const bidCapped = Math.min(positionSize, alphaBid * 0.50);
+          if (bidCapped < positionSize && bidCapped >= signal.tierConfig.minPositionSol) {
+            logger.info({
+              token: signal.tokenMint.slice(0, 8),
+              alphaBid: alphaBid.toFixed(3),
+              tierSize: positionSize.toFixed(3),
+              bidCapped: bidCapped.toFixed(3),
+            }, 'Bid-size matching — capped position to alpha bid ratio');
+            positionSize = bidCapped;
+          }
+        }
+
         // Scale position size down for dip entries — less capital at risk
         const entryMomentum = signal.validation.dexData?.priceChange?.h24 ?? 0;
         if (entryMomentum < 0) {
@@ -1885,20 +1908,26 @@ class RossyBotV2 {
       const walletRows = await (await import('./db/database.js')).getMany<{
         address: string; label: string; tier: string; helius_subscribed: boolean;
         source: string; nansen_roi_percent: number; nansen_pnl_usd: number;
+        nansen_trade_count: number; avg_buy_size_sol: number;
         our_total_trades: number; our_win_rate: number; our_avg_pnl_percent: number;
+        our_avg_hold_time_mins: number; short_term_alpha_score: number;
         consecutive_losses: number; last_active_at: string | null;
+        pumpfun_only: boolean;
       }>(`SELECT address, label, tier, helius_subscribed, source,
               COALESCE(nansen_roi_percent, 0) as nansen_roi_percent,
               COALESCE(nansen_pnl_usd, 0) as nansen_pnl_usd,
+              COALESCE(nansen_trade_count, 0) as nansen_trade_count,
+              COALESCE(avg_buy_size_sol, 0) as avg_buy_size_sol,
               COALESCE(our_total_trades, 0) as our_total_trades,
               COALESCE(our_win_rate, 0) as our_win_rate,
               COALESCE(our_avg_pnl_percent, 0) as our_avg_pnl_percent,
+              COALESCE(our_avg_hold_time_mins, 0) as our_avg_hold_time_mins,
+              COALESCE(short_term_alpha_score, 0) as short_term_alpha_score,
               COALESCE(consecutive_losses, 0) as consecutive_losses,
+              COALESCE(pumpfun_only, FALSE) as pumpfun_only,
               last_active_at
          FROM alpha_wallets WHERE active = TRUE
-         ORDER BY
-           CASE WHEN source = 'NANSEN_SEED' THEN 0 ELSE 1 END ASC,
-           tier ASC, nansen_roi_percent DESC`);
+         ORDER BY nansen_pnl_usd DESC`);
 
       const today = new Date().toISOString().split('T')[0];
       const signalRow = await (await import('./db/database.js')).getOne<{ count: string }>(
@@ -1935,14 +1964,19 @@ class RossyBotV2 {
           subscribed: this.walletAddresses.has(w.address),
           nansenRoi: Number(w.nansen_roi_percent) || 0,
           nansenPnl: Number(w.nansen_pnl_usd) || 0,
+          nansenTrades: Number(w.nansen_trade_count) || 0,
+          avgBuySizeSol: Number(w.avg_buy_size_sol) || 0,
           ourTrades: Number(w.our_total_trades) || 0,
           ourWinRate: Number(w.our_win_rate) || 0,
           ourAvgPnl: Number(w.our_avg_pnl_percent) || 0,
+          ourAvgHoldMins: Number(w.our_avg_hold_time_mins) || 0,
+          alphaScore: Number(w.short_term_alpha_score) || 0,
           consecutiveLosses: Number(w.consecutive_losses) || 0,
+          pumpfunOnly: !!w.pumpfun_only,
           source: w.source,
-          lastActiveAgo: w.last_active_at
-            ? `${Math.round((Date.now() - new Date(w.last_active_at).getTime()) / 3600000)}h`
-            : undefined,
+          lastActiveHours: w.last_active_at
+            ? Math.round((Date.now() - new Date(w.last_active_at).getTime()) / 3600000)
+            : null,
         })),
         wsConnected: wsStatus.connected,
         wsFallbackActive: wsStatus.fallbackMode,

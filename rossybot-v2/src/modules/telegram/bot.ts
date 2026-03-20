@@ -390,9 +390,11 @@ export class TelegramService {
     openPositions: number;
     wallets: Array<{
       address: string; label: string; tier: string; subscribed: boolean;
-      nansenRoi: number; nansenPnl: number; ourTrades: number; ourWinRate: number;
-      ourAvgPnl: number; consecutiveLosses: number; source: string;
-      lastActiveAgo?: string;
+      nansenRoi: number; nansenPnl: number; nansenTrades: number;
+      avgBuySizeSol: number; ourTrades: number; ourWinRate: number;
+      ourAvgPnl: number; ourAvgHoldMins: number; alphaScore: number;
+      consecutiveLosses: number; pumpfunOnly: boolean; source: string;
+      lastActiveHours: number | null;
     }>;
     wsConnected: boolean;
     wsFallbackActive: boolean;
@@ -428,19 +430,89 @@ export class TelegramService {
     discoveryTokens: number;
     discoveryWalletsAdded: number;
   }): Promise<void> {
-    const walletLines = data.wallets.map((w) => {
-      const status = w.subscribed ? '📡' : '⏸️';
-      const stats: string[] = [];
-      if (w.nansenRoi > 0) stats.push(`ROI ${w.nansenRoi.toFixed(0)}%`);
-      if (w.nansenPnl > 0) stats.push(`PnL $${this.formatNum(w.nansenPnl)}`);
-      if (w.ourTrades > 0) stats.push(`${w.ourTrades}t ${(w.ourWinRate * 100).toFixed(0)}%W`);
-      if (w.consecutiveLosses > 0) stats.push(`${w.consecutiveLosses}L`);
-      if (w.lastActiveAgo) stats.push(`🕐${w.lastActiveAgo}`);
-      const statsStr = stats.length > 0 ? ` | ${stats.join(' · ')}` : '';
-      return `│  ${status} [${w.tier}] ${w.address.slice(0, 6)}...${w.address.slice(-4)}${statsStr}`;
-    }).join('\n');
-
     const isPumpFunOnly = data.capitalSol < data.minCapitalForStandardTrading;
+
+    // --- Group wallets by quality tier for readability ---
+    // Buckets based on estimated value: Nansen PnL + our data + alpha score
+    type WalletBucket = { label: string; wallets: typeof data.wallets };
+    const buckets: WalletBucket[] = [
+      { label: '🟢 HIGH VALUE (PnL $50K+ or α40+)', wallets: [] },
+      { label: '🟡 PROVEN ($5K-$50K PnL or our 3+ trades)', wallets: [] },
+      { label: '🔵 UNPROVEN (new / no our-side data yet)', wallets: [] },
+      { label: '🔴 UNDERPERFORMING (loss streaks / low α)', wallets: [] },
+    ];
+
+    for (const w of data.wallets) {
+      const hasLossStreak = w.consecutiveLosses >= 2;
+      const lowAlpha = w.alphaScore > 0 && w.alphaScore < 20 && w.ourTrades >= 3;
+
+      if (hasLossStreak || lowAlpha) {
+        buckets[3].wallets.push(w);
+      } else if (w.nansenPnl >= 50_000 || w.alphaScore >= 40) {
+        buckets[0].wallets.push(w);
+      } else if (w.nansenPnl >= 5_000 || w.ourTrades >= 3) {
+        buckets[1].wallets.push(w);
+      } else {
+        buckets[2].wallets.push(w);
+      }
+    }
+
+    const formatWallet = (w: typeof data.wallets[0]): string => {
+      const ws = w.subscribed ? '📡' : '⏸️';
+      const pf = w.pumpfunOnly ? '🎰' : '';
+      const parts: string[] = [];
+
+      // Nansen data
+      if (w.nansenPnl > 0) parts.push(`$${this.formatNum(w.nansenPnl)}`);
+      if (w.nansenRoi > 0) parts.push(`${w.nansenRoi.toFixed(0)}%ROI`);
+      if (w.avgBuySizeSol > 0) parts.push(`avg${w.avgBuySizeSol.toFixed(1)}◎`);
+
+      // Our data
+      if (w.ourTrades > 0) {
+        parts.push(`${w.ourTrades}t ${(w.ourWinRate * 100).toFixed(0)}%W`);
+        if (w.ourAvgPnl !== 0) parts.push(`${(w.ourAvgPnl * 100).toFixed(0)}%avg`);
+      }
+      if (w.alphaScore > 0) parts.push(`α${w.alphaScore.toFixed(0)}`);
+      if (w.consecutiveLosses > 0) parts.push(`🔥${w.consecutiveLosses}L`);
+
+      // Recency
+      if (w.lastActiveHours !== null) {
+        if (w.lastActiveHours <= 1) parts.push('🕐<1h');
+        else if (w.lastActiveHours <= 24) parts.push(`🕐${w.lastActiveHours}h`);
+        else parts.push(`🕐${Math.round(w.lastActiveHours / 24)}d`);
+      }
+
+      const info = parts.join(' · ');
+      return `│  ${ws}${pf} [${w.tier}] ${w.label.split(' |')[0].slice(0, 10)} ${info}`;
+    };
+
+    const walletSections: string[] = [];
+    const subscribedCount = data.wallets.filter((w) => w.subscribed).length;
+    const pfOnlyCount = data.wallets.filter((w) => w.pumpfunOnly).length;
+    const withBuySize = data.wallets.filter((w) => w.avgBuySizeSol > 0);
+    const avgBuyAll = withBuySize.length > 0
+      ? withBuySize.reduce((s, w) => s + w.avgBuySizeSol, 0) / withBuySize.length
+      : 0;
+
+    walletSections.push(
+      `├─ WALLETS (${data.wallets.length} active, ${subscribedCount} WS, ${pfOnlyCount} PF-only${avgBuyAll > 0 ? `, avg bid ${avgBuyAll.toFixed(1)}◎` : ''})`,
+    );
+
+    for (const bucket of buckets) {
+      if (bucket.wallets.length === 0) continue;
+      walletSections.push(`│`);
+      walletSections.push(`│ ${bucket.label} (${bucket.wallets.length})`);
+      // Show top 5 per bucket, summarize rest
+      const shown = bucket.wallets.slice(0, 5);
+      const hidden = bucket.wallets.length - shown.length;
+      for (const w of shown) {
+        walletSections.push(formatWallet(w));
+      }
+      if (hidden > 0) {
+        walletSections.push(`│  ... +${hidden} more`);
+      }
+    }
+    walletSections.push(`│`);
 
     const msg: string[] = [
       `🤖 ROSSYBOT V2 — STARTUP DIAGNOSTICS`,
@@ -469,9 +541,7 @@ export class TelegramService {
       `│ Discovery schedule: every 4h`,
       `│ Last run: ${data.discoveryTokens} tokens screened, ${data.discoveryWalletsAdded} wallets added`,
       `│`,
-      `├─ WALLETS MONITORED (${data.wallets.length})`,
-      walletLines,
-      `│`,
+      ...walletSections,
     ];
 
     if (isPumpFunOnly) {

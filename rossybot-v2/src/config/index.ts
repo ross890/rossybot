@@ -49,7 +49,7 @@ export const config = {
     apiKey: env.NANSEN_API_KEY,
     baseUrl: 'https://api.nansen.ai/v1',
     maxCallsPerMin: 80,
-    discoveryIntervalMs: 30 * 60 * 1000, // 30 min (was 1h — faster discovery for DEX smart money wallets)
+    discoveryIntervalMs: 15 * 60 * 1000, // 15 min (was 30min — more frequent discovery = more wallets found)
     flowMonitorIntervalMs: 2 * 60 * 60 * 1000, // 2 hours
     screenerIntervalMs: 5 * 60 * 1000, // 5 min
     leaderboardIntervalMs: 15 * 60 * 1000, // 15 min
@@ -337,7 +337,7 @@ export function getTierConfig(tier: CapitalTier): TierConfig {
   // Shadow mode: loosen thresholds but still enforce gates
   return {
     ...base,
-    walletsMonitored: 50,      // Max WS coverage in shadow mode for data collection
+    walletsMonitored: 75,      // Max WS coverage in shadow mode for data collection (was 50 — more slots = more signals)
     maxPositions: 20,         // 20 concurrent — shadow mode is data collection, not risk-managed
     positionSizePct: 0.10,    // 10% per shadow position (was 5% — user wants 0.5-1 SOL bids for bigger wins)
     minSignalScore: 15,       // 15 — shadow mode = max data collection, score is informational only

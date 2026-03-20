@@ -65,10 +65,14 @@ export class WalletDiscovery {
         : isPumpFun ? WalletSource.PUMPFUN_SEED
         : WalletSource.NANSEN_SEED;
 
+      // Insert new seed wallets as active, but DON'T force-reactivate existing ones.
+      // If a seed was deactivated due to bad performance, it should stay off until data improves.
       await query(
         `INSERT INTO alpha_wallets (address, label, source, tier, min_capital_tier, active, helius_subscribed, pumpfun_only)
          VALUES ($1, $2, $3, $4, $5, TRUE, FALSE, $6)
-         ON CONFLICT (address) DO UPDATE SET active = TRUE, pumpfun_only = COALESCE(EXCLUDED.pumpfun_only, alpha_wallets.pumpfun_only)`,
+         ON CONFLICT (address) DO UPDATE SET
+           pumpfun_only = COALESCE(EXCLUDED.pumpfun_only, alpha_wallets.pumpfun_only),
+           label = EXCLUDED.label`,
         [w.address, w.label, source, WalletTier.B, w.minTier, isPumpFun],
       );
     }
@@ -123,32 +127,56 @@ export class WalletDiscovery {
   }
 
   /**
-   * Aggressive startup purge: deactivate discovered wallets that have zero evidence of being quick flippers.
-   * Keeps seed wallets and any wallet with proven alpha score >25.
+   * Aggressive startup purge: deactivate wallets that have zero evidence of being quick flippers.
+   * Now applies to ALL wallets including seeds — no wallet gets a free pass with proven bad data.
    */
   async purgeWeakWallets(): Promise<number> {
     const gracePeriod = new Date(Date.now() - STALE_WALLET_DAYS * 24 * 60 * 60 * 1000);
-    const result = await query(
+
+    // 1. Non-seed wallets: original rules (no data past grace, bad alpha, bag holders)
+    const discoveredResult = await query(
       `UPDATE alpha_wallets SET active = FALSE
        WHERE active = TRUE
          AND source NOT IN ('NANSEN_SEED', 'PUMPFUN_SEED', 'GRADUATION_SEED')
          AND (
-           -- No trade data AND past grace period (give new wallets time to prove themselves)
            (COALESCE(our_total_trades, 0) = 0 AND COALESCE(round_trips_analyzed, 0) = 0
             AND discovered_at < $1)
-           -- OR has data but poor alpha score (proven bad)
            OR (COALESCE(round_trips_analyzed, 0) >= 3 AND COALESCE(short_term_alpha_score, 0) < 25)
-           -- OR proven bag holder (median hold >12h with data)
            OR (COALESCE(median_hold_time_mins, 0) > 720 AND COALESCE(round_trips_analyzed, 0) >= 3)
          )
        RETURNING address`,
       [gracePeriod],
     );
-    const count = result.rowCount || 0;
-    if (count > 0) {
-      console.log(`Purged ${count} weak/unproven wallets on startup`);
+
+    // 2. Seed wallets: deactivate if they have enough data proving they're bad
+    //    - 5+ trades with <40% WR (proven loser with meaningful sample)
+    //    - 5+ trades with negative avg PnL (net losing money)
+    //    - Alpha score <20 with 3+ rounds analyzed (bad within our exit windows)
+    const seedResult = await query(
+      `UPDATE alpha_wallets SET active = FALSE
+       WHERE active = TRUE
+         AND source IN ('NANSEN_SEED', 'PUMPFUN_SEED', 'GRADUATION_SEED')
+         AND (
+           (COALESCE(our_total_trades, 0) >= 5 AND COALESCE(our_win_rate, 0) < 0.40)
+           OR (COALESCE(our_total_trades, 0) >= 5 AND COALESCE(our_avg_pnl_percent, 0) < 0)
+           OR (COALESCE(round_trips_analyzed, 0) >= 3 AND COALESCE(short_term_alpha_score, 0) < 20)
+         )
+       RETURNING address, label`,
+    );
+
+    const discoveredCount = discoveredResult.rowCount || 0;
+    const seedCount = seedResult.rowCount || 0;
+    const total = discoveredCount + seedCount;
+
+    if (seedCount > 0) {
+      const labels = seedResult.rows.map((r: { label: string }) => r.label).join(', ');
+      logger.info({ count: seedCount, labels }, 'Purged underperforming SEED wallets on startup');
+      console.log(`Purged ${seedCount} underperforming seed wallets: ${labels}`);
     }
-    return count;
+    if (total > 0) {
+      console.log(`Purged ${total} weak/unproven wallets on startup (${seedCount} seeds, ${discoveredCount} discovered)`);
+    }
+    return total;
   }
 
   /** Start periodic discovery */
@@ -412,12 +440,20 @@ export class WalletDiscovery {
       `UPDATE alpha_wallets SET tier = 'B' WHERE tier = 'A' AND consecutive_losses >= 2`,
     );
 
-    // Deactivate: 3 consecutive losses (was 5 — tighter)
+    // Deactivate: 3 consecutive losses — now applies to ALL wallets including seeds
     const deactivated = await query(
       `UPDATE alpha_wallets SET active = FALSE
-       WHERE active = TRUE AND source NOT IN ('NANSEN_SEED', 'PUMPFUN_SEED', 'GRADUATION_SEED') AND consecutive_losses >= 3
-       RETURNING address`,
+       WHERE active = TRUE AND consecutive_losses >= 3
+       RETURNING address, label, source`,
     );
+    if ((deactivated.rowCount || 0) > 0) {
+      const seedHits = deactivated.rows.filter((r: { source: string }) =>
+        ['NANSEN_SEED', 'PUMPFUN_SEED', 'GRADUATION_SEED'].includes(r.source));
+      if (seedHits.length > 0) {
+        logger.info({ wallets: seedHits.map((r: { label: string }) => r.label) },
+          'Deactivated seed wallet(s) — 3 consecutive losses');
+      }
+    }
 
     // Deactivate wallets below $1K PnL minimum (skip seed wallets which may lack PnL data)
     const pnlPurged = await query(
@@ -603,11 +639,10 @@ export class WalletDiscovery {
       logger.info({ count: staleCount }, 'Removed stale wallets with no trade data');
     }
 
-    // 2. Proven slow holders: median hold >12h with 3+ analyzed trips (not seeds)
+    // 2. Proven slow holders: median hold >12h with 3+ analyzed trips — ALL wallets including seeds
     const slowResult = await query(
       `UPDATE alpha_wallets SET active = FALSE
        WHERE active = TRUE
-         AND source NOT IN ('NANSEN_SEED', 'PUMPFUN_SEED', 'GRADUATION_SEED')
          AND COALESCE(median_hold_time_mins, 0) > 720
          AND COALESCE(round_trips_analyzed, 0) >= 3
        RETURNING address`,
@@ -619,21 +654,52 @@ export class WalletDiscovery {
       logger.info({ count: slowCount }, 'Removed slow-holder wallets (median hold >12h)');
     }
 
-    // 3. Cap at MAX_ACTIVE_WALLETS — remove lowest-scoring non-seed wallets
+    // 3. Proven losers: 5+ trades with <40% WR or negative avg PnL — ALL wallets including seeds
+    const loserResult = await query(
+      `UPDATE alpha_wallets SET active = FALSE
+       WHERE active = TRUE
+         AND COALESCE(our_total_trades, 0) >= 5
+         AND (COALESCE(our_win_rate, 0) < 0.40 OR COALESCE(our_avg_pnl_percent, 0) < 0)
+       RETURNING address`,
+    );
+    const loserCount = loserResult.rowCount || 0;
+    if (loserCount > 0) {
+      reasons['proven loser (5+ trades, <40% WR or negative PnL)'] = loserCount;
+      totalRemoved += loserCount;
+      logger.info({ count: loserCount }, 'Removed proven loser wallets');
+    }
+
+    // 4. Low alpha score with data: alpha <15 with 3+ rounds = not profitable in our windows
+    const lowAlphaResult = await query(
+      `UPDATE alpha_wallets SET active = FALSE
+       WHERE active = TRUE
+         AND COALESCE(round_trips_analyzed, 0) >= 3
+         AND COALESCE(short_term_alpha_score, 0) < 15
+       RETURNING address`,
+    );
+    const lowAlphaCount = lowAlphaResult.rowCount || 0;
+    if (lowAlphaCount > 0) {
+      reasons['low alpha score (<15 with 3+ rounds)'] = lowAlphaCount;
+      totalRemoved += lowAlphaCount;
+      logger.info({ count: lowAlphaCount }, 'Removed low alpha score wallets');
+    }
+
+    // 5. Cap at MAX_ACTIVE_WALLETS — remove lowest-scoring non-seed wallets
     const activeCount = await getMany<{ count: string }>(
       `SELECT COUNT(*) as count FROM alpha_wallets WHERE active = TRUE`,
     );
     const currentActive = parseInt(activeCount[0]?.count || '0');
     if (currentActive > MAX_ACTIVE_WALLETS) {
       const excess = currentActive - MAX_ACTIVE_WALLETS;
-      // Remove the lowest-scoring non-seed wallets
+      // Remove the lowest-scoring wallets (seeds included — earn your slot)
       const capResult = await query(
         `UPDATE alpha_wallets SET active = FALSE
          WHERE address IN (
            SELECT address FROM alpha_wallets
-           WHERE active = TRUE AND source NOT IN ('NANSEN_SEED', 'PUMPFUN_SEED', 'GRADUATION_SEED')
+           WHERE active = TRUE
            ORDER BY
              COALESCE(short_term_alpha_score, 0) ASC,
+             COALESCE(our_win_rate, 0) ASC,
              COALESCE(nansen_pnl_usd, 0) ASC
            LIMIT $1
          )

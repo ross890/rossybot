@@ -1216,10 +1216,6 @@ class RossyBotV2 {
             token: mint.slice(0, 8), wallet: walletLabel,
             winRate: `${(wr * 100).toFixed(0)}%`, consLosses,
           }, 'Pump.fun REJECTED — wallet quality too low');
-          await this.telegram.send(
-            `⛔ SKIP · ${mint.slice(0, 8)} · Bad wallet\n` +
-            `└ ${walletLabel} · WR ${(wr * 100).toFixed(0)}% · ${consLosses} consecutive losses`,
-          );
           return;
         }
       }
@@ -1295,10 +1291,6 @@ class RossyBotV2 {
               reason: 'STAMPEDE',
               expiresAt: Date.now() + RossyBotV2.PUMP_FUN_REJECTION_TTL_MS,
             });
-            await this.telegram.send(
-              `⛔ SKIP · ${mint.slice(0, 8)} · Stampede\n` +
-              `└ ${effectiveBuyers} buyers · curve ${(curveFill * 100).toFixed(0)}% · ${walletLabel}`,
-            );
             return;
           } else {
             logger.info({
@@ -1372,18 +1364,6 @@ class RossyBotV2 {
             reason: validation.failReason!,
             expiresAt: Date.now() + RossyBotV2.PUMP_FUN_REJECTION_TTL_MS,
           });
-          if (validation.failReason === 'LOW_CONVICTION') {
-            await this.telegram.send(
-              `⛔ SKIP · ${mint.slice(0, 8)} · Low conviction\n` +
-              `└ ${walletLabel} · ${solSpent.toFixed(2)} SOL · curve ${(validation.curveFillPct * 100).toFixed(0)}%`,
-            );
-          }
-        } else {
-          // Other rejections still get Telegram alerts
-          await this.telegram.send(
-            `⛔ SKIP · ${mint.slice(0, 8)} · ${validation.failReason}\n` +
-            `└ ${walletLabel} · ${solSpent.toFixed(2)} SOL · curve ${(validation.curveFillPct * 100).toFixed(0)}%`,
-          );
         }
         return;
       }

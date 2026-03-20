@@ -169,7 +169,7 @@ export class WalletDiscovery {
     const total = discoveredCount + seedCount;
 
     if (seedCount > 0) {
-      const labels = seedResult.rows.map((r: { label: string }) => r.label).join(', ');
+      const labels = seedResult.rows.map((r) => (r as { label: string }).label).join(', ');
       logger.info({ count: seedCount, labels }, 'Purged underperforming SEED wallets on startup');
       console.log(`Purged ${seedCount} underperforming seed wallets: ${labels}`);
     }
@@ -447,10 +447,10 @@ export class WalletDiscovery {
        RETURNING address, label, source`,
     );
     if ((deactivated.rowCount || 0) > 0) {
-      const seedHits = deactivated.rows.filter((r: { source: string }) =>
-        ['NANSEN_SEED', 'PUMPFUN_SEED', 'GRADUATION_SEED'].includes(r.source));
+      const seedHits = deactivated.rows.filter((r) =>
+        ['NANSEN_SEED', 'PUMPFUN_SEED', 'GRADUATION_SEED'].includes((r as { source: string }).source));
       if (seedHits.length > 0) {
-        logger.info({ wallets: seedHits.map((r: { label: string }) => r.label) },
+        logger.info({ wallets: seedHits.map((r) => (r as { label: string }).label) },
           'Deactivated seed wallet(s) — 3 consecutive losses');
       }
     }

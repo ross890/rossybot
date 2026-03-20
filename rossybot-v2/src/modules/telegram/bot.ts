@@ -1,8 +1,9 @@
 import TelegramBot from 'node-telegram-bot-api';
-import { config } from '../../config/index.js';
+import { config, TIER_CONFIGS, getTierForCapital, getTierConfig } from '../../config/index.js';
 import { logger } from '../../utils/logger.js';
 import { getMany, getOne, query } from '../../db/database.js';
 import type { PositionView } from '../../types/index.js';
+import { CapitalTier } from '../../types/index.js';
 
 export class TelegramService {
   private bot: TelegramBot;
@@ -67,7 +68,7 @@ export class TelegramService {
     wallets: string[];
     walletCount: number;
     totalMonitored: number;
-    walletEv?: Array<{ address: string; trades: number; winRate: number; avgPnl: number }>;
+    walletEv?: Array<{ address: string; trades: number; winRate: number; avgPnl: number; alphaScore?: number }>;
     sizeSol: number;
     price: number;
     momentum24h: number;
@@ -81,9 +82,11 @@ export class TelegramService {
     stopLoss: number;
     hardTime: number;
     signalScore?: string;
+    signalScoreBreakdown?: { walletQuality: number; momentum: number; mcapFit: number; liquidity: number; confluence: number; total: number };
     entryTx?: string;
     feesSol?: number;
     isLive?: boolean;
+    curveFillPct?: number;
   }): Promise<void> {
     const walletLabels = data.wallets.map((w) => w.slice(0, 8)).join(' + ');
     const dexLink = `https://dexscreener.com/solana/${data.tokenMint}`;
@@ -95,11 +98,21 @@ export class TelegramService {
         const addr = w.address.slice(0, 8);
         if (w.trades > 0) {
           const pnlSign = w.avgPnl >= 0 ? '+' : '';
-          evLines.push(`│  ${addr}: ${w.trades}t ${(w.winRate * 100).toFixed(0)}%W EV ${pnlSign}${w.avgPnl.toFixed(1)}%`);
+          const alphaTag = w.alphaScore ? ` α${w.alphaScore}` : '';
+          evLines.push(`│  ${addr}: ${w.trades}t ${(w.winRate * 100).toFixed(0)}%W EV ${pnlSign}${w.avgPnl.toFixed(1)}%${alphaTag}`);
         } else {
           evLines.push(`│  ${addr}: new (no trades yet)`);
         }
       }
+    }
+
+    // Signal score breakdown for tuning feedback
+    const scoreLines: string[] = [];
+    if (data.signalScoreBreakdown) {
+      const b = data.signalScoreBreakdown;
+      scoreLines.push(`├ Score: ${b.total}/100 [W${b.walletQuality} M${b.momentum} C${b.mcapFit} L${b.liquidity} CF${b.confluence}]`);
+    } else if (data.signalScore) {
+      scoreLines.push(data.signalScore);
     }
 
     const msg = [
@@ -107,11 +120,11 @@ export class TelegramService {
       `├ Wallets: ${walletLabels} (${data.walletCount}/${data.totalMonitored} via Helius ✅)`,
       ...(evLines.length > 0 ? [`├ Wallet EV:`, ...evLines] : []),
       `├ Size: ${data.sizeSol.toFixed(2)} SOL @ $${data.price.toFixed(6)}`,
+      ...(data.curveFillPct !== undefined ? [`├ Curve fill: ${(data.curveFillPct * 100).toFixed(0)}% at entry`] : []),
       `├ Momentum: ${data.momentum24h > 0 ? '+' : ''}${data.momentum24h.toFixed(0)}% (24h) | Vol ${data.volumeMultiplier.toFixed(1)}x avg`,
       `├ MCap: $${this.formatNum(data.mcap)} | Liq: $${this.formatNum(data.liquidity)} | Age: ${data.ageDays.toFixed(0)}d`,
-      `├ Safety: ✅ | Helius lag: ${(data.detectionLagMs / 1000).toFixed(1)}s`,
-      `├ Execution lag: ${this.formatLag(data.executionLagSecs)}`,
-      ...(data.signalScore ? [data.signalScore] : []),
+      `├ Helius lag: ${(data.detectionLagMs / 1000).toFixed(1)}s | Exec: ${this.formatLag(data.executionLagSecs)}`,
+      ...scoreLines,
       ...(data.feesSol ? [`├ Fees: ${data.feesSol.toFixed(4)} SOL`] : []),
       `├ Exit: TP +${(data.profitTarget * 100).toFixed(0)}%, SL ${(data.stopLoss * 100).toFixed(0)}%, alpha exit, ${data.hardTime}h max`,
       ...(data.entryTx ? [`├ TX: https://solscan.io/tx/${data.entryTx}`] : []),
@@ -125,17 +138,22 @@ export class TelegramService {
     tokenSymbol: string;
     tokenMint: string;
     signalScore: string;
+    signalScoreValue?: number;
     currentPositionSymbol: string;
     currentPositionPnl: number;
     currentPositionHoldMins: number;
+    walletCount?: number;
   }): Promise<void> {
     const dexLink = `https://dexscreener.com/solana/${data.tokenMint}`;
     const pnlSign = data.currentPositionPnl >= 0 ? '+' : '';
+    const scoreTag = data.signalScoreValue ? ` (score ${data.signalScoreValue})` : '';
+    const walletTag = data.walletCount ? ` | ${data.walletCount}w` : '';
     const msg = [
-      `⚠️ SKIPPED (at max positions)`,
-      `├ Missed: $${data.tokenSymbol}`,
+      `⚠️ SKIPPED (at max positions)${scoreTag}`,
+      `├ Missed: $${data.tokenSymbol}${walletTag}`,
       data.signalScore,
       `├ Blocked by: $${data.currentPositionSymbol} (${pnlSign}${data.currentPositionPnl.toFixed(1)}%, hold ${this.formatHoldTime(data.currentPositionHoldMins)})`,
+      `├ Action: consider /kill worst position if this keeps happening`,
       `└ ${dexLink}`,
     ].join('\n');
 
@@ -175,12 +193,22 @@ export class TelegramService {
     feesSol?: number;
     entryTx?: string;
     isLive?: boolean;
+    entryLagSecs?: number;
+    curveFillAtEntry?: number;
+    peakCurveFill?: number;
   }): Promise<void> {
+    const curveLine = data.curveFillAtEntry !== undefined
+      ? `├ Curve: ${(data.curveFillAtEntry * 100).toFixed(0)}%→peak ${((data.peakCurveFill ?? data.curveFillAtEntry) * 100).toFixed(0)}%`
+      : '';
+    const lagLine = data.entryLagSecs !== undefined ? `├ Entry lag: ${data.entryLagSecs.toFixed(0)}s` : '';
+
     const msg = [
       `💰 TARGET: $${data.tokenSymbol} +${(data.pnlPercent * 100).toFixed(0)}%`,
       `├ ${data.entrySol.toFixed(2)} SOL → ${data.exitSol.toFixed(3)} SOL | Net: +${data.netPnlSol.toFixed(3)} SOL`,
       ...(data.feesSol ? [`├ Fees: ${data.feesSol.toFixed(4)} SOL`] : []),
       `├ Hold: ${this.formatHoldTime(data.holdMins)}`,
+      ...(curveLine ? [curveLine] : []),
+      ...(lagLine ? [lagLine] : []),
       `└ Capital: ${data.capitalBefore.toFixed(2)} → ${data.capitalAfter.toFixed(2)} SOL`,
     ].join('\n');
 
@@ -195,12 +223,27 @@ export class TelegramService {
     reason: string;
     feesSol?: number;
     isLive?: boolean;
+    peakPnlPercent?: number;
+    entryLagSecs?: number;
+    curveFillAtEntry?: number;
+    peakCurveFill?: number;
   }): Promise<void> {
+    const peakLine = data.peakPnlPercent !== undefined && data.peakPnlPercent > 0
+      ? `├ Peak: +${(data.peakPnlPercent * 100).toFixed(1)}% (missed TP by ${((data.peakPnlPercent - Math.abs(data.pnlPercent)) * 100).toFixed(1)}%)`
+      : '';
+    const lagLine = data.entryLagSecs !== undefined ? `├ Entry lag: ${data.entryLagSecs.toFixed(0)}s` : '';
+    const curveLine = data.curveFillAtEntry !== undefined
+      ? `├ Curve: ${(data.curveFillAtEntry * 100).toFixed(0)}%→peak ${((data.peakCurveFill ?? data.curveFillAtEntry) * 100).toFixed(0)}%`
+      : '';
+
     const msg = [
       `🔴 EXIT: $${data.tokenSymbol} ${(data.pnlPercent * 100).toFixed(1)}%`,
       `├ Loss: ${data.lossSol.toFixed(3)} SOL`,
       ...(data.feesSol ? [`├ Fees: ${data.feesSol.toFixed(4)} SOL`] : []),
       `├ Hold: ${this.formatHoldTime(data.holdMins)}`,
+      ...(peakLine ? [peakLine] : []),
+      ...(curveLine ? [curveLine] : []),
+      ...(lagLine ? [lagLine] : []),
       `└ Reason: ${data.reason}`,
     ].join('\n');
 
@@ -263,11 +306,42 @@ export class TelegramService {
     nextTier: string;
     nextTierNeed: number;
   }): Promise<void> {
+    const totalTrades = data.wins + data.losses;
+    const wr = totalTrades > 0 ? (data.wins / totalTrades * 100).toFixed(0) : 'N/A';
+    const conversion = data.signalsSeen > 0 ? (data.signalsEntered / data.signalsSeen * 100).toFixed(0) : 'N/A';
+
+    // Pull extra edge metrics for the daily report
+    let edgeLines: string[] = [];
+    try {
+      const edge = await getOne<Record<string, unknown>>(
+        `SELECT
+           COALESCE(AVG(pnl_percent) FILTER (WHERE pnl_percent > 0), 0) as avg_win,
+           COALESCE(AVG(pnl_percent) FILTER (WHERE pnl_percent <= 0), 0) as avg_loss,
+           COALESCE(AVG(hold_time_mins), 0) as avg_hold,
+           COALESCE(AVG(EXTRACT(EPOCH FROM (entry_time - alpha_buy_time))), 0) as avg_lag
+         FROM pumpfun_positions
+         WHERE status = 'CLOSED' AND closed_at::date = '${data.date}'`,
+      );
+      if (edge) {
+        const avgWin = (Number(edge.avg_win || 0) * 100).toFixed(1);
+        const avgLoss = (Number(edge.avg_loss || 0) * 100).toFixed(1);
+        const avgHold = Number(edge.avg_hold || 0).toFixed(0);
+        const avgLag = Number(edge.avg_lag || 0).toFixed(0);
+        edgeLines = [
+          `├ Avg win: +${avgWin}% | Avg loss: ${avgLoss}%`,
+          `├ Avg hold: ${avgHold}min | Avg alpha lag: ${avgLag}s`,
+        ];
+      }
+    } catch { /* ignore */ }
+
     const msg = [
       `📊 DAILY — ${data.date}`,
-      `├ Trades: ${data.wins}W/${data.losses}L | P&L: ${data.pnlSol >= 0 ? '+' : ''}${data.pnlSol.toFixed(3)} SOL (${data.pnlPercent >= 0 ? '+' : ''}${(data.pnlPercent * 100).toFixed(0)}%)`,
+      `├ Trades: ${data.wins}W/${data.losses}L (${wr}% WR)`,
+      `├ P&L: ${data.pnlSol >= 0 ? '+' : ''}${data.pnlSol.toFixed(3)} SOL (${data.pnlPercent >= 0 ? '+' : ''}${(data.pnlPercent * 100).toFixed(0)}%)`,
       `├ Capital: ${data.capitalStart.toFixed(2)} → ${data.capitalEnd.toFixed(2)} SOL [${data.tier}]`,
-      `├ Fees: ${data.feesSol.toFixed(3)} SOL | Signals: ${data.signalsSeen} seen, ${data.signalsEntered} entered`,
+      `├ Signals: ${data.signalsSeen} seen → ${data.signalsEntered} entered (${conversion}% conversion)`,
+      ...edgeLines,
+      `├ Fees: ${data.feesSol.toFixed(3)} SOL`,
       `├ Helius: ${data.heliusUptime.toFixed(1)}% uptime, avg ${(data.heliusAvgLag / 1000).toFixed(1)}s lag`,
       `├ Nansen: ${data.nansenCalls} calls`,
       `└ Next tier: ${data.nextTier} (need ${data.nextTierNeed >= 0 ? '+' : ''}${data.nextTierNeed.toFixed(2)} SOL)`,
@@ -464,15 +538,17 @@ export class TelegramService {
 
   private async setBotMenu(): Promise<void> {
     const commands: TelegramBot.BotCommand[] = [
-      { command: 'status', description: 'Bot status & strategy info' },
+      { command: 'status', description: 'Quick snapshot + key config' },
+      { command: 'config', description: 'All tunable params (copy for Claude)' },
+      { command: 'edge', description: 'What\'s working / not working' },
       { command: 'pumpfun', description: 'Pump.fun dashboard' },
       { command: 'positions', description: 'Open positions with PnL' },
-      { command: 'pnl', description: 'P&L report (open + closed)' },
-      { command: 'signals', description: 'Recent signals & outcomes' },
+      { command: 'pnl', description: 'P&L + expectancy + profit factor' },
+      { command: 'signals', description: 'Recent signals with scores' },
       { command: 'curve', description: 'Curve fill distribution analysis' },
-      { command: 'tuning', description: 'Aggregate tuning report' },
-      { command: 'stats', description: 'Performance stats (7d)' },
-      { command: 'wallets', description: 'Alpha wallets' },
+      { command: 'tuning', description: 'Full tuning report (copy for Claude)' },
+      { command: 'stats', description: 'Performance + signal stats (7d)' },
+      { command: 'wallets', description: 'Alpha wallets + quality scores' },
       { command: 'pump_wallets', description: 'Pump.fun wallet roster & discovery' },
       { command: 'kill', description: 'Force close position' },
       { command: 'health', description: 'System health check' },
@@ -494,13 +570,58 @@ export class TelegramService {
     this.bot.onText(/\/status/, async (msg) => {
       if (msg.chat.id.toString() !== this.chatId) return;
       const status = this.getStatus?.() || {};
+      const capSol = status.capitalSol as number || 0;
+      const tier = getTierForCapital(capSol);
+      const tc = getTierConfig(tier);
+      const isPumpOnly = capSol < config.minCapitalForStandardTrading;
+
+      // Quick edge stats from recent trades
+      let edgeLine = '';
+      try {
+        const edge = await getOne<Record<string, unknown>>(
+          `SELECT COUNT(*) as total,
+                  COUNT(*) FILTER (WHERE pnl_percent > 0) as wins,
+                  COALESCE(AVG(pnl_percent), 0) as avg_pnl,
+                  COALESCE(SUM(net_pnl_sol), 0) as net_sol
+           FROM pumpfun_positions WHERE status = 'CLOSED' AND closed_at > NOW() - INTERVAL '24 hours'`,
+        );
+        const t = Number(edge?.total || 0);
+        if (t > 0) {
+          const w = Number(edge?.wins || 0);
+          const wr = (w / t * 100).toFixed(0);
+          const pnl = (Number(edge?.avg_pnl || 0) * 100).toFixed(1);
+          const net = Number(edge?.net_sol || 0);
+          edgeLine = `├ 24h: ${t}t ${wr}%W avg${pnl}% net${net >= 0 ? '+' : ''}${net.toFixed(4)}SOL`;
+        }
+      } catch { /* ignore */ }
+
+      // Signal conversion rate
+      let signalLine = '';
+      try {
+        const sig = await getOne<Record<string, unknown>>(
+          `SELECT COUNT(*) as total,
+                  COUNT(*) FILTER (WHERE action_taken = 'EXECUTED') as entered
+           FROM signal_events WHERE first_detected_at > NOW() - INTERVAL '24 hours'`,
+        );
+        const sTotal = Number(sig?.total || 0);
+        const sEntered = Number(sig?.entered || 0);
+        if (sTotal > 0) {
+          signalLine = `├ Signals 24h: ${sEntered}/${sTotal} entered (${(sEntered / sTotal * 100).toFixed(0)}% conversion)`;
+        }
+      } catch { /* ignore */ }
+
+      const exposure = tc.positionSizePct * (status.openPositions as number || 0);
       const text = [
         `📍 STATUS`,
-        `├ Capital: ${(status.capitalSol as number || 0).toFixed(2)} SOL [${status.tier || 'MICRO'}]`,
-        `├ Positions: ${status.openPositions || 0}/${status.maxPositions || 2}`,
-        `├ Mode: ${(status.isLive as boolean) ? '💰 LIVE' : '👻 SHADOW'}`,
-        `├ Paused: ${this.paused ? 'YES' : 'NO'}`,
-        `├ WebSocket: ${(status.wsConnected as boolean) ? '✅' : '❌'}${(status.wsFallback as boolean) ? ' (FALLBACK)' : ''}`,
+        `├ Capital: ${capSol.toFixed(2)} SOL [${status.tier || 'MICRO'}]`,
+        `├ Mode: ${(status.isLive as boolean) ? '💰 LIVE' : '👻 SHADOW'} | ${isPumpOnly ? 'PUMP.FUN ONLY' : 'FULL'}`,
+        `├ Positions: ${status.openPositions || 0}/${tc.maxPositions} (${(exposure * 100).toFixed(0)}% exposure)`,
+        `├ WS: ${(status.wsConnected as boolean) ? '✅' : '❌'}${(status.wsFallback as boolean) ? ' FALLBACK' : ''} | Paused: ${this.paused ? 'YES' : 'NO'}`,
+        `├ Sizing: ${(tc.positionSizePct * 100).toFixed(0)}% per pos | SL ${(tc.stopLoss * 100).toFixed(0)}% | TP +${(tc.profitTarget * 100).toFixed(0)}%`,
+        `├ Pump.fun: entry ${(config.pumpFun.curveEntryMin * 100).toFixed(0)}-${(config.pumpFun.curveEntryMax * 100).toFixed(0)}% | TP ${(config.pumpFun.curveProfitTarget * 100).toFixed(0)}% | stale ${config.pumpFun.staleTimeKillMins}min`,
+        `├ Min signal score: ${tc.minSignalScore} | WS slots: ${tc.walletsMonitored}`,
+        ...(edgeLine ? [edgeLine] : []),
+        ...(signalLine ? [signalLine] : []),
         `└ Daily P&L: ${status.dailyPnl || '0.00'} SOL`,
       ].join('\n');
       await this.bot.sendMessage(msg.chat.id, text);
@@ -526,14 +647,49 @@ export class TelegramService {
       if (msg.chat.id.toString() !== this.chatId) return;
       try {
         const wallets = await getMany<Record<string, unknown>>(
-          `SELECT address, label, tier, active, helius_subscribed, our_win_rate, our_total_trades
-           FROM alpha_wallets WHERE active = TRUE ORDER BY tier ASC, our_win_rate DESC`,
+          `SELECT address, label, tier, active, helius_subscribed, source,
+                  COALESCE(our_win_rate, 0) as our_win_rate,
+                  COALESCE(our_total_trades, 0) as our_total_trades,
+                  COALESCE(our_avg_pnl_percent, 0) as our_avg_pnl_percent,
+                  COALESCE(short_term_alpha_score, 0) as alpha_score,
+                  COALESCE(consecutive_losses, 0) as consecutive_losses,
+                  last_active_at
+           FROM alpha_wallets WHERE active = TRUE
+           ORDER BY helius_subscribed DESC, short_term_alpha_score DESC NULLS LAST, our_win_rate DESC`,
         );
+
+        const subscribed = wallets.filter((w) => w.helius_subscribed).length;
+        const status = this.getStatus?.() || {};
+        const capSol = status.capitalSol as number || 0;
+        const tier = getTierForCapital(capSol);
+        const tc = getTierConfig(tier);
+
         const lines = wallets.map((w) => {
-          const wr = w.our_total_trades ? `${((w.our_win_rate as number) * 100).toFixed(0)}%` : 'N/A';
-          return `${w.helius_subscribed ? '📡' : '⏸️'} [${w.tier}] ${w.label} | WR: ${wr} | Trades: ${w.our_total_trades}`;
+          const trades = Number(w.our_total_trades);
+          const wr = trades > 0 ? `${(Number(w.our_win_rate) * 100).toFixed(0)}%W` : 'new';
+          const pnl = trades > 0 ? `${(Number(w.our_avg_pnl_percent) * 100).toFixed(1)}%` : '';
+          const alpha = Number(w.alpha_score);
+          const alphaTag = alpha > 0 ? `α${alpha}` : '';
+          const losses = Number(w.consecutive_losses);
+          const streak = losses >= 2 ? `🔥${losses}L` : '';
+          const statusIcon = w.helius_subscribed ? '📡' : '⏸️';
+
+          // Recency
+          let recency = '';
+          if (w.last_active_at) {
+            const ago = Math.round((Date.now() - new Date(w.last_active_at as string).getTime()) / 86400000);
+            if (ago > 3) recency = ` ${ago}d`;
+          }
+
+          return `${statusIcon} [${w.tier}] ${w.label} | ${trades}t ${wr} ${pnl} ${alphaTag}${streak}${recency}`.trim();
         });
-        const walletMsg = `👛 WALLETS (${wallets.length})\n${lines.join('\n')}`;
+
+        const walletMsg = [
+          `👛 WALLETS (${wallets.length} active, ${subscribed}/${tc.walletsMonitored} WS slots)`,
+          ...lines,
+          ``,
+          `Legend: 📡=subscribed ⏸️=not subscribed | α=alpha score | 🔥=loss streak`,
+        ].join('\n');
         for (const chunk of this.chunkMessage(walletMsg)) {
           await this.bot.sendMessage(msg.chat.id, chunk);
         }
@@ -569,12 +725,36 @@ export class TelegramService {
         const totalPnl = stats.reduce((s, d) => s + Number(d.net_pnl_sol || 0), 0);
         const totalWins = stats.reduce((s, d) => s + Number(d.win_count || 0), 0);
         const totalLosses = stats.reduce((s, d) => s + Number(d.loss_count || 0), 0);
+        const totalSignals = stats.reduce((s, d) => s + Number(d.signals_detected || 0), 0);
+        const totalEntered = stats.reduce((s, d) => s + Number(d.trades_entered || 0), 0);
+        const avgLag = stats.reduce((s, d) => s + Number(d.avg_execution_lag_secs || 0), 0) / stats.length;
+        const totalFees = stats.reduce((s, d) => s + Number(d.total_fees_sol || 0), 0);
+        const avgHeliusUptime = stats.reduce((s, d) => s + Number(d.helius_ws_uptime_percent || 0), 0) / stats.length;
         const wr = totalWins + totalLosses > 0 ? (totalWins / (totalWins + totalLosses) * 100).toFixed(0) : 'N/A';
+        const conversion = totalSignals > 0 ? (totalEntered / totalSignals * 100).toFixed(0) : 'N/A';
+
+        // Per-day breakdown for trend
+        const dayLines = stats.slice(0, 5).map((d) => {
+          const date = new Date(d.date as string).toLocaleDateString('en-US', { month: 'short', day: 'numeric' });
+          const pnl = Number(d.net_pnl_sol || 0);
+          const w = Number(d.win_count || 0);
+          const l = Number(d.loss_count || 0);
+          return `│ ${date}: ${pnl >= 0 ? '+' : ''}${pnl.toFixed(3)} SOL (${w}W/${l}L)`;
+        });
+
         await this.bot.sendMessage(msg.chat.id, [
           `📊 STATS (${stats.length}d)`,
           `├ P&L: ${totalPnl >= 0 ? '+' : ''}${totalPnl.toFixed(3)} SOL`,
-          `├ W/L: ${totalWins}/${totalLosses} (${wr}%)`,
-          `└ Days: ${stats.length}`,
+          `├ W/L: ${totalWins}/${totalLosses} (${wr}% WR)`,
+          `├ Signals: ${totalSignals} seen → ${totalEntered} entered (${conversion}% conversion)`,
+          `├ Avg execution lag: ${avgLag.toFixed(1)}s`,
+          `├ Helius uptime: ${avgHeliusUptime.toFixed(1)}%`,
+          `├ Total fees: ${totalFees.toFixed(4)} SOL`,
+          `│`,
+          `├─ DAILY TREND`,
+          ...dayLines,
+          `│`,
+          `└ ${stats.length} days tracked`,
         ].join('\n'));
       } catch (err) {
         await this.bot.sendMessage(msg.chat.id, '❌ Failed to load stats');
@@ -698,7 +878,13 @@ export class TelegramService {
              COUNT(*) FILTER (WHERE pnl_percent <= 0) as losses,
              COALESCE(SUM(${solColumn} * pnl_percent), 0) as realized_sol,
              COALESCE(AVG(pnl_percent), 0) as avg_pnl,
+             COALESCE(AVG(pnl_percent) FILTER (WHERE pnl_percent > 0), 0) as avg_win_pnl,
+             COALESCE(AVG(pnl_percent) FILTER (WHERE pnl_percent <= 0), 0) as avg_loss_pnl,
+             COALESCE(SUM(${solColumn} * pnl_percent) FILTER (WHERE pnl_percent > 0), 0) as gross_win_sol,
+             COALESCE(SUM(${solColumn} * pnl_percent) FILTER (WHERE pnl_percent <= 0), 0) as gross_loss_sol,
              COALESCE(AVG(hold_time_mins), 0) as avg_hold,
+             COALESCE(AVG(hold_time_mins) FILTER (WHERE pnl_percent > 0), 0) as avg_hold_wins,
+             COALESCE(AVG(hold_time_mins) FILTER (WHERE pnl_percent <= 0), 0) as avg_hold_losses,
              ${isLive ? 'COALESCE(SUM(fees_paid_sol), 0) as total_fees,' : ''}
              MIN(entry_time) as first_trade
            FROM ${tableName} WHERE status = 'CLOSED'`,
@@ -709,10 +895,18 @@ export class TelegramService {
         const losses = Number(closed?.losses || 0);
         const realizedSol = Number(closed?.realized_sol || 0);
         const avgPnl = Number(closed?.avg_pnl || 0);
+        const avgWinPnl = Number(closed?.avg_win_pnl || 0);
+        const avgLossPnl = Number(closed?.avg_loss_pnl || 0);
+        const grossWinSol = Number(closed?.gross_win_sol || 0);
+        const grossLossSol = Math.abs(Number(closed?.gross_loss_sol || 0));
         const avgHold = Number(closed?.avg_hold || 0);
+        const avgHoldWins = Number(closed?.avg_hold_wins || 0);
+        const avgHoldLosses = Number(closed?.avg_hold_losses || 0);
         const totalFees = isLive ? Number(closed?.total_fees || 0) : 0;
         const wr = total > 0 ? (wins / total * 100).toFixed(0) : 'N/A';
         const netSol = realizedSol + unrealizedSol;
+        const profitFactor = grossLossSol > 0 ? (grossWinSol / grossLossSol).toFixed(2) : total > 0 ? 'inf' : 'N/A';
+        const expectancy = total > 0 ? (realizedSol / total) : 0;
         const firstTrade = closed?.first_trade ? new Date(closed.first_trade as string) : null;
         const sinceStr = firstTrade
           ? firstTrade.toLocaleDateString('en-US', { month: 'short', day: 'numeric' })
@@ -720,11 +914,15 @@ export class TelegramService {
 
         const lines = [
           `📈 ${isLive ? 'LIVE' : 'SHADOW'} P&L`,
-          `├ Open positions: ${openCount}`,
-          `├ Unrealized: ${unrealizedSol >= 0 ? '+' : ''}${unrealizedSol.toFixed(3)} SOL (${unrealizedPct >= 0 ? '+' : ''}${unrealizedPct.toFixed(1)}% avg)`,
+          `├ Open: ${openCount} | Unrealized: ${unrealizedSol >= 0 ? '+' : ''}${unrealizedSol.toFixed(3)} SOL (${unrealizedPct >= 0 ? '+' : ''}${unrealizedPct.toFixed(1)}%)`,
           `├ Realized: ${realizedSol >= 0 ? '+' : ''}${realizedSol.toFixed(3)} SOL (${total} trades)`,
           `├ Net: ${netSol >= 0 ? '+' : ''}${netSol.toFixed(3)} SOL`,
+          `│`,
           `├ Win rate: ${wr}% (${wins}W / ${losses}L)`,
+          `├ Avg win: +${(avgWinPnl * 100).toFixed(1)}% (hold ${this.formatHoldTime(avgHoldWins)})`,
+          `├ Avg loss: ${(avgLossPnl * 100).toFixed(1)}% (hold ${this.formatHoldTime(avgHoldLosses)})`,
+          `├ Profit factor: ${profitFactor} (${grossWinSol.toFixed(3)} / ${grossLossSol.toFixed(3)})`,
+          `├ Expectancy: ${expectancy >= 0 ? '+' : ''}${expectancy.toFixed(4)} SOL/trade`,
           `├ Avg PnL: ${(avgPnl * 100).toFixed(1)}% | Avg hold: ${this.formatHoldTime(avgHold)}`,
         ];
 
@@ -791,7 +989,7 @@ export class TelegramService {
       if (msg.chat.id.toString() !== this.chatId) return;
       try {
         const signals = await getMany<Record<string, unknown>>(
-          `SELECT token_address, token_symbol, validation_result, validation_details, action_taken, first_detected_at, wallet_count
+          `SELECT token_address, token_symbol, validation_result, validation_details, action_taken, first_detected_at, wallet_count, signal_score
            FROM signal_events ORDER BY first_detected_at DESC LIMIT 15`,
         );
         if (signals.length === 0) {
@@ -825,13 +1023,17 @@ export class TelegramService {
           }
 
           const ago = Math.round((Date.now() - new Date(s.first_detected_at as string).getTime()) / 60000);
-          return `${icon} $${sym} | ${reason} | ${ago}m ago | ${s.wallet_count}w`;
+          const score = s.signal_score ? `S${Number(s.signal_score).toFixed(0)}` : '';
+          return `${icon} $${sym} | ${reason} | ${score} | ${ago}m ago | ${s.wallet_count}w`;
         });
 
+        const status = this.getStatus?.() || {};
+        const capSol = status.capitalSol as number || 0;
+        const tierCfg = getTierConfig(getTierForCapital(capSol));
         const signalMsg = [
-          `🔍 SIGNALS (last ${signals.length})`,
+          `🔍 SIGNALS (last ${signals.length}) — min score: ${tierCfg.minSignalScore}`,
           ...lines,
-          `└ ${passed}/${signals.length} passed validation`,
+          `└ ${passed}/${signals.length} passed | Score key: S=signal score (0-100)`,
         ].join('\n');
         for (const chunk of this.chunkMessage(signalMsg)) {
           await this.bot.sendMessage(msg.chat.id, chunk);
@@ -1421,11 +1623,25 @@ export class TelegramService {
           return `│ ${w.label}: ${wTotal}t ${wWr}%W avg${wPnl}% ${wSol}SOL`;
         });
 
+        // Get current config for context
+        const cfgStatus = this.getStatus?.() || {};
+        const cfgCapSol = cfgStatus.capitalSol as number || 0;
+        const cfgTier = getTierForCapital(cfgCapSol);
+        const cfgTc = getTierConfig(cfgTier);
+        const pf = config.pumpFun;
+
         // Build the full report
         const lines = [
-          `🔧 TUNING REPORT (${total} trades)`,
+          `🔧 TUNING REPORT (${total} trades) — copy entire message to Claude`,
           ``,
-          `┌─ OVERVIEW`,
+          `┌─ ACTIVE CONFIG`,
+          `│ Tier: ${cfgTier} | ${cfgCapSol.toFixed(2)} SOL | ${config.shadowMode ? 'SHADOW' : 'LIVE'}`,
+          `│ Pos size: ${(cfgTc.positionSizePct * 100).toFixed(0)}% | Max: ${cfgTc.maxPositions} | WS: ${cfgTc.walletsMonitored}`,
+          `│ Signal min: ${cfgTc.minSignalScore} | SL: ${(cfgTc.stopLoss * 100).toFixed(0)}% | TP: +${(cfgTc.profitTarget * 100).toFixed(0)}%`,
+          `│ Pump.fun: entry ${(pf.curveEntryMin * 100).toFixed(0)}-${(pf.curveEntryMax * 100).toFixed(0)}% | TP ${(pf.curveProfitTarget * 100).toFixed(0)}% | stale ${pf.staleTimeKillMins}m`,
+          `│ Conviction: ${pf.minConvictionSol}SOL | Velocity: ${pf.curveVelocityMin}SOL/m | Age: ${pf.maxTokenAgeMins}m`,
+          `│`,
+          `├─ OVERVIEW`,
           `│ ${wins}W/${losses}L (${wr}%) · Avg PnL: ${avgPnl}% · Total: ${totalPnlSol} SOL`,
           `│ Avg hold: ${avgHold}min · Avg entry curve: ${avgEntryCurve}% · Avg peak: ${avgPeakCurve}%`,
           `│ Avg alpha lag: ${avgAlphaLag}s · Graduated: ${gradCount}/${total}`,
@@ -1453,7 +1669,7 @@ export class TelegramService {
           `│ [icon token pnl hold entry peak type lag exit]`,
           ...recentLines,
           `│`,
-          `└─ Copy this entire message for tuning analysis`,
+          `└─ Send to Claude: "here's my tuning report, analyze and suggest config changes"`,
         ];
 
         for (const chunk of this.chunkMessage(lines.join('\n'))) {
@@ -1462,6 +1678,281 @@ export class TelegramService {
       } catch (err) {
         logger.error({ err }, 'Failed to generate tuning report');
         await this.bot.sendMessage(msg.chat.id, '❌ Failed to load tuning data');
+      }
+    });
+
+    // /config — all tunable params for copy-paste to Claude
+    this.bot.onText(/\/config/, async (msg) => {
+      if (msg.chat.id.toString() !== this.chatId) return;
+      try {
+        const status = this.getStatus?.() || {};
+        const capSol = status.capitalSol as number || 0;
+        const tier = getTierForCapital(capSol);
+        const tc = getTierConfig(tier);
+        const isPumpOnly = capSol < config.minCapitalForStandardTrading;
+        const pf = config.pumpFun;
+
+        const lines = [
+          `⚙️ CONFIG DUMP — copy this to Claude for tuning`,
+          ``,
+          `┌─ SYSTEM`,
+          `│ Mode: ${config.shadowMode ? 'SHADOW' : 'LIVE'}`,
+          `│ Capital: ${capSol.toFixed(4)} SOL`,
+          `│ Tier: ${tier} (MICRO <3, SMALL 3-10, MEDIUM 10-50, FULL 50+)`,
+          `│ Strategy: ${isPumpOnly ? 'PUMP.FUN ONLY (<5 SOL)' : 'FULL'}`,
+          `│ Daily loss limit: ${(config.dailyLossLimitPct * 100).toFixed(0)}%`,
+          `│ Exposure cap: 80%`,
+          `│`,
+          `├─ TIER CONFIG [${tier}]`,
+          `│ Position size: ${(tc.positionSizePct * 100).toFixed(0)}%`,
+          `│ Min position: ${tc.minPositionSol} SOL`,
+          `│ Max positions: ${tc.maxPositions}`,
+          `│ WS slots: ${tc.walletsMonitored}`,
+          `│ Profit target: +${(tc.profitTarget * 100).toFixed(0)}%`,
+          `│ Stop loss: ${(tc.stopLoss * 100).toFixed(0)}%`,
+          `│ Hard kill: ${(tc.hardKill * 100).toFixed(0)}%`,
+          `│ Hard time: ${tc.hardTimeHours}h`,
+          `│ Partial exits: ${tc.partialExitsEnabled ? 'YES' : 'NO'}`,
+          `│ Confluence: ${tc.walletConfluenceRequired} wallets in ${tc.confluenceWindow}min`,
+          `│ Min signal score: ${tc.minSignalScore}`,
+          `│ MCap: $${this.formatNum(tc.mcapMin)}-$${this.formatNum(tc.mcapMax)}`,
+          `│ Min liquidity: $${this.formatNum(tc.liquidityMin)}`,
+          `│ Momentum: ${tc.momentumMin}% to ${tc.momentumMax}%`,
+          `│ Max token age: ${tc.tokenMaxAgeDays ?? 'none'}d`,
+          `│ Time kills: ${tc.timeKills.map((tk) => `${tk.hours}h>${(tk.minPnlPct * 100).toFixed(0)}%`).join(', ')}`,
+          `│`,
+          `├─ PUMP.FUN CONFIG`,
+          `│ Size multiplier: ${(pf.positionSizeMultiplier * 100).toFixed(0)}%`,
+          `│ Max positions: ${pf.maxPositions}`,
+          `│ Entry zone: ${(pf.curveEntryMin * 100).toFixed(0)}-${(pf.curveEntryMax * 100).toFixed(0)}% curve fill`,
+          `│ Velocity min: ${pf.curveVelocityMin} SOL/min`,
+          `│ Curve TP: ${(pf.curveProfitTarget * 100).toFixed(0)}% fill`,
+          `│ Curve hard exit: ${(pf.curveHardExit * 100).toFixed(0)}% fill`,
+          `│ PnL TP: +${(pf.profitTarget * 100).toFixed(0)}%`,
+          `│ Stop loss: ${(pf.stopLoss * 100).toFixed(0)}%`,
+          `│ Hard kill: ${(pf.hardKill * 100).toFixed(0)}%`,
+          `│ Stale timer: ${pf.staleTimeKillMins}min`,
+          `│ Min conviction: ${pf.minConvictionSol} SOL`,
+          `│ Max token age: ${pf.maxTokenAgeMins}min`,
+          `│ Slippage: ${(pf.slippageBps / 100).toFixed(0)}%`,
+          `│ Confluence bonus: ${pf.confluenceBonus ? 'YES' : 'NO'}`,
+          `│ Deferred entry: ${pf.deferredEntryEnabled ? 'YES' : 'NO'} (max ${pf.deferredEntryMaxWaitMs / 1000}s)`,
+          `│ Graduation sell: ${pf.graduationSellPct}%`,
+          `│`,
+          `├─ SIGNAL SCORING (0-100)`,
+          `│ Wallet quality: 35pts (WR + PnL + confidence)`,
+          `│ Momentum: 25pts (24h + buy ratio + recency)`,
+          `│ MCap fit: 20pts (sweet spot $30K-$300K)`,
+          `│ Liquidity: 10pts ($5K-$100K)`,
+          `│ Confluence: 10pts (2+ wallets)`,
+          `│ Min to enter: ${tc.minSignalScore}`,
+          `│`,
+          `├─ WALLET MANAGEMENT`,
+          `│ Discovery: every ${(config.nansen.discoveryIntervalMs / 3600000).toFixed(0)}h`,
+          `│ Auto-promote: 3+ trades, >50%WR, <4h hold, >40 alpha → Tier A`,
+          `│ Auto-demote: 2 consecutive losses → Tier B`,
+          `│ Deactivate: 3+ losses, <$1K PnL, 7d inactive`,
+          `│ Quality rotation: evict lowest quality when slots full`,
+          `│`,
+          `└─ Send this to Claude with "tune X to Y" or "analyze and suggest changes"`,
+        ];
+
+        for (const chunk of this.chunkMessage(lines.join('\n'))) {
+          await this.bot.sendMessage(msg.chat.id, chunk);
+        }
+      } catch (err) {
+        await this.bot.sendMessage(msg.chat.id, '❌ Failed to generate config');
+      }
+    });
+
+    // /edge — what's working and what's not
+    this.bot.onText(/\/edge/, async (msg) => {
+      if (msg.chat.id.toString() !== this.chatId) return;
+      try {
+        // 1. Win rate by signal score band
+        const scoreBands = await getMany<Record<string, unknown>>(
+          `SELECT
+             CASE
+               WHEN se.signal_score < 40 THEN '<40'
+               WHEN se.signal_score < 50 THEN '40-50'
+               WHEN se.signal_score < 60 THEN '50-60'
+               WHEN se.signal_score < 70 THEN '60-70'
+               ELSE '70+'
+             END as band,
+             COUNT(*) as total,
+             COUNT(*) FILTER (WHERE p.pnl_percent > 0) as wins,
+             COALESCE(AVG(p.pnl_percent), 0) as avg_pnl
+           FROM pumpfun_positions p
+           LEFT JOIN signal_events se ON se.position_id = p.id
+           WHERE p.status = 'CLOSED' AND se.signal_score IS NOT NULL
+           GROUP BY band ORDER BY band`,
+        );
+
+        // 2. Win rate by entry curve zone
+        const curveZones = await getMany<Record<string, unknown>>(
+          `SELECT
+             CASE
+               WHEN curve_fill_pct_at_entry < 0.25 THEN '<25%'
+               WHEN curve_fill_pct_at_entry < 0.30 THEN '25-30%'
+               WHEN curve_fill_pct_at_entry < 0.35 THEN '30-35%'
+               WHEN curve_fill_pct_at_entry < 0.40 THEN '35-40%'
+               ELSE '40%+'
+             END as zone,
+             COUNT(*) as total,
+             COUNT(*) FILTER (WHERE pnl_percent > 0) as wins,
+             COALESCE(AVG(pnl_percent), 0) as avg_pnl,
+             COALESCE(SUM(net_pnl_sol), 0) as net_sol
+           FROM pumpfun_positions WHERE status = 'CLOSED'
+           GROUP BY zone ORDER BY zone`,
+        );
+
+        // 3. Top 5 / bottom 5 wallets by P&L
+        const topWallets = await getMany<Record<string, unknown>>(
+          `SELECT w.label, COUNT(*) as trades,
+                  COUNT(*) FILTER (WHERE p.pnl_percent > 0) as wins,
+                  COALESCE(SUM(p.net_pnl_sol), 0) as net_sol,
+                  COALESCE(AVG(p.pnl_percent), 0) as avg_pnl
+           FROM pumpfun_positions p, unnest(p.signal_wallets) sw
+           JOIN alpha_wallets w ON w.address = sw
+           WHERE p.status = 'CLOSED'
+           GROUP BY w.label
+           HAVING COUNT(*) >= 2
+           ORDER BY net_sol DESC LIMIT 5`,
+        );
+
+        const bottomWallets = await getMany<Record<string, unknown>>(
+          `SELECT w.label, COUNT(*) as trades,
+                  COUNT(*) FILTER (WHERE p.pnl_percent > 0) as wins,
+                  COALESCE(SUM(p.net_pnl_sol), 0) as net_sol,
+                  COALESCE(AVG(p.pnl_percent), 0) as avg_pnl
+           FROM pumpfun_positions p, unnest(p.signal_wallets) sw
+           JOIN alpha_wallets w ON w.address = sw
+           WHERE p.status = 'CLOSED'
+           GROUP BY w.label
+           HAVING COUNT(*) >= 2
+           ORDER BY net_sol ASC LIMIT 5`,
+        );
+
+        // 4. Exit reason effectiveness
+        const exits = await getMany<Record<string, unknown>>(
+          `SELECT exit_reason, COUNT(*) as total,
+                  COUNT(*) FILTER (WHERE pnl_percent > 0) as wins,
+                  COALESCE(AVG(pnl_percent), 0) as avg_pnl,
+                  COALESCE(SUM(net_pnl_sol), 0) as net_sol
+           FROM pumpfun_positions WHERE status = 'CLOSED' AND exit_reason IS NOT NULL
+           GROUP BY exit_reason ORDER BY total DESC`,
+        );
+
+        // 5. Alpha lag effectiveness
+        const lagBands = await getMany<Record<string, unknown>>(
+          `SELECT
+             CASE
+               WHEN EXTRACT(EPOCH FROM (entry_time - alpha_buy_time)) < 10 THEN '<10s'
+               WHEN EXTRACT(EPOCH FROM (entry_time - alpha_buy_time)) < 30 THEN '10-30s'
+               WHEN EXTRACT(EPOCH FROM (entry_time - alpha_buy_time)) < 60 THEN '30-60s'
+               ELSE '60s+'
+             END as band,
+             COUNT(*) as total,
+             COUNT(*) FILTER (WHERE pnl_percent > 0) as wins,
+             COALESCE(AVG(pnl_percent), 0) as avg_pnl
+           FROM pumpfun_positions WHERE status = 'CLOSED'
+           GROUP BY band ORDER BY band`,
+        );
+
+        // 6. Overall expectancy
+        const overall = await getOne<Record<string, unknown>>(
+          `SELECT COUNT(*) as total,
+                  COUNT(*) FILTER (WHERE pnl_percent > 0) as wins,
+                  COALESCE(AVG(pnl_percent) FILTER (WHERE pnl_percent > 0), 0) as avg_win,
+                  COALESCE(AVG(pnl_percent) FILTER (WHERE pnl_percent <= 0), 0) as avg_loss,
+                  COALESCE(SUM(net_pnl_sol), 0) as net_sol,
+                  COALESCE(SUM(net_pnl_sol) FILTER (WHERE pnl_percent > 0), 0) as gross_wins,
+                  COALESCE(ABS(SUM(net_pnl_sol) FILTER (WHERE pnl_percent <= 0)), 0) as gross_losses
+           FROM pumpfun_positions WHERE status = 'CLOSED'`,
+        );
+
+        const total = Number(overall?.total || 0);
+        if (total === 0) {
+          await this.bot.sendMessage(msg.chat.id, '📭 No closed trades — need data for edge analysis');
+          return;
+        }
+
+        const wins = Number(overall?.wins || 0);
+        const wr = (wins / total * 100).toFixed(0);
+        const avgWin = (Number(overall?.avg_win || 0) * 100).toFixed(1);
+        const avgLoss = (Number(overall?.avg_loss || 0) * 100).toFixed(1);
+        const netSol = Number(overall?.net_sol || 0);
+        const grossWins = Number(overall?.gross_wins || 0);
+        const grossLosses = Number(overall?.gross_losses || 0);
+        const profitFactor = grossLosses > 0 ? (grossWins / grossLosses).toFixed(2) : 'inf';
+        const expectancy = (netSol / total);
+
+        const formatBand = (rows: Record<string, unknown>[], keyField: string) =>
+          rows.map((r) => {
+            const t = Number(r.total);
+            const w = Number(r.wins);
+            const wRate = t > 0 ? (w / t * 100).toFixed(0) : '0';
+            const pnl = (Number(r.avg_pnl) * 100).toFixed(1);
+            const sol = r.net_sol !== undefined ? ` ${Number(r.net_sol) >= 0 ? '+' : ''}${Number(r.net_sol).toFixed(4)}SOL` : '';
+            return `│ ${String(r[keyField]).padEnd(7)} ${String(t).padStart(3)}t ${wRate}%W avg${pnl}%${sol}`;
+          });
+
+        const lines = [
+          `🎯 EDGE ANALYSIS (${total} trades)`,
+          ``,
+          `┌─ OVERALL`,
+          `│ WR: ${wr}% | Avg win: +${avgWin}% | Avg loss: ${avgLoss}%`,
+          `│ Profit factor: ${profitFactor} | Expectancy: ${expectancy >= 0 ? '+' : ''}${expectancy.toFixed(4)} SOL/trade`,
+          `│ Net: ${netSol >= 0 ? '+' : ''}${netSol.toFixed(4)} SOL`,
+          `│`,
+          ...(scoreBands.length > 0 ? [
+            `├─ SIGNAL SCORE → OUTCOME`,
+            ...formatBand(scoreBands, 'band'),
+            `│`,
+          ] : []),
+          `├─ ENTRY CURVE ZONE → OUTCOME`,
+          ...formatBand(curveZones, 'zone'),
+          `│`,
+          `├─ ALPHA LAG → OUTCOME`,
+          ...formatBand(lagBands, 'band'),
+          `│`,
+          `├─ EXIT REASONS`,
+          ...exits.map((r) => {
+            const t = Number(r.total);
+            const w = Number(r.wins);
+            const wRate = t > 0 ? (w / t * 100).toFixed(0) : '0';
+            const pnl = (Number(r.avg_pnl) * 100).toFixed(1);
+            const sol = Number(r.net_sol);
+            return `│ ${r.exit_reason}: ${t}t ${wRate}%W avg${pnl}% ${sol >= 0 ? '+' : ''}${sol.toFixed(4)}SOL`;
+          }),
+          `│`,
+          `├─ BEST WALLETS (by SOL)`,
+          ...topWallets.map((w) => {
+            const t = Number(w.trades);
+            const wn = Number(w.wins);
+            const wr2 = t > 0 ? (wn / t * 100).toFixed(0) : '0';
+            const sol = Number(w.net_sol);
+            return `│ ${w.label}: ${t}t ${wr2}%W ${sol >= 0 ? '+' : ''}${sol.toFixed(4)}SOL`;
+          }),
+          `│`,
+          `├─ WORST WALLETS (by SOL)`,
+          ...bottomWallets.map((w) => {
+            const t = Number(w.trades);
+            const wn = Number(w.wins);
+            const wr2 = t > 0 ? (wn / t * 100).toFixed(0) : '0';
+            const sol = Number(w.net_sol);
+            return `│ ${w.label}: ${t}t ${wr2}%W ${sol >= 0 ? '+' : ''}${sol.toFixed(4)}SOL`;
+          }),
+          `│`,
+          `└─ Copy this to Claude: "here's my edge data, suggest config changes"`,
+        ];
+
+        for (const chunk of this.chunkMessage(lines.join('\n'))) {
+          await this.bot.sendMessage(msg.chat.id, chunk);
+        }
+      } catch (err) {
+        logger.error({ err }, 'Failed to generate edge analysis');
+        await this.bot.sendMessage(msg.chat.id, '❌ Failed to load edge data');
       }
     });
 

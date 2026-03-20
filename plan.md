@@ -1,140 +1,171 @@
-# ROSSYBOT EDGE IMPROVEMENT PLAN
+# Optimize Wallet List — Implementation Plan
 
-## Priority Tiers
+## Executive Summary
 
-Grouped by expected impact on win rate / EV. Each item is a concrete code change.
-
----
-
-## TIER 1: HIGH IMPACT — Direct Edge Gains (Do First)
-
-### 1. Integrate Market Regime Detection Into Signal Generator
-**Gap:** `bonding-monitor.ts` already has `getMarketRegime()` (BULL/CAUTION/BEAR/ROTATION with position multipliers) but it's **never called** from signal generation.
-**Fix:** Wire regime into signal generator — adjust position sizing and threshold strictness based on regime. BEAR → tighten thresholds + smaller positions. BULL → allow more signals.
-**Files:** `signal-generator.ts`, import from `pumpfun/bonding-monitor.ts`
-**Effort:** Small — wiring existing code
-
-### 2. Align The 3 Exit/Target Systems
-**Gap:** Three misaligned systems operate simultaneously:
-- Position manager: category-based (TP1 +100% to +400%, TP2 +250% to +1500%)
-- Signal Telegram display: fixed +50%/+150% TP, -30% SL
-- Performance tracker: +100%/-40% WIN/LOSS classification
-
-The Telegram targets show +50% TP1 but position manager won't sell until +100% to +400%. The performance tracker classifies differently than both. This means the learning system is optimizing for different outcomes than what the position manager actually trades.
-**Fix:**
-- Update signal Telegram display to show the ACTUAL position manager targets for the signal's category
-- Align performance tracker WIN/LOSS thresholds with position manager TP/SL levels (or at least make them configurable per category)
-**Files:** `signal-generator.ts` (telegram formatting), `signal-performance-tracker.ts` (outcome classification)
-**Effort:** Medium
-
-### 3. Optimize for EV Instead of Win Rate
-**Gap:** Optimizer targets 30% win rate, but a 20% win rate with 5x avg winners beats a 40% win rate with 1.5x avg winners. The system doesn't track or optimize for EV.
-**Fix:** Add EV calculation to performance tracker and daily optimizer. Change optimization target from pure win rate to `EV = (winRate × avgWinReturn) - ((1-winRate) × avgLossReturn)`. Threshold adjustments should maximize EV, not win rate.
-**Files:** `daily-auto-optimizer.ts`, `threshold-optimizer.ts`, `signal-performance-tracker.ts`
-**Effort:** Medium
-
-### 4. Add Max Concurrent Positions Limit
-**Gap:** No portfolio-level position limit. Could have 30 open positions at once, concentrating risk. Signal generator only checks if already holding THAT token, not total exposure.
-**Fix:** Add `MAX_CONCURRENT_POSITIONS` config (e.g., 8-10). Check open positions count before generating new signals. If at limit, only allow signals scoring in top 10% (quality over quantity).
-**Files:** `signal-generator.ts`, `config/index.ts`
-**Effort:** Small
-
-### 5. Wire Rotation Detection Into Scoring
-**Gap:** `rotation-detector.ts` exists and is called for enrichment but the rotation signal **doesn't affect the score**. When 3+ alpha wallets are rotating into a token, that's a strong signal being wasted.
-**Fix:** Add rotation bonus to composite score (similar to surge bonus). 2 wallets = +5, 3+ wallets = +10, high SOL volume = additional +5.
-**Files:** `signal-generator.ts` (where enrichment is applied)
-**Effort:** Small
+After analyzing the full codebase, I've identified **7 optimization areas** across performance, strategy, and data structure improvements. The core issue: wallet list management has grown organically with overlapping cleanup/scoring logic, sequential RPC calls, redundant DB queries, and tier configs that don't scale coherently (MICRO has 50 WS slots but SMALL has 5).
 
 ---
 
-## TIER 2: MEDIUM IMPACT — Reduce Losses & Sharpen Signals
+## 1. Fix Tier Wallet Count Inversion (MICRO=50 > SMALL=5)
 
-### 6. ATH Entry Gate (Not Just Warning)
-**Gap:** ATH detection warns but still sends signal. Buying at ATH is a known loss pattern.
-**Fix:** In production mode, if token is near ATH (>+25% in 1h for new tokens), either block the signal or auto-adjust entry zone to the suggested pullback price. Add "WAIT_FOR_PULLBACK" signal type that re-evaluates after price drops.
-**Files:** `signal-generator.ts` (ATH detection section)
-**Effort:** Medium
+**Problem:** `walletsMonitored` is inverted — MICRO tier gets 50 WS slots while SMALL gets only 5. This means a bot with 0.5 SOL monitors 10x more wallets than one with 5 SOL. The MICRO=50 was likely set for shadow-mode testing but leaked into live config.
 
-### 7. Continuous Holder Count Scoring (Remove Step Function)
-**Gap:** Holder scoring jumps 5→12→20→28→35→40 at arbitrary thresholds. A token with 99 holders gets 20 points while 100 gets 40 — a 100% scoring jump for 1 holder difference.
-**Fix:** Replace with continuous function: `points = min(40, round(40 × log(holders/10) / log(100/10)))` or similar log curve. Smooth transition from 10 holders (0 pts) to 300+ holders (40 pts).
-**Files:** `onchain-scoring.ts` (market structure scoring section)
-**Effort:** Small
+**File:** `src/config/index.ts` (lines 114-226)
 
-### 8. Slippage-Aware Position Sizing
-**Gap:** Position sizing ignores execution cost. On a $2K liquidity pool, a $50 trade might have 5-10% slippage, eating into edge.
-**Fix:** Estimate slippage from liquidity: `estimatedSlippage = positionSize / (liquidity × 2)`. If slippage > 3%, reduce position. If > 8%, skip or minimum size only.
-**Files:** `trading/trade-executor.ts` (calculatePositionSize)
-**Effort:** Small
+**Changes:**
+```
+MICRO:  50 → 15  (small capital = fewer but higher-quality signals)
+SMALL:   5 → 15  (match MICRO, broader coverage)
+MEDIUM: 10 → 20  (moderate expansion)
+FULL:   20 → 30  (max coverage for big capital)
+```
 
-### 9. Remove or Invert Momentum Weight
-**Gap:** Momentum is -0.04 correlated — actively anti-predictive. 5% weight is small but still adds noise and can push borderline tokens the wrong way.
-**Fix:** Option A: Set weight to 0% and redistribute (safety 32.5%, market structure 37.5%, bundle 25%, timing 5%). Option B: Invert — use LOW momentum as a positive signal (early entry before crowd). Track both approaches in performance data.
-**Files:** `onchain-scoring.ts` (weight constants)
-**Effort:** Small
-
-### 10. Social Bonus Correlation Check
-**Gap:** Social bonus adds up to +25 points — enough to push a 33-point token to 58 (above threshold). Unknown if social presence actually predicts micro-cap wins.
-**Fix:** Add `has_social_profiles` boolean to performance tracking. After 2 weeks of data, run correlation analysis. If not predictive, cap bonus at +10 or remove.
-**Files:** `signal-performance-tracker.ts` (add field), `signal-generator.ts` (record it)
-**Effort:** Small
+**Rationale:** More capital = more positions = need more signal sources. Current config throttles SMALL tier to 5 wallets, missing signals. Shadow mode already overrides `maxPositions` to 20 — it should also override `walletsMonitored` separately.
 
 ---
 
-## TIER 3: LEARNING SYSTEM IMPROVEMENTS
+## 2. Cache `getActiveWallets()` Results
 
-### 11. Add Holdout Validation Set
-**Gap:** Optimizer could overfit to last 7 days. No way to detect if threshold changes actually improve performance or just fit noise.
-**Fix:** Split signals 80/20 — optimizer trains on 80%, validates on 20%. Only apply changes if improvement shows on both sets. Use signal_id modulo for deterministic split.
-**Files:** `threshold-optimizer.ts`, `daily-auto-optimizer.ts`
-**Effort:** Medium
+**Problem:** `getActiveWallets()` runs a heavy SQL scoring query (12+ CASE expressions, full table scan with ORDER BY) and is called:
+- On startup
+- Every 10min (WS rotation)
+- Every new wallet discovery callback
+- Every wallet reactivation
 
-### 12. Faster Regime Adaptation
-**Gap:** Daily optimizer caps changes at 5% per cycle. In a market crash, it takes 10+ days to meaningfully tighten.
-**Fix:** Add "emergency adaptation" — if win rate drops below 15% over 48h sample (min 20 signals), allow 15% threshold change in a single cycle. Log as emergency adjustment.
-**Files:** `daily-auto-optimizer.ts`
-**Effort:** Small
+**File:** `src/modules/nansen/wallet-discovery.ts` (line 726)
 
-### 13. Track Interaction Effects
-**Gap:** Factor analysis looks at each metric independently. Doesn't capture "high holders + low liquidity = good" vs "low holders + low liquidity = bad".
-**Fix:** Add 2-factor interaction analysis to the daily report. For the top 3 predictive factors, compute win rates for each quadrant (high/high, high/low, low/high, low/low). Report to Telegram so you can see patterns.
-**Files:** `daily-auto-optimizer.ts` (factor analysis section)
-**Effort:** Medium
+**Changes:**
+- Add a `private cachedRankedWallets: { addresses: string[]; fetchedAt: number } | null` field
+- Cache results for 5 minutes (half the rotation interval)
+- Invalidate cache on wallet add/remove/deactivate operations
+- Add `invalidateWalletCache()` public method for external callers
 
-### 14. Close the 48h→72h Tracking Gap
-**Gap:** Signals have 72h time limit but tracking stops at 48h. 24 hours of untracked performance data.
-**Fix:** Extend tracking to 72h to match signal time limit. Or reduce signal time limit to 48h to match tracking.
-**Files:** `signal-performance-tracker.ts` (MAX_TRACKING_HOURS constant)
-**Effort:** Trivial
+**Impact:** Eliminates redundant DB queries during bursty wallet operations (startup runs seed + purge + enforce + cleanup + getActive in sequence).
 
 ---
 
-## TIER 4: FUTURE CONSIDERATIONS (Research First)
+## 3. Convert `walletAddresses` from Array to Set-Backed Structure
 
-### 15. Multivariate Threshold Optimization
-Replace simple win/loss averages with logistic regression on all factors simultaneously. Would capture interaction effects and non-linear relationships. Requires more data (500+ signals minimum).
+**Problem:** `walletAddresses: string[]` in `index.ts` uses:
+- `filter()` for removal — O(n) per eviction
+- `push()` for addition — O(1) but duplicates possible
+- `includes()` implicit in various checks — O(n)
+- Passed to `wsManager.connect()` which needs array
 
-### 16. Cross-Token Flow Detection
-Monitor when large holders of Token A start buying Token B. Indicates narrative rotation. Would need Helius webhook or frequent holder polling — API cost consideration.
+**File:** `src/index.ts` (line 90)
 
-### 17. Narrative/Sentiment Layer
-Add Twitter/Telegram monitoring for trending tickers. Would catch narrative-driven pumps before on-chain metrics react. Requires new API integration (Twitter API or scraping service).
+**Changes:**
+- Create a `WalletSlotManager` class that wraps a `Set<string>` + maintains an ordered array
+- Methods: `add(addr)`, `remove(addr)`, `has(addr)`, `toArray()`, `size`, `replace(old, new)`
+- Use internally everywhere `this.walletAddresses` is referenced
+- The `toArray()` call is only needed when passing to `wsManager.connect()`
 
-### 18. A/B Testing Framework
-Run two threshold sets simultaneously — send both signals but only trade one. Compare performance after N signals. Would require shadow signal tracking infrastructure.
+**Impact:** O(1) lookups and removals. Prevents duplicate subscriptions (currently possible if PumpPortal alpha + discovery both add same wallet).
 
 ---
 
-## IMPLEMENTATION ORDER
+## 4. Batch RPC Calls in `enforceTradeActivity()`
 
-**Phase 1 (immediate — wire existing code):**
-1, 4, 5, 9, 14 → Small changes, use what already exists
+**Problem:** `enforceTradeActivity()` makes sequential `getSignaturesForAddress` RPC calls for every active wallet — one at a time with 100ms delays every 10 wallets. With 50+ wallets this takes 5+ seconds blocking startup.
 
-**Phase 2 (this week — medium changes):**
-2, 3, 7, 8, 10, 12 → Direct edge improvements
+**File:** `src/modules/nansen/wallet-discovery.ts` (lines 499-588)
 
-**Phase 3 (next week — learning system):**
-6, 11, 13 → Better adaptation
+**Changes:**
+- Batch wallets into groups of 10
+- Use `Promise.allSettled()` per batch (parallel within batch, sequential between batches)
+- Reduce inter-batch delay from 1000ms to 200ms
+- Skip already-known-active wallets more aggressively (cache `last_active_at` in memory)
 
-**Phase 4 (research/future):**
-15-18 → Need more data or new infrastructure
+**Before:** 50 wallets × (100ms RPC + 100ms delay) = ~10s
+**After:** 50 wallets / 10 per batch × (100ms RPC parallel + 200ms delay) = ~1.2s
+
+---
+
+## 5. Consolidate Overlapping Cleanup Queries in `autoCleanup()`
+
+**Problem:** `autoCleanup()` runs 5 separate UPDATE queries that scan the same table:
+1. Stale wallets (no trade data)
+2. Slow holders (median >12h)
+3. Proven losers (<40% WR)
+4. Low alpha score (<15)
+5. Excess wallet cap
+
+Each does a full scan of `alpha_wallets WHERE active = TRUE`.
+
+**File:** `src/modules/nansen/wallet-discovery.ts` (lines 619-721)
+
+**Changes:**
+- Combine queries 1-4 into a single UPDATE with compound OR conditions
+- Return deactivation reasons via a CASE expression in the RETURNING clause
+- Keep query 5 (cap enforcement) separate since it depends on the result of 1-4
+
+**Before:** 5 DB round-trips
+**After:** 2 DB round-trips (combined cleanup + cap enforcement)
+
+---
+
+## 6. Improve WS Rotation Signal Tracking
+
+**Problem:** WS rotation (`rotateWsSlots()`) only tracks signal *count* per wallet. A wallet producing many low-quality signals (all failing validation) keeps its slot while a wallet producing one great signal gets evicted.
+
+**File:** `src/index.ts` (lines 1694-1763)
+
+**Changes:**
+- Track `wsSignalQuality: Map<string, { count: number; passed: number; totalScore: number }>` instead of just count
+- Weight by signal score: `quality = passed * 2 + (totalScore / count)`
+- Eviction threshold: quality < 1.0 (at least one passed signal OR several high-scoring attempts)
+- Wire signal scoring results back to rotation tracker in `handleSignal()` callback
+
+**Impact:** Keeps wallets that produce actionable signals, evicts wallets that only produce noise.
+
+---
+
+## 7. Add Recency Decay to Wallet Ranking Score
+
+**Problem:** The ranking query in `getActiveWallets()` uses `our_win_rate` and `our_avg_pnl_percent` which are all-time metrics. A wallet that was profitable 3 months ago but has been losing recently still ranks high.
+
+**File:** `src/modules/nansen/wallet-discovery.ts` (lines 729-791)
+
+**Changes:**
+- Add a `last_signal_at` timestamp column (updated whenever a wallet produces a signal)
+- Add recency decay to the scoring formula:
+  ```sql
+  -- Recency decay: reduce score for wallets with no recent signals
+  - CASE
+      WHEN last_signal_at IS NULL THEN 10
+      WHEN last_signal_at < NOW() - INTERVAL '7 days' THEN 15
+      WHEN last_signal_at < NOW() - INTERVAL '3 days' THEN 5
+      ELSE 0
+    END
+  ```
+- This stacks with the existing `last_active_at` bonus (which measures on-chain activity, not signal production for us)
+
+---
+
+## Implementation Order
+
+1. **Fix tier wallet counts** (5 min, config-only change, immediate impact)
+2. **Cache getActiveWallets()** (30 min, reduces DB load)
+3. **Batch RPC calls** (30 min, faster startup)
+4. **Consolidate cleanup queries** (20 min, reduces DB load)
+5. **WalletSlotManager class** (45 min, cleaner code + O(1) ops)
+6. **WS rotation signal quality** (30 min, better slot allocation)
+7. **Recency decay scoring** (20 min, better wallet ranking)
+
+---
+
+## Files Modified
+
+| File | Changes |
+|------|---------|
+| `src/config/index.ts` | Tier walletsMonitored values |
+| `src/modules/nansen/wallet-discovery.ts` | Cache, batched RPC, consolidated cleanup, recency decay |
+| `src/index.ts` | WalletSlotManager, signal quality tracking |
+| `src/db/database.ts` | Migration for `last_signal_at` column (if needed) |
+
+## Risk Assessment
+
+- **Low risk:** Items 1-5 are internal optimizations, no behavioral change
+- **Medium risk:** Items 6-7 change wallet selection logic, could affect signal coverage
+- **Mitigation:** All scoring changes are additive (new penalties), existing weights unchanged
+- **Rollback:** All changes are config/code only, no schema migrations required (except optional `last_signal_at`)

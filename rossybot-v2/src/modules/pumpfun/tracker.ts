@@ -59,9 +59,11 @@ export class PumpFunTracker {
 
   // Cumulative alpha sell tracking: positionId → total SOL sold by signal wallets
   private alphaExitAccumulator: Map<string, number> = new Map();
-  // Data: alpha exits are almost all losses (-0.0002 to -0.063◎). React faster to limit damage.
-  private static readonly ALPHA_EXIT_SINGLE_THRESHOLD = 0.3; // Single dump ≥0.3 SOL triggers exit (was 0.5 — too slow)
-  private static readonly ALPHA_EXIT_CUMULATIVE_THRESHOLD = 0.6; // Cumulative sells ≥0.6 SOL triggers exit (was 1.0)
+  // Data (538t): alpha exits at 0.3/0.6 triggered ~100+ exits, vast majority losses.
+  // 0.3 SOL = 24% of a 1.25 SOL entry — partial profit-taking, not panic dumping.
+  // Raise thresholds: only exit when alpha is genuinely bailing, not trimming.
+  private static readonly ALPHA_EXIT_SINGLE_THRESHOLD = 0.6; // Single dump ≥0.6 SOL triggers exit (was 0.3 — too hair-trigger)
+  private static readonly ALPHA_EXIT_CUMULATIVE_THRESHOLD = 1.2; // Cumulative sells ≥1.2 SOL triggers exit (was 0.6 — partial trims shouldn't panic us)
 
   // Live trading: when set, executes real swaps via Jupiter
   private swapExecutor: SwapExecutor | null = null;

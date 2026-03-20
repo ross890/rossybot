@@ -93,7 +93,7 @@ export const config = {
     // Strategy: enter at 30%+, TP earlier (36%), gate on velocity, tighter SL to limit damage.
     curveProfitTarget: 0.36,           // Sell at 36% curve fill (unchanged — tokens stall at 30-35%, take profit here)
     curveHardExit: 0.45,              // Force-exit at 45% (unchanged — pre-graduation safety valve)
-    curveEntryMin: 0.30,              // MINIMUM 30% curve fill (0-30% = -4.38 SOL, 12-18% WR death zone)
+    curveEntryMin: 0.33,              // MINIMUM 33% curve fill (30-35% zone: 31%WR but -1.37 SOL net — 33%+ captures the stronger half)
     curveEntryMax: 0.38,              // Maximum 38% curve fill — above this no room for TP
     curveVelocityMin: 0.5,            // Minimum 0.5 SOL/min velocity to enter (filter stalling tokens)
     graduationSellPct: 100,            // Sell 100% on any graduation (no lottery holds)
@@ -104,8 +104,8 @@ export const config = {
     slippageBps: 400,                  // 4% slippage (was 5% — 5% eats entire TP profit, tighter preserves gains)
     confluenceBonus: true,             // Track multi-wallet convergence on same token
     // --- Deferred entry watchlist ---
-    deferredEntryEnabled: true,        // When alpha buys early, add to watchlist instead of entering immediately
-    deferredEntryMaxWaitMs: 2 * 60_000, // Max 2 min to wait (was 3 — data shows deferred entries underperform, faster timeout)
+    deferredEntryEnabled: false,        // DISABLED — 8 trades, 0% WR, -0.83 SOL. Deferred entries consistently lose.
+    deferredEntryMaxWaitMs: 2 * 60_000, // Max 2 min to wait (moot while disabled)
   },
   // --- Graduation Bounce Discovery ---
   // Monitors freshly graduated pump.fun tokens for the post-graduation dip/recovery pattern.

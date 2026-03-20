@@ -94,13 +94,14 @@ function scoreWalletQuality(
     const blendedAvgPnl = ourWeight * ev.avgPnl + nansenWeight * nansenEstAvgPnl;
 
     // Soft floor: penalty multiplier for wallets below quality thresholds.
-    // Raised soft floor to 50% WR / 20% PnL to further deprioritize marginal wallets.
+    // Relaxed from 50%/20% — with confidence already at 0.4x for new wallets,
+    // double-penalizing makes it mathematically impossible to reach minSignalScore.
     let floorPenalty = 1.0;
-    if (blendedWinRate < 0.50) {
-      floorPenalty *= Math.max(0.3, blendedWinRate / 0.50);
+    if (blendedWinRate < 0.45) {
+      floorPenalty *= Math.max(0.5, blendedWinRate / 0.45);
     }
-    if (blendedAvgPnl < 20) {
-      floorPenalty *= Math.max(0.3, blendedAvgPnl / 20);
+    if (blendedAvgPnl < 10) {
+      floorPenalty *= Math.max(0.5, blendedAvgPnl / 10);
     }
 
     // Hard reject for bad wallets (raised from 30% WR / 5% PnL):

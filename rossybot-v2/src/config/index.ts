@@ -138,7 +138,7 @@ export const TIER_CONFIGS: Record<CapitalTier, TierConfig> = {
     momentumMax: 300,
     volumeMultiplierMin: 1,
     tokenMaxAgeDays: 14,              // 14 days max age (was 30 — stale tokens less interesting)
-    minSignalScore: 45,               // Raised from 35 — filter out low-quality signals
+    minSignalScore: 35,               // Lowered back from 45 — new wallets with 0.4 confidence can't mathematically reach 45
   },
   [CapitalTier.SMALL]: {
     tier: CapitalTier.SMALL,

@@ -418,16 +418,18 @@ export class PumpFunTracker {
       if (curveState?.exists) {
         const prevSol = pos.last_curve_check_sol;
 
-        // Spike protection (mirrors realtime path): reject single-tick drops > 50%
-        // Prevents false -100% PnL from transient RPC data or closed accounts
-        const solDelta = Math.abs(curveState.solBalance - prevSol);
-        const isHugeDrop = prevSol > 0 && curveState.solBalance < prevSol * 0.5;
-        if ((solDelta > 20 || isHugeDrop) && prevSol > 0) {
+        // Spike protection: only reject UPWARD spikes (likely bad RPC data / stale cache).
+        // DOWNWARD drops are REAL rug pulls — must always be processed so hardKill can fire.
+        // Previous logic rejected drops >50%, which deadlocked on rug pulls:
+        //   prevSol never updated → every subsequent check also rejected → position stuck until time limit.
+        //   Result: 230 stop losses at avg -79.7% instead of -10-15%.
+        const upwardJump = curveState.solBalance - prevSol > 20;
+        if (upwardJump && prevSol > 0) {
           logger.warn({
             token: pos.token_symbol || pos.token_address.slice(0, 8),
             prevSol: prevSol.toFixed(1),
             newSol: curveState.solBalance.toFixed(1),
-          }, 'RPC curve update spike rejected');
+          }, 'RPC curve update spike rejected (upward anomaly)');
           return;
         }
 
@@ -848,20 +850,19 @@ export class PumpFunTracker {
       // Real SOL ≈ vSol - 30 (pump.fun uses 30 SOL virtual reserve)
       const realSol = Math.max(0, vSolInBondingCurve - 30);
 
-      // Spike protection: reject wild jumps in curve fill from a single event.
-      // Prevents false -100% PnL (transient sell dip) and false 100% fill (anomalous data).
+      // Spike protection: only reject UPWARD spikes (likely anomalous PumpPortal data).
+      // DOWNWARD drops must always be processed — they're real rug pulls that need immediate hardKill.
+      // Previous logic rejected drops >50%, creating a deadlock where prevSol never updated
+      // and the position was stuck until the 10-min time limit (avg loss: -79.7%).
       const prevSol = pos.last_curve_check_sol;
-      const solDelta = Math.abs(realSol - prevSol);
-      // Reject absolute jumps > 20 SOL OR drops > 50% in a single event (likely bad data)
-      const isHugeDrop = prevSol > 0 && realSol < prevSol * 0.5;
-      if ((solDelta > 20 || isHugeDrop) && prevSol > 0) {
+      const upwardJump = realSol - prevSol > 20;
+      if (upwardJump && prevSol > 0) {
         logger.warn({
           token: tokenMint.slice(0, 8),
           prevSol: prevSol.toFixed(1),
           newSol: realSol.toFixed(1),
-          delta: solDelta.toFixed(1),
           vSol: vSolInBondingCurve.toFixed(1),
-        }, 'Curve update spike rejected — anomalous single event');
+        }, 'Curve update spike rejected (upward anomaly)');
         return;
       }
 

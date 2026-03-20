@@ -144,7 +144,7 @@ export const TIER_CONFIGS: Record<CapitalTier, TierConfig> = {
     tier: CapitalTier.SMALL,
     maxPositions: 3,
     walletsMonitored: 35,              // 35 WS slots (was 5 — too restrictive, missed signals)
-    positionSizePct: 0.20,            // 20% per position (was 40% — 3×40%=120% was over-allocated)
+    positionSizePct: 0.20,            // 20% per position — ~0.33 SOL at 6.6 SOL capital (was 40%)
     minPositionSol: 0.3,
     profitTarget: 0.40,
     stopLoss: -0.20,
@@ -153,14 +153,14 @@ export const TIER_CONFIGS: Record<CapitalTier, TierConfig> = {
     walletConfluenceRequired: 1,
     confluenceWindow: 30,
     timeKills: [
-      { hours: 1, minPnlPct: 0.05 },
-      { hours: 4, minPnlPct: 0.15 },
-      { hours: 12, minPnlPct: 0.25 },
+      { hours: 1, minPnlPct: -0.05 },  // Cut losers at 1h (was +5% — too aggressive, killed $Pete-type wins)
+      { hours: 2, minPnlPct: 0.10 },   // Must be +10% by 2h
+      { hours: 6, minPnlPct: 0.20 },   // Must be +20% by 6h
     ],
-    hardTimeHours: 48,
-    mcapMin: 200_000,
-    mcapMax: 2_000_000,
-    liquidityMin: 30_000,
+    hardTimeHours: 24,                 // 24h hard cap (was 48h — memecoins resolve fast)
+    mcapMin: 50_000,                   // $50K min (was $200K — best DEX wins were $52K-$144K mcap)
+    mcapMax: 5_000_000,               // $5M max (was $2M — opens more signal space)
+    liquidityMin: 15_000,              // $15K min (was $30K — $WORTHLESS had $36K liq, $Chibify $21K)
     momentumWindow: '24h',
     momentumMin: -50,
     momentumMax: 200,
@@ -274,7 +274,7 @@ export function getTierConfig(tier: CapitalTier): TierConfig {
     ...base,
     walletsMonitored: 50,      // Max WS coverage in shadow mode for data collection
     maxPositions: 20,         // 20 concurrent — shadow mode is data collection, not risk-managed
-    positionSizePct: 0.05,    // 5% per shadow position — keeps simulated P&L realistic at 20 positions
+    positionSizePct: 0.10,    // 10% per shadow position (was 5% — user wants 0.5-1 SOL bids for bigger wins)
     minSignalScore: 20,       // Lower from 35 — shadow mode needs to cast a wide net to build wallet performance data
     mcapMin: 50_000,          // $50K (was $200K)
     mcapMax: 10_000_000,      // $10M (was $2M) — $30M+ is noise at micro capital

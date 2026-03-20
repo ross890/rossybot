@@ -51,8 +51,8 @@ export class GraduationAnalyzer {
   // Rate limiting for Helius RPC
   private static readonly RPC_DELAY_MS = 200; // 200ms between RPC calls
   private static readonly MAX_TOKENS_PER_RUN = 200; // Process up to 200 tokens per run
-  private static readonly MIN_GRADUATIONS_FOR_PROMOTION = 3; // Need 3+ graduated token hits
-  private static readonly MIN_WIN_RATE_FOR_PROMOTION = 0.40; // 40% of observed tokens must have graduated
+  private static readonly MIN_GRADUATIONS_FOR_PROMOTION = 2; // Need 2+ graduated token hits (was 3 — catch more early-stage signal wallets)
+  private static readonly MIN_WIN_RATE_FOR_PROMOTION = 0.30; // 30% of observed tokens must have graduated (was 40% — memecoins are noisy)
   private static readonly EARLY_BUYER_LIMIT = 50; // Top 50 earliest transactions per token
 
   /**

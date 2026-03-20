@@ -16,8 +16,8 @@ interface WalletCandidate {
   score: number;
 }
 
-// Cap total active wallets — raised to 200 for larger seed lists
-const MAX_ACTIVE_WALLETS = 200;
+// Cap total active wallets — raised to 300 for broader signal coverage
+const MAX_ACTIVE_WALLETS = 300;
 // Wallets with no trade data after 3 days get cut
 const STALE_WALLET_DAYS = 3;
 
@@ -116,9 +116,9 @@ export class WalletDiscovery {
     return count;
   }
 
-  /** Deactivate wallets below $1K PnL minimum (run on startup to clean existing data) */
+  /** Deactivate wallets below $500 PnL minimum (run on startup to clean existing data) */
   async enforceMinimumPnl(): Promise<number> {
-    const MIN_PNL_USD = 1_000;
+    const MIN_PNL_USD = 500;
     const result = await query(
       `UPDATE alpha_wallets SET active = FALSE
        WHERE active = TRUE
@@ -142,7 +142,7 @@ export class WalletDiscovery {
   async purgeWeakWallets(): Promise<number> {
     const gracePeriod = new Date(Date.now() - STALE_WALLET_DAYS * 24 * 60 * 60 * 1000);
 
-    // 1. Non-seed wallets: original rules (no data past grace, bad alpha, bag holders)
+    // 1. Non-seed wallets: relaxed rules (more grace period before cutting)
     const discoveredResult = await query(
       `UPDATE alpha_wallets SET active = FALSE
        WHERE active = TRUE
@@ -150,25 +150,25 @@ export class WalletDiscovery {
          AND (
            (COALESCE(our_total_trades, 0) = 0 AND COALESCE(round_trips_analyzed, 0) = 0
             AND discovered_at < $1)
-           OR (COALESCE(round_trips_analyzed, 0) >= 3 AND COALESCE(short_term_alpha_score, 0) < 25)
-           OR (COALESCE(median_hold_time_mins, 0) > 720 AND COALESCE(round_trips_analyzed, 0) >= 3)
+           OR (COALESCE(round_trips_analyzed, 0) >= 5 AND COALESCE(short_term_alpha_score, 0) < 15)
+           OR (COALESCE(median_hold_time_mins, 0) > 720 AND COALESCE(round_trips_analyzed, 0) >= 5)
          )
        RETURNING address`,
       [gracePeriod],
     );
 
     // 2. Seed wallets: deactivate if they have enough data proving they're bad
-    //    - 5+ trades with <40% WR (proven loser with meaningful sample)
-    //    - 5+ trades with negative avg PnL (net losing money)
-    //    - Alpha score <20 with 3+ rounds analyzed (bad within our exit windows)
+    //    - 8+ trades with <25% WR (proven loser with meaningful sample — was 5/<40%)
+    //    - 8+ trades with very negative avg PnL (was 5/negative)
+    //    - Alpha score <10 with 5+ rounds analyzed (was <20/3+ — need more data before cutting seeds)
     const seedResult = await query(
       `UPDATE alpha_wallets SET active = FALSE
        WHERE active = TRUE
          AND source IN ('NANSEN_SEED', 'PUMPFUN_SEED', 'GRADUATION_SEED')
          AND (
-           (COALESCE(our_total_trades, 0) >= 5 AND COALESCE(our_win_rate, 0) < 0.40)
-           OR (COALESCE(our_total_trades, 0) >= 5 AND COALESCE(our_avg_pnl_percent, 0) < 0)
-           OR (COALESCE(round_trips_analyzed, 0) >= 3 AND COALESCE(short_term_alpha_score, 0) < 20)
+           (COALESCE(our_total_trades, 0) >= 8 AND COALESCE(our_win_rate, 0) < 0.25)
+           OR (COALESCE(our_total_trades, 0) >= 8 AND COALESCE(our_avg_pnl_percent, 0) < -0.10)
+           OR (COALESCE(round_trips_analyzed, 0) >= 5 AND COALESCE(short_term_alpha_score, 0) < 10)
          )
        RETURNING address, label`,
     );
@@ -195,7 +195,7 @@ export class WalletDiscovery {
       () => this.runDiscovery(),
       config.nansen.discoveryIntervalMs,
     );
-    logger.info('Wallet discovery scheduler started (every 1h)');
+    logger.info('Wallet discovery scheduler started (every 15min)');
   }
 
   stop(): void {
@@ -224,6 +224,15 @@ export class WalletDiscovery {
         logger.warn({ err }, 'DEX smart money discovery failed (non-fatal)');
       }
 
+      // Discover wallets via smart money netflow — find tokens with high inflows,
+      // then pull PnL leaders for those tokens. Different signal from screener (flow vs trending).
+      let netflowResult = { added: 0, candidates: 0 };
+      try {
+        netflowResult = await this.discoverNetflowTraders();
+      } catch (err) {
+        logger.warn({ err }, 'Netflow wallet discovery failed (non-fatal)');
+      }
+
       const walletsRemoved = await this.validateExistingWallets();
 
       // Run hold-time analysis on all active wallets
@@ -241,11 +250,11 @@ export class WalletDiscovery {
       // Auto-cleanup: remove stale, slow, and excess wallets
       const cleanup = await this.autoCleanup();
 
-      const totalAdded = result.added + dexResult.added;
+      const totalAdded = result.added + dexResult.added + netflowResult.added;
       const totalRemoved = walletsRemoved + holdTimeResults.deactivated.length + cleanup.removed;
       const duration = Date.now() - start;
-      await this.logDiscovery(result.tokensScreened, result.candidates + dexResult.candidates, totalAdded,
-        totalRemoved, duration);
+      await this.logDiscovery(result.tokensScreened, result.candidates + dexResult.candidates + netflowResult.candidates,
+        totalAdded, totalRemoved, duration);
 
       logger.info({
         tokensScreened: result.tokensScreened,
@@ -253,6 +262,8 @@ export class WalletDiscovery {
         pnlAdded: result.added,
         dexCandidates: dexResult.candidates,
         dexAdded: dexResult.added,
+        netflowCandidates: netflowResult.candidates,
+        netflowAdded: netflowResult.added,
         removed: totalRemoved,
         holdTimeDemoted: holdTimeResults.demoted.length,
         cleanupReasons: cleanup.reasons,
@@ -279,11 +290,11 @@ export class WalletDiscovery {
     let tokens: { address: string; symbol: string }[] = [];
     try {
       const screenerResults = await this.nansen.tokenScreener({
-        mcapMin: 50_000,
+        mcapMin: 20_000,           // $20K min (was $50K — catch earlier stage tokens)
         mcapMax: 50_000_000,
-        liquidityMin: 5_000,
-        minTraders: 5,
-        limit: 50,
+        liquidityMin: 2_000,       // $2K min (was $5K — match our entry rules)
+        minTraders: 3,             // 3 traders min (was 5 — catch less crowded tokens)
+        limit: 75,                 // 75 tokens (was 50 — wider funnel)
       });
       tokens = screenerResults.map((t) => ({ address: t.token_address, symbol: t.token_symbol }));
       logger.info({ count: tokens.length }, 'Token screener returned tokens');
@@ -297,9 +308,10 @@ export class WalletDiscovery {
       return { added: 0, candidates: 0, tokensScreened: 0 };
     }
 
-    // Step 2: For the top 25 tokens, pull 30-day PnL leaderboard to find top profitable traders
-    // 25 tokens keeps us within rate limits (1 screener + 25 leaderboard = 26 calls/cycle, limit is 80/min)
-    const tokensToProcess = tokens.slice(0, 25);
+    // Step 2: For the top 40 tokens, pull 30-day PnL leaderboard to find top profitable traders
+    // 40 tokens keeps us within rate limits (1 screener + 40 leaderboard = 41 calls/cycle, limit is 80/min)
+    // More tokens screened = more unique traders discovered per cycle
+    const tokensToProcess = tokens.slice(0, 40);
     const walletScores = new Map<string, {
       label: string;
       totalPnl: number;
@@ -369,15 +381,15 @@ export class WalletDiscovery {
       });
     }
 
-    // Filter out wallets below PnL minimum — lowered to $1K for quick-flip micro traders
-    const MIN_PNL_USD = 1_000;
+    // Filter out wallets below PnL minimum — lowered to $500 to catch more early-stage profitable traders
+    const MIN_PNL_USD = 500;
     const qualifiedCandidates = candidates.filter((c) => c.totalVolumeUsd >= MIN_PNL_USD);
     logger.info({
       total: candidates.length,
       qualified: qualifiedCandidates.length,
       filtered: candidates.length - qualifiedCandidates.length,
       minPnl: MIN_PNL_USD,
-    }, 'Applied $1K minimum PnL filter');
+    }, 'Applied $500 minimum PnL filter');
 
     qualifiedCandidates.sort((a, b) => b.score - a.score);
     let added = 0;
@@ -411,8 +423,8 @@ export class WalletDiscovery {
       mcapSum: number;
     }>();
 
-    // Pull 3 pages of recent smart money DEX trades in our target mcap range
-    const pages = 3;
+    // Pull 5 pages of recent smart money DEX trades in our target mcap range (was 3 — more pages = more unique wallets)
+    const pages = 5;
     for (let page = 1; page <= pages; page++) {
       try {
         const trades = await this.nansen.smartMoneyDexTrades({
@@ -467,8 +479,8 @@ export class WalletDiscovery {
     const candidates: WalletCandidate[] = [];
     for (const [addr, data] of walletActivity) {
       const tokensTraded = data.tokensTraded.size;
-      // Require: 2+ trades across 2+ different tokens, $500+ total volume
-      if (data.tradeCount < 2 || tokensTraded < 2 || data.totalValueUsd < 500) continue;
+      // Require: 1+ trades across 1+ different tokens, $200+ total volume (was 2/2/$500 — catch more active wallets)
+      if (data.tradeCount < 1 || tokensTraded < 1 || data.totalValueUsd < 200) continue;
 
       // Compute average mcap — prefer wallets trading smaller caps (our sweet spot)
       const avgMcap = data.tradeCount > 0 ? data.mcapSum / data.tradeCount : 0;
@@ -492,9 +504,9 @@ export class WalletDiscovery {
 
     candidates.sort((a, b) => b.score - a.score);
 
-    // Add top candidates (cap at 20 per cycle to avoid flooding)
+    // Add top candidates (cap at 40 per cycle — was 20, more aggressive discovery)
     let added = 0;
-    for (const c of candidates.slice(0, 20)) {
+    for (const c of candidates.slice(0, 40)) {
       if (await this.addWallet(c)) added++;
     }
 
@@ -503,6 +515,102 @@ export class WalletDiscovery {
       qualified: candidates.length,
       added,
     }, 'DEX smart money discovery complete');
+    return { added, candidates: candidates.length };
+  }
+
+  /**
+   * Discover wallets via smart money netflow — find tokens receiving the most
+   * smart money inflows, then pull PnL leaderboards for those tokens.
+   * This catches wallets accumulating tokens before they trend on the screener.
+   * Uses ~11 API calls per cycle (1 netflow + up to 10 leaderboard).
+   */
+  private async discoverNetflowTraders(): Promise<{ added: number; candidates: number }> {
+    // Step 1: Get tokens with highest smart money net inflows
+    const netflowTokens = await this.nansen.smartMoneyNetflow({
+      mcapMin: 30_000,
+      minTraders: 2,
+      limit: 15,
+    });
+
+    if (netflowTokens.length === 0) {
+      logger.info('No smart money netflow tokens found');
+      return { added: 0, candidates: 0 };
+    }
+
+    logger.info({ count: netflowTokens.length }, 'Smart money netflow tokens found');
+
+    // Step 2: For the top 10 netflow tokens, pull PnL leaderboard
+    const walletScores = new Map<string, {
+      label: string;
+      totalPnl: number;
+      totalTrades: number;
+      tokensFound: number;
+      bestRoi: number;
+    }>();
+
+    const tokensToCheck = netflowTokens.slice(0, 10);
+    for (const token of tokensToCheck) {
+      try {
+        const leaders = await this.nansen.tokenPnlLeaderboard(token.token_address, {
+          pnlUsdMin: 50,
+          tradesMin: 1,
+          limit: 30,
+        });
+
+        for (const leader of leaders) {
+          if (!leader.trader_address || leader.pnl_usd_total <= 0) continue;
+
+          const existing = walletScores.get(leader.trader_address) || {
+            label: leader.trader_address_label || leader.trader_address.slice(0, 8),
+            totalPnl: 0, totalTrades: 0, tokensFound: 0, bestRoi: 0,
+          };
+          existing.totalPnl += leader.pnl_usd_total;
+          existing.totalTrades += leader.nof_trades;
+          existing.tokensFound++;
+          existing.bestRoi = Math.max(existing.bestRoi, leader.roi_percent_total || 0);
+          walletScores.set(leader.trader_address, existing);
+        }
+      } catch (err: unknown) {
+        const axErr = err as { response?: { status?: number }; message?: string };
+        if (axErr.response?.status === 403 || axErr.response?.status === 429) {
+          logger.warn({ status: axErr.response.status }, 'Netflow leaderboard rate limited');
+          break;
+        }
+      }
+    }
+
+    // Step 3: Score and add — lower PnL bar since these are flow-based (early accumulation)
+    const candidates: WalletCandidate[] = [];
+    for (const [addr, data] of walletScores) {
+      if (data.totalPnl < 200) continue; // $200 min (lower than PnL discovery — these are early signals)
+
+      const pnlScore = Math.min(Math.log10(Math.max(data.totalPnl, 1)) / 5, 1) * 0.35;
+      const tradeScore = Math.min(data.totalTrades / 15, 1) * 0.30;
+      const diversityScore = Math.min(data.tokensFound / 3, 1) * 0.35;
+
+      candidates.push({
+        address: addr,
+        label: `nf_sm_${data.label.slice(0, 6)} | PnL $${data.totalPnl >= 1000 ? (data.totalPnl / 1000).toFixed(0) + 'K' : data.totalPnl.toFixed(0)}`,
+        tradeCount: data.totalTrades,
+        totalVolumeUsd: data.totalPnl,
+        tokensTraded: data.tokensFound,
+        bestRoi: data.bestRoi,
+        score: pnlScore + tradeScore + diversityScore,
+      });
+    }
+
+    candidates.sort((a, b) => b.score - a.score);
+    let added = 0;
+    for (const c of candidates.slice(0, 30)) {
+      if (await this.addWallet(c)) added++;
+    }
+
+    logger.info({
+      netflowTokens: tokensToCheck.length,
+      tradersFound: walletScores.size,
+      qualified: candidates.length,
+      added,
+    }, 'Netflow wallet discovery complete');
     return { added, candidates: candidates.length };
   }
 
@@ -516,10 +624,10 @@ export class WalletDiscovery {
 
       if (existing.length > 0 && !existing[0].active) {
         // Previously deactivated — only reactivate if it was deactivated because it
-        // had no data (score is null), not because it was proven bad (score < 25)
+        // had no data (score is null), not because it was proven bad (score < 15)
         const score = existing[0].short_term_alpha_score;
-        if (score !== null && score < 25) {
-          // Proven bad — don't reactivate
+        if (score !== null && score < 15) {
+          // Proven bad — don't reactivate (was < 25, lowered to give more second chances)
           return false;
         }
         // No score yet or decent score — reactivate
@@ -580,10 +688,10 @@ export class WalletDiscovery {
       `UPDATE alpha_wallets SET tier = 'B' WHERE tier = 'A' AND consecutive_losses >= 2`,
     );
 
-    // Deactivate: 3 consecutive losses — now applies to ALL wallets including seeds
+    // Deactivate: 5 consecutive losses — applies to ALL wallets (was 3 — too aggressive for memecoins)
     const deactivated = await query(
       `UPDATE alpha_wallets SET active = FALSE
-       WHERE active = TRUE AND consecutive_losses >= 3
+       WHERE active = TRUE AND consecutive_losses >= 5
        RETURNING address, label, source`,
     );
     if ((deactivated.rowCount || 0) > 0) {
@@ -595,16 +703,16 @@ export class WalletDiscovery {
       }
     }
 
-    // Deactivate wallets below $1K PnL minimum (skip seed wallets which may lack PnL data)
+    // Deactivate wallets below $500 PnL minimum (skip seed wallets which may lack PnL data)
     const pnlPurged = await query(
       `UPDATE alpha_wallets SET active = FALSE
        WHERE active = TRUE
          AND source NOT IN ('NANSEN_SEED', 'PUMPFUN_SEED', 'GRADUATION_SEED')
-         AND COALESCE(nansen_pnl_usd, 0) < 1000
+         AND COALESCE(nansen_pnl_usd, 0) < 500
        RETURNING address`,
     );
     if ((pnlPurged.rowCount || 0) > 0) {
-      logger.info({ count: pnlPurged.rowCount }, 'Deactivated wallets below $1K PnL minimum');
+      logger.info({ count: pnlPurged.rowCount }, 'Deactivated wallets below $500 PnL minimum');
     }
 
     // Check on-chain trade activity via Helius
@@ -776,12 +884,12 @@ export class WalletDiscovery {
          -- Slow holders: median hold >12h with 3+ analyzed trips
          OR (COALESCE(median_hold_time_mins, 0) > 720
              AND COALESCE(round_trips_analyzed, 0) >= 3)
-         -- Proven losers: 5+ trades with <40% WR or negative avg PnL
-         OR (COALESCE(our_total_trades, 0) >= 5
-             AND (COALESCE(our_win_rate, 0) < 0.40 OR COALESCE(our_avg_pnl_percent, 0) < 0))
-         -- Low alpha score: <15 with 3+ rounds analyzed
-         OR (COALESCE(round_trips_analyzed, 0) >= 3
-             AND COALESCE(short_term_alpha_score, 0) < 15)
+         -- Proven losers: 8+ trades with <30% WR or very negative avg PnL (was 5t/<40% — too aggressive for memecoins)
+         OR (COALESCE(our_total_trades, 0) >= 8
+             AND (COALESCE(our_win_rate, 0) < 0.30 OR COALESCE(our_avg_pnl_percent, 0) < -0.10))
+         -- Low alpha score: <10 with 5+ rounds analyzed (was <15 with 3+ — more data needed before cutting)
+         OR (COALESCE(round_trips_analyzed, 0) >= 5
+             AND COALESCE(short_term_alpha_score, 0) < 10)
        )
        RETURNING address,
          CASE

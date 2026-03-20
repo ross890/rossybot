@@ -59,8 +59,9 @@ export class PumpFunTracker {
 
   // Cumulative alpha sell tracking: positionId → total SOL sold by signal wallets
   private alphaExitAccumulator: Map<string, number> = new Map();
-  private static readonly ALPHA_EXIT_SINGLE_THRESHOLD = 0.5; // Single dump ≥0.5 SOL triggers exit
-  private static readonly ALPHA_EXIT_CUMULATIVE_THRESHOLD = 1.0; // Cumulative sells ≥1.0 SOL triggers exit
+  // Data: alpha exits are almost all losses (-0.0002 to -0.063◎). React faster to limit damage.
+  private static readonly ALPHA_EXIT_SINGLE_THRESHOLD = 0.3; // Single dump ≥0.3 SOL triggers exit (was 0.5 — too slow)
+  private static readonly ALPHA_EXIT_CUMULATIVE_THRESHOLD = 0.6; // Cumulative sells ≥0.6 SOL triggers exit (was 1.0)
 
   // Live trading: when set, executes real swaps via Jupiter
   private swapExecutor: SwapExecutor | null = null;
@@ -451,9 +452,9 @@ export class PumpFunTracker {
         // --- DEFENSIVE EXITS ---
 
         // 3. Curve stall exit — compare SOL growth since ENTRY (not last 5s check)
-        //    Stale time reduced from 3min to 1.5min — data shows avg hold is 2min, stalls resolve fast
+        //    Data: "23min stall" = solDelta was >0.5 but very slow. Lowered threshold to 0.3 SOL.
         const solDeltaSinceEntry = curveState.solBalance - pos.sol_in_curve_at_entry;
-        if (holdMins >= cfg.staleTimeKillMins && solDeltaSinceEntry <= 0.5) {
+        if (holdMins >= cfg.staleTimeKillMins && solDeltaSinceEntry <= 0.3) {
           await this.closePosition(pos, 'Stall (no momentum)');
           return;
         }

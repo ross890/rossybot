@@ -147,7 +147,8 @@ class RossyBotV2 {
   private walletQualityCache: Map<string, {
     label: string; our_total_trades: number; our_win_rate: number;
     our_avg_pnl_percent: number; consecutive_losses: number;
-    avg_buy_size_sol: number; cachedAt: number;
+    avg_buy_size_sol: number; short_term_alpha_score: number;
+    round_trips_analyzed: number; cachedAt: number;
   } | null> = new Map();
   private static readonly WALLET_QUALITY_CACHE_TTL_MS = 30 * 60_000; // 30 min
 
@@ -1184,9 +1185,12 @@ class RossyBotV2 {
         const dbRow = await (await import('./db/database.js')).getOne<{
           label: string; our_total_trades: number; our_win_rate: number;
           our_avg_pnl_percent: number; consecutive_losses: number; avg_buy_size_sol: number;
+          short_term_alpha_score: number; round_trips_analyzed: number;
         }>(
           `SELECT label, our_total_trades, our_win_rate, our_avg_pnl_percent, consecutive_losses,
-                  COALESCE(avg_buy_size_sol, 0) as avg_buy_size_sol
+                  COALESCE(avg_buy_size_sol, 0) as avg_buy_size_sol,
+                  COALESCE(short_term_alpha_score, 0) as short_term_alpha_score,
+                  COALESCE(round_trips_analyzed, 0) as round_trips_analyzed
            FROM alpha_wallets WHERE address = $1`, [signal.walletAddress],
         );
         walletRow = dbRow ? { ...dbRow, cachedAt: Date.now() } : null;
@@ -1197,9 +1201,12 @@ class RossyBotV2 {
           const dbRow = await (await import('./db/database.js')).getOne<{
             label: string; our_total_trades: number; our_win_rate: number;
             our_avg_pnl_percent: number; consecutive_losses: number; avg_buy_size_sol: number;
+            short_term_alpha_score: number; round_trips_analyzed: number;
           }>(
             `SELECT label, our_total_trades, our_win_rate, our_avg_pnl_percent, consecutive_losses,
-                    COALESCE(avg_buy_size_sol, 0) as avg_buy_size_sol
+                    COALESCE(avg_buy_size_sol, 0) as avg_buy_size_sol,
+                    COALESCE(short_term_alpha_score, 0) as short_term_alpha_score,
+                    COALESCE(round_trips_analyzed, 0) as round_trips_analyzed
              FROM alpha_wallets WHERE address = $1`, [signal.walletAddress],
           );
           this.walletQualityCache.set(signal.walletAddress, dbRow ? { ...dbRow, cachedAt: Date.now() } : null);
@@ -1207,21 +1214,36 @@ class RossyBotV2 {
       }
       const walletLabel = walletRow?.label || signal.walletAddress.slice(0, 8);
 
-      // Skip wallets with proven bad track records (3+ trades, <30% WR or 2+ consecutive losses)
+      // Skip wallets with proven bad track records — tighter thresholds:
+      // 1. 3+ trades: <40% WR, 2+ consecutive losses, or negative avg PnL
+      // 2. 3+ rounds analyzed: alpha score <15 (not profitable in our exit windows)
       if (walletRow && walletRow.our_total_trades >= 3) {
         const wr = walletRow.our_win_rate;
         const consLosses = walletRow.consecutive_losses || 0;
-        if (wr < 0.30 || consLosses >= 2) {
+        const avgPnl = walletRow.our_avg_pnl_percent || 0;
+        if (wr < 0.40 || consLosses >= 2 || avgPnl < -0.05) {
           logger.info({
             token: mint.slice(0, 8), wallet: walletLabel,
-            winRate: `${(wr * 100).toFixed(0)}%`, consLosses,
+            winRate: `${(wr * 100).toFixed(0)}%`, consLosses, avgPnl: `${(avgPnl * 100).toFixed(1)}%`,
           }, 'Pump.fun REJECTED — wallet quality too low');
           await this.telegram.send(
             `⛔ SKIP · ${mint.slice(0, 8)} · Bad wallet\n` +
-            `└ ${walletLabel} · WR ${(wr * 100).toFixed(0)}% · ${consLosses} consecutive losses`,
+            `└ ${walletLabel} · WR ${(wr * 100).toFixed(0)}% · PnL ${(avgPnl * 100).toFixed(1)}% · ${consLosses} consec losses`,
           );
           return;
         }
+      }
+      // Alpha score gate: if we have hold-time analysis data, reject low-alpha wallets
+      if (walletRow && walletRow.round_trips_analyzed >= 3 && walletRow.short_term_alpha_score < 15) {
+        logger.info({
+          token: mint.slice(0, 8), wallet: walletLabel,
+          alpha: walletRow.short_term_alpha_score, rounds: walletRow.round_trips_analyzed,
+        }, 'Pump.fun REJECTED — alpha score too low');
+        await this.telegram.send(
+          `⛔ SKIP · ${mint.slice(0, 8)} · Low alpha\n` +
+          `└ ${walletLabel} · Alpha ${walletRow.short_term_alpha_score}/100 · ${walletRow.round_trips_analyzed} rounds`,
+        );
+        return;
       }
 
       // Update wallet's avg buy size from observed buys (exponential moving average)

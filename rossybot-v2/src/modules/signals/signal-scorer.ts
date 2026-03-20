@@ -93,20 +93,22 @@ function scoreWalletQuality(
     const blendedWinRate = ourWeight * ev.winRate + nansenWeight * nansenEstWinRate;
     const blendedAvgPnl = ourWeight * ev.avgPnl + nansenWeight * nansenEstAvgPnl;
 
-    // Soft floor: instead of binary pass/fail, apply a penalty multiplier.
-    // Wallets above threshold get 1.0 (no penalty).
-    // Wallets below get a proportional penalty, not outright rejection.
-    // Only truly terrible wallets (<30% WR AND <5% PnL) get hard-rejected.
+    // Soft floor: penalty multiplier for wallets below quality thresholds.
+    // Raised soft floor to 50% WR / 20% PnL to further deprioritize marginal wallets.
     let floorPenalty = 1.0;
-    if (blendedWinRate < 0.45) {
-      floorPenalty *= Math.max(0.3, blendedWinRate / 0.45);
+    if (blendedWinRate < 0.50) {
+      floorPenalty *= Math.max(0.3, blendedWinRate / 0.50);
     }
-    if (blendedAvgPnl < 15) {
-      floorPenalty *= Math.max(0.3, blendedAvgPnl / 15);
+    if (blendedAvgPnl < 20) {
+      floorPenalty *= Math.max(0.3, blendedAvgPnl / 20);
     }
 
-    // Hard reject only for genuinely bad wallets
-    if (!(blendedWinRate < 0.30 && blendedAvgPnl < 5)) {
+    // Hard reject for bad wallets (raised from 30% WR / 5% PnL):
+    // - <40% WR AND <10% avg PnL → reject
+    // - Alpha score <15 with 3+ trades → reject (not profitable in our exit windows)
+    const meetsQuality = blendedWinRate >= 0.40 || blendedAvgPnl >= 10;
+    const failsAlpha = ev.shortTermAlpha < 15 && ev.trades >= 3;
+    if (meetsQuality && !failsAlpha) {
       anyWalletPassesFloor = true;
     }
 

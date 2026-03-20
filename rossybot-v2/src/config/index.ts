@@ -1,5 +1,8 @@
 import { z } from 'zod';
 import dotenv from 'dotenv';
+import { readFileSync } from 'fs';
+import { resolve, dirname } from 'path';
+import { fileURLToPath } from 'url';
 import { CapitalTier, type TierConfig } from '../types/index.js';
 
 dotenv.config();
@@ -222,60 +225,38 @@ export const TIER_CONFIGS: Record<CapitalTier, TierConfig> = {
   },
 };
 
-// Seed wallets
-export const SEED_WALLETS: Array<{
+// Seed wallets — loaded from wallets.json (edit that file to add/remove wallets)
+export type SeedWallet = {
   address: string;
   label: string;
   minTier: CapitalTier;
   pumpfunOnly?: boolean;
-}> = [
-  // --- Nansen / general alpha wallets ---
-  { address: '7Z5VhcNSpMpaTVqRg8QTkySw6syfcTehTx8CqRPvf9bg', label: 'nansen_smart_1', minTier: CapitalTier.MICRO },
-  { address: '2sqTwLCEqKxmyUq79HVL4bwS6QjvfMtnqnZznLFmwJMi', label: 'nansen_349roi', minTier: CapitalTier.MICRO },
-  { address: '5MigbXPuoCBzzDXBHMxRKudWmby4BVDQckZLAB6ti1RF', label: 'nansen_sniper', minTier: CapitalTier.MICRO },
-  { address: 'raTD4azgmsFHVWe4qrRhhSbgiUVtgbWYEMgXKzNX6FK', label: 'nansen_sniper_2', minTier: CapitalTier.SMALL },
-  { address: 'FUHyQNZ4bLZF7f4EfrxcKHfh9u7uz98ALvvMAKMj4QBo', label: 'nansen_realizer', minTier: CapitalTier.SMALL },
-  { address: '7iRo63BzGA3BoXyNhrhR3WNzBzRN1WP4bDik4Q5t9fDR', label: 'nansen_okc', minTier: CapitalTier.MEDIUM },
-  { address: 'DP4QTfM8HUvUP8hHXuGpTinoJYrYV6XhuFLPP3EYrChq', label: 'nansen_active_1', minTier: CapitalTier.MEDIUM },
-  { address: 'AgmLJBMDCqWynYnQiPCuj9ewsNNsBJXyzoUhD9LJzN51', label: 'alpha_big_conviction', minTier: CapitalTier.MICRO },
+};
 
-  // --- Pump.fun bonding curve alpha wallets (Tier 1 — verified across multiple sources) ---
-  // $3.3M realized profit. Early Pump.fun entries. Top trade: TRUMP $749K→$1.55M. (Nansen Smart Money)
-  { address: '3xqUaVuAWsppb8yaSPJ2hvdvfjteMq2EbdCc3CLguaTE', label: 'pf_nansen_3m3_profit', minTier: CapitalTier.MICRO, pumpfunOnly: true },
-  // $4.3M realized PnL. Gaming token specialist. 52% win rate, 192 tokens/90d. (Nansen Smart Money)
-  { address: '9UWZFoiCHeYRLmzmDJhdMrP7wgrTw7DMSpPiT2eHgJHe', label: 'pf_nansen_4m3_gaming', minTier: CapitalTier.MICRO, pumpfunOnly: true },
-  // AI token specialist. ~$1M profit. 28,876% gain on CATG. (Nansen Smart Money)
-  { address: 'BKVaB3eNrGUVRCj3M4LiodKypBTzrpatoo7VBhmdv3eY', label: 'pf_nansen_ai_specialist', minTier: CapitalTier.MICRO, pumpfunOnly: true },
-  // High win rate in early launches. Flagged as insider on KOLSCAN + GMGN.
-  { address: 'AVAZvHLR2PcWpDf8BXY4rVxNHYRBytycHkcB5z5QNXYm', label: 'pf_kolscan_insider', minTier: CapitalTier.MICRO, pumpfunOnly: true },
-  // Consistent 50x+ flips on Raydium-migrated tokens. Dominates Pump.fun launches. (Axiom Leaderboard)
-  { address: '4Be9CvxqHW6BYiRAxW9Q3xu1ycTMWaL5z8NX4HR3ha7t', label: 'pf_axiom_50x_flipper', minTier: CapitalTier.MICRO, pumpfunOnly: true },
-  // High win rates on Dune "Solana Alpha Wallets" dashboard. Active across trading bots. (Dune Analytics)
-  { address: '8zFZHuSRuDpuAR7J6FzwyF3vKNx4CVW3DFHJerQhc7Zd', label: 'pf_dune_high_wr', minTier: CapitalTier.MICRO, pumpfunOnly: true },
+function loadSeedWallets(): SeedWallet[] {
+  const __dirname = dirname(fileURLToPath(import.meta.url));
+  const walletsPath = resolve(__dirname, '../../wallets.json');
+  try {
+    const raw = JSON.parse(readFileSync(walletsPath, 'utf-8'));
+    const tierMap: Record<string, CapitalTier> = {
+      MICRO: CapitalTier.MICRO,
+      SMALL: CapitalTier.SMALL,
+      MEDIUM: CapitalTier.MEDIUM,
+      FULL: CapitalTier.FULL,
+    };
+    return (raw.wallets || []).map((w: { address: string; label: string; minTier: string; pumpfunOnly?: boolean }) => ({
+      address: w.address,
+      label: w.label,
+      minTier: tierMap[w.minTier] ?? CapitalTier.MICRO,
+      pumpfunOnly: w.pumpfunOnly ?? false,
+    }));
+  } catch (err) {
+    console.error(`Failed to load wallets.json from ${walletsPath}:`, err);
+    return [];
+  }
+}
 
-  // --- Top pump.fun graduation wallets (30-day realized profit leaders) ---
-  { address: 'ARu4n5mFdZogZAravu7CcizaojWnS6oqka37gdLT5SZn', label: 'grad_587m_top1', minTier: CapitalTier.MICRO, pumpfunOnly: true },
-  { address: 'j1oeQoPeuEDmjvyMwBmCWexzCQup77kbKKxV59CnYbd', label: 'grad_43m_top2', minTier: CapitalTier.MICRO, pumpfunOnly: true },
-  { address: 'suqh5sHtr8HyJ7q8scBimULPkPpA557prMG47xCHQfK', label: 'grad_27m_top3', minTier: CapitalTier.MICRO, pumpfunOnly: true },
-  { address: 'j1oAbxxiDUWvoHxEDhWE7THLjEkDQW2cSHYn2vttxTF', label: 'grad_17m_top4', minTier: CapitalTier.MICRO, pumpfunOnly: true },
-  { address: '7dGrdJRYtsNR8UYxZ3TnifXGjGc9eRYLq9sELwYpuuUu', label: 'grad_16m_top5', minTier: CapitalTier.MICRO, pumpfunOnly: true },
-  { address: 'DfMxre4cKmvogbLrPigxmibVTTQDuzjdXojWzjCXXhzj', label: 'grad_10m_top6', minTier: CapitalTier.MICRO, pumpfunOnly: true },
-  { address: '73LnJ7G9ffBDjEBGgJDdgvLUhD5APLonKrNiHsKDCw5B', label: 'grad_8m_top7', minTier: CapitalTier.MICRO, pumpfunOnly: true },
-  { address: 'CyaE1VxvBrahnPWkqm5VsdCvyS2QmNht2UFrKJHga54o', label: 'grad_7m_top8', minTier: CapitalTier.MICRO, pumpfunOnly: true },
-  { address: '54Pz1e35z9uoFdnxtzjp7xZQoFiofqhdayQWBMN7dsuy', label: 'grad_6m_top9', minTier: CapitalTier.MICRO, pumpfunOnly: true },
-  { address: '56S29mZ3wqvw8hATuUUFqKhGcSGYFASRRFNT38W8q7G3', label: 'grad_6m_top10', minTier: CapitalTier.MICRO, pumpfunOnly: true },
-  { address: '2ezv4U5HmPpkt2xLsKnw1FyyGmjFBeW7c166p99Hw2xB', label: 'grad_6m_top11', minTier: CapitalTier.MICRO, pumpfunOnly: true },
-  { address: 'JDd3hy3gQn2V982mi1zqhNqUw1GfV2UL6g76STojCJPN', label: 'grad_5m_top13', minTier: CapitalTier.MICRO, pumpfunOnly: true },
-  { address: '4DdrfiDHpmx55i4SPssxVzS9ZaKLb8qr45NKY9Er9nNh', label: 'grad_4m_top16', minTier: CapitalTier.MICRO, pumpfunOnly: true },
-  { address: '4hSXPtxZgXFpo6Vxq9yqxNjcBoqWN3VoaPJWonUtupzD', label: 'grad_4m_top17', minTier: CapitalTier.MICRO, pumpfunOnly: true },
-  { address: '9FNz4MjPUmnJqTf6yEDbL1D4SsHVh7uA8zRHhR5K138r', label: 'grad_3m_top18', minTier: CapitalTier.MICRO, pumpfunOnly: true },
-  { address: '4BdKaxN8G6ka4GYtQQWk4G4dZRUTX2vQH9GcXdBREFUk', label: 'grad_3m_top19', minTier: CapitalTier.MICRO, pumpfunOnly: true },
-  { address: '9ZzjXiwkGRDBwVHJitfx8AmnN2YUbnqW6M1tH38juEeJ', label: 'grad_3m_top20', minTier: CapitalTier.MICRO, pumpfunOnly: true },
-  { address: '2rbMgYvzAb3xDk6vXrzKkY3VwsmyDZsJTkvB3JJYsRzA', label: 'grad_3m_top22', minTier: CapitalTier.MICRO, pumpfunOnly: true },
-  { address: 'AJ6MGExeK7FXmeKkKPmALjcdXVStXYokYNv9uVfDRtvo', label: 'grad_3m_top23', minTier: CapitalTier.MICRO, pumpfunOnly: true },
-  { address: '3tc4BVAdzjr1JpeZu6NAjLHyp4kK3iic7TexMBYGJ4Xk', label: 'grad_3m_top24', minTier: CapitalTier.MICRO, pumpfunOnly: true },
-  { address: '86AEJExyjeNNgcp7GrAvCXTDicf5aGWgoERbXFiG1EdD', label: 'grad_3m_top25', minTier: CapitalTier.MICRO, pumpfunOnly: true },
-];
+export const SEED_WALLETS: SeedWallet[] = loadSeedWallets();
 
 export function getTierForCapital(capitalSol: number): CapitalTier {
   if (capitalSol >= 50) return CapitalTier.FULL;

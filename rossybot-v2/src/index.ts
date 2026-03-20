@@ -1930,7 +1930,13 @@ class RossyBotV2 {
         return;
       }
 
-      this.blockedTokens.add(mint); // Don't re-enter this session
+      this.blockedTokens.set(mint, {
+        closedAt: Date.now(),
+        pnlPercent: 0,
+        exitReason: 'graduation_entry',
+        reentryCount: 0,
+        hardBlocked: true,
+      }); // Don't re-enter this session
 
       const mode = this.graduatedTracker.isLive ? 'LIVE' : 'SHADOW';
       await this.telegram.send(

@@ -27,10 +27,17 @@ export class WalletDiscovery {
   private discoveryInterval: ReturnType<typeof setInterval> | null = null;
   private onNewWallet: ((address: string) => void) | null = null;
   private onHoldTimeResults: ((results: { deactivated: string[]; demoted: string[] }) => void) | null = null;
+  private walletRankCache: { addresses: string[]; pumpFunOnly: boolean; fetchedAt: number } | null = null;
+  private static readonly WALLET_CACHE_TTL_MS = 5 * 60_000; // 5 minutes
 
   constructor(nansen: NansenClient) {
     this.nansen = nansen;
     this.holdTimeAnalyzer = new HoldTimeAnalyzer();
+  }
+
+  /** Invalidate the cached wallet ranking (call after add/remove/deactivate) */
+  invalidateWalletCache(): void {
+    this.walletRankCache = null;
   }
 
   /** Set callback for hold-time enforcement results */
@@ -79,6 +86,7 @@ export class WalletDiscovery {
 
     const pfCount = eligible.filter((w) => w.pumpfunOnly).length;
     logger.info({ count: eligible.length, pumpfun: pfCount, tier: capitalTier }, 'Seed wallets loaded');
+    this.invalidateWalletCache();
     return eligible.map((w) => w.address);
   }
 
@@ -122,6 +130,7 @@ export class WalletDiscovery {
     const count = result.rowCount || 0;
     if (count > 0) {
       logger.info({ count, minPnl: MIN_PNL_USD }, 'Deactivated wallets below minimum PnL threshold on startup');
+      this.invalidateWalletCache();
     }
     return count;
   }
@@ -175,6 +184,7 @@ export class WalletDiscovery {
     }
     if (total > 0) {
       console.log(`Purged ${total} weak/unproven wallets on startup (${seedCount} seeds, ${discoveredCount} discovered)`);
+      this.invalidateWalletCache();
     }
     return total;
   }
@@ -232,6 +242,7 @@ export class WalletDiscovery {
         cleanupReasons: cleanup.reasons,
         durationMs: duration,
       }, 'Discovery cycle complete');
+      this.invalidateWalletCache();
     } catch (err: unknown) {
       const axiosErr = err as { response?: { status?: number; data?: unknown }; message?: string };
       if (axiosErr.response) {
@@ -724,6 +735,13 @@ export class WalletDiscovery {
   /** Get all active wallet addresses — ranked by composite performance score.
    *  When pumpFunOnlyMode is true, heavily prioritize wallets that trade on bonding curves. */
   async getActiveWallets(pumpFunOnlyMode = false): Promise<string[]> {
+    // Return cached result if fresh and same mode
+    if (this.walletRankCache
+      && this.walletRankCache.pumpFunOnly === pumpFunOnlyMode
+      && (Date.now() - this.walletRankCache.fetchedAt) < WalletDiscovery.WALLET_CACHE_TTL_MS) {
+      return this.walletRankCache.addresses;
+    }
+
     const isPumpFunOnlyMode = pumpFunOnlyMode;
 
     const rows = await getMany<{ address: string }>(
@@ -788,6 +806,8 @@ export class WalletDiscovery {
        ORDER BY score DESC`,
       [isPumpFunOnlyMode],
     );
-    return rows.map((r) => r.address);
+    const addresses = rows.map((r) => r.address);
+    this.walletRankCache = { addresses, pumpFunOnly: pumpFunOnlyMode, fetchedAt: Date.now() };
+    return addresses;
   }
 }

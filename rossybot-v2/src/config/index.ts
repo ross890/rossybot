@@ -115,7 +115,7 @@ export const TIER_CONFIGS: Record<CapitalTier, TierConfig> = {
   [CapitalTier.MICRO]: {
     tier: CapitalTier.MICRO,
     maxPositions: 4,
-    walletsMonitored: 50,
+    walletsMonitored: 15,              // 15 WS slots (was 50 — inverted vs SMALL=5, now scales with capital)
     positionSizePct: 0.30,            // 30% per position (was 25% — small capital needs more concentration)
     minPositionSol: 0.003,            // 0.003 SOL min (was 0.3 — bot couldn't trade with 0.025 SOL balance)
     profitTarget: 0.40,                // 40% TP (was 50% — take profits slightly earlier)
@@ -143,7 +143,7 @@ export const TIER_CONFIGS: Record<CapitalTier, TierConfig> = {
   [CapitalTier.SMALL]: {
     tier: CapitalTier.SMALL,
     maxPositions: 3,
-    walletsMonitored: 5,
+    walletsMonitored: 15,              // 15 WS slots (was 5 — too restrictive, missed signals)
     positionSizePct: 0.40,
     minPositionSol: 0.3,
     profitTarget: 0.40,
@@ -171,7 +171,7 @@ export const TIER_CONFIGS: Record<CapitalTier, TierConfig> = {
   [CapitalTier.MEDIUM]: {
     tier: CapitalTier.MEDIUM,
     maxPositions: 5,
-    walletsMonitored: 10,
+    walletsMonitored: 20,              // 20 WS slots (was 10 — more capital = broader coverage)
     positionSizePct: 0.15,
     minPositionSol: 0.3,
     profitTarget: 0.30,
@@ -198,7 +198,7 @@ export const TIER_CONFIGS: Record<CapitalTier, TierConfig> = {
   [CapitalTier.FULL]: {
     tier: CapitalTier.FULL,
     maxPositions: 5,
-    walletsMonitored: 20,
+    walletsMonitored: 30,              // 30 WS slots (was 20 — max coverage for large capital)
     positionSizePct: 0.10,
     minPositionSol: 0.3,
     profitTarget: 0.25,
@@ -272,6 +272,7 @@ export function getTierConfig(tier: CapitalTier): TierConfig {
   // Shadow mode: loosen thresholds but still enforce gates
   return {
     ...base,
+    walletsMonitored: 50,      // Max WS coverage in shadow mode for data collection
     maxPositions: 20,         // 20 concurrent (was 2)
     mcapMin: 50_000,          // $50K (was $200K)
     mcapMax: 10_000_000,      // $10M (was $2M) — $30M+ is noise at micro capital

@@ -1288,13 +1288,14 @@ class RossyBotV2 {
       const walletLabel = walletRow?.label || signal.walletAddress.slice(0, 8);
 
       // Skip wallets with proven bad track records — tighter thresholds:
-      // 1. 3+ trades: <40% WR, 2+ consecutive losses, or negative avg PnL
+      // 1. 3+ trades: <45% WR, 2+ consecutive losses, or avg PnL below -3%
       // 2. 3+ rounds analyzed: alpha score <15 (not profitable in our exit windows)
+      // Data: bottom 5 wallets lost -1.41◎ combined. Tighter gates = fewer bad trades.
       if (walletRow && walletRow.our_total_trades >= 3) {
         const wr = walletRow.our_win_rate;
         const consLosses = walletRow.consecutive_losses || 0;
         const avgPnl = walletRow.our_avg_pnl_percent || 0;
-        if (wr < 0.40 || consLosses >= 2 || avgPnl < -0.05) {
+        if (wr < 0.45 || consLosses >= 2 || avgPnl < -0.03) {
           logger.info({
             token: mint.slice(0, 8), wallet: walletLabel,
             winRate: `${(wr * 100).toFixed(0)}%`, consLosses, avgPnl: `${(avgPnl * 100).toFixed(1)}%`,
@@ -1307,7 +1308,8 @@ class RossyBotV2 {
         }
       }
       // Alpha score gate: if we have hold-time analysis data, reject low-alpha wallets
-      if (walletRow && walletRow.round_trips_analyzed >= 3 && walletRow.short_term_alpha_score < 15) {
+      // Raised from 15 → 20: data shows low-alpha wallets are net negative
+      if (walletRow && walletRow.round_trips_analyzed >= 3 && walletRow.short_term_alpha_score < 20) {
         logger.info({
           token: mint.slice(0, 8), wallet: walletLabel,
           alpha: walletRow.short_term_alpha_score, rounds: walletRow.round_trips_analyzed,

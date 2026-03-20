@@ -68,7 +68,7 @@ export class TelegramService {
     wallets: string[];
     walletCount: number;
     totalMonitored: number;
-    walletEv?: Array<{ address: string; trades: number; winRate: number; avgPnl: number; alphaScore?: number }>;
+    walletEv?: Array<{ address: string; trades: number; winRate: number; avgPnl: number; alphaScore?: number; nansenRoi?: number; nansenPnlUsd?: number; nansenTrades?: number }>;
     sizeSol: number;
     price: number;
     momentum24h: number;
@@ -96,13 +96,20 @@ export class TelegramService {
     if (data.walletEv && data.walletEv.length > 0) {
       for (const w of data.walletEv) {
         const addr = w.address.slice(0, 8);
-        if (w.trades > 0) {
-          const pnlSign = w.avgPnl >= 0 ? '+' : '';
-          const alphaTag = w.alphaScore ? ` α${w.alphaScore}` : '';
-          evLines.push(`│  ${addr}: ${w.trades}t ${(w.winRate * 100).toFixed(0)}%W EV ${pnlSign}${w.avgPnl.toFixed(1)}%${alphaTag}`);
-        } else {
-          evLines.push(`│  ${addr}: new (no trades yet)`);
-        }
+        const hasNansen = (w.nansenRoi && w.nansenRoi > 0) || (w.nansenPnlUsd && w.nansenPnlUsd > 0);
+        const nansenPart = w.nansenRoi && w.nansenRoi > 0
+          ? `Nansen: ${w.nansenRoi.toFixed(0)}%ROI ${w.nansenTrades || '?'}t`
+          : w.nansenPnlUsd && w.nansenPnlUsd > 0
+            ? `Nansen: $${this.formatNum(w.nansenPnlUsd)} PnL`
+            : '';
+        const ourPart = w.trades > 0
+          ? `Ours: ${w.trades}t ${(w.winRate * 100).toFixed(0)}%W EV ${w.avgPnl >= 0 ? '+' : ''}${w.avgPnl.toFixed(1)}%`
+          : '';
+        const alphaTag = w.alphaScore ? ` α${w.alphaScore}` : '';
+        const stats = hasNansen
+          ? nansenPart + (ourPart ? ` | ${ourPart}` : '') + alphaTag
+          : ourPart ? ourPart + alphaTag : 'new (no data)';
+        evLines.push(`│  ${addr}: ${stats}`);
       }
     }
 
@@ -2693,16 +2700,20 @@ export class TelegramService {
       check.passed ? '✅' : '❌';
 
     const walletLines = data.wallets.map((w) => {
-      const ourStats = w.trades > 0
-        ? `${w.trades}t ${(w.winRate * 100).toFixed(0)}%W EV ${w.avgPnl >= 0 ? '+' : ''}${(w.avgPnl * 100).toFixed(1)}%`
-        : 'new';
-      // Show Nansen data when available so we can diagnose blended quality
-      const nansenTag = w.nansenRoi && w.nansenRoi > 0
-        ? ` | Nansen: ${w.nansenRoi.toFixed(0)}% ROI`
+      const hasNansen = (w.nansenRoi && w.nansenRoi > 0) || (w.nansenPnlUsd && w.nansenPnlUsd > 0);
+      // Lead with Nansen data (source of truth), show our stats as supplement
+      const nansenPart = w.nansenRoi && w.nansenRoi > 0
+        ? `Nansen: ${w.nansenRoi.toFixed(0)}%ROI`
         : w.nansenPnlUsd && w.nansenPnlUsd > 0
-          ? ` | Nansen: $${this.formatNum(w.nansenPnlUsd)} PnL (ROI=0!)`
+          ? `Nansen: $${this.formatNum(w.nansenPnlUsd)} PnL`
           : '';
-      return `│  ${w.label} (${w.address.slice(0, 6)}): ${ourStats}${nansenTag}`;
+      const ourPart = w.trades > 0
+        ? `Ours: ${w.trades}t ${(w.winRate * 100).toFixed(0)}%W EV ${w.avgPnl >= 0 ? '+' : ''}${(w.avgPnl * 100).toFixed(1)}%`
+        : '';
+      const stats = hasNansen
+        ? nansenPart + (ourPart ? ` | ${ourPart}` : '')
+        : ourPart || 'new';
+      return `│  ${w.label} (${w.address.slice(0, 6)}): ${stats}`;
     });
 
     const dex = data.dexData;
@@ -2743,7 +2754,7 @@ export class TelegramService {
     holdMins: number;
     exitReason: string;
     tier: string;
-    wallets: Array<{ address: string; label: string; trades: number; winRate: number; avgPnl: number }>;
+    wallets: Array<{ address: string; label: string; trades: number; winRate: number; avgPnl: number; nansenRoi?: number; nansenPnlUsd?: number }>;
     entryTime: string;
     exitTime: string;
     detectionLagMs: number;
@@ -2760,9 +2771,18 @@ export class TelegramService {
     const drawdownFromPeak = data.peakPrice > 0 ? ((data.peakPrice - data.exitPrice) / data.peakPrice * 100) : 0;
 
     const walletLines = data.wallets.map((w) => {
-      const stats = w.trades > 0
-        ? `${w.trades}t ${(w.winRate * 100).toFixed(0)}%W EV ${w.avgPnl >= 0 ? '+' : ''}${(w.avgPnl * 100).toFixed(1)}%`
-        : 'new (first trade)';
+      const hasNansen = (w.nansenRoi && w.nansenRoi > 0) || (w.nansenPnlUsd && w.nansenPnlUsd > 0);
+      const nansenPart = w.nansenRoi && w.nansenRoi > 0
+        ? `Nansen: ${w.nansenRoi.toFixed(0)}%ROI`
+        : w.nansenPnlUsd && w.nansenPnlUsd > 0
+          ? `Nansen: $${this.formatNum(w.nansenPnlUsd)} PnL`
+          : '';
+      const ourPart = w.trades > 0
+        ? `Ours: ${w.trades}t ${(w.winRate * 100).toFixed(0)}%W EV ${w.avgPnl >= 0 ? '+' : ''}${(w.avgPnl * 100).toFixed(1)}%`
+        : '';
+      const stats = hasNansen
+        ? nansenPart + (ourPart ? ` | ${ourPart}` : '')
+        : ourPart || 'new (first trade)';
       return `│  ${w.label} (${w.address.slice(0, 6)}): ${stats}`;
     });
 

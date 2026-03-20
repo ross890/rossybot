@@ -1007,6 +1007,9 @@ class RossyBotV2 {
               trades: stats?.trades || 0,
               winRate: stats?.winRate || 0,
               avgPnl: stats?.avgPnl || 0,
+              nansenRoi: stats?.nansenRoi || 0,
+              nansenPnlUsd: stats?.nansenPnlUsd || 0,
+              nansenTrades: stats?.nansenTrades || 0,
             };
           }),
           signalScore: scoreDisplay,
@@ -1102,10 +1105,14 @@ class RossyBotV2 {
         const { getMany: dbGetMany } = await import('./db/database.js');
         const walletRows = await dbGetMany<{
           address: string; label: string; our_total_trades: number; our_win_rate: number; our_avg_pnl_percent: number;
+          nansen_roi_percent: number; nansen_pnl_usd: number; nansen_trade_count: number;
         }>(
           `SELECT address, label, COALESCE(our_total_trades, 0) as our_total_trades,
                   COALESCE(our_win_rate, 0) as our_win_rate,
-                  COALESCE(our_avg_pnl_percent, 0) as our_avg_pnl_percent
+                  COALESCE(our_avg_pnl_percent, 0) as our_avg_pnl_percent,
+                  COALESCE(nansen_roi_percent, 0) as nansen_roi_percent,
+                  COALESCE(nansen_pnl_usd, 0) as nansen_pnl_usd,
+                  COALESCE(nansen_trade_count, 0) as nansen_trade_count
              FROM alpha_wallets WHERE address = ANY($1)`,
           [posView.signal_wallets],
         );
@@ -1133,6 +1140,8 @@ class RossyBotV2 {
               trades: Number(w?.our_total_trades || 0),
               winRate: Number(w?.our_win_rate || 0),
               avgPnl: Number(w?.our_avg_pnl_percent || 0),
+              nansenRoi: Number(w?.nansen_roi_percent || 0),
+              nansenPnlUsd: Number(w?.nansen_pnl_usd || 0),
             };
           }),
           entryTime: posView.entry_time.toISOString().replace('T', ' ').slice(0, 19) + ' UTC',

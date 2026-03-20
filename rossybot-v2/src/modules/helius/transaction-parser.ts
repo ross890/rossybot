@@ -117,7 +117,7 @@ export class TransactionParser {
       const involvedWallets = allPubkeys.filter((pk) => this.subscribedWallets.has(pk));
 
       if (involvedWallets.length === 0) {
-        console.log(`⏭️ TX ${signature.slice(0, 12)}... | no subscribed wallet in accountKeys (indirect interaction)`);
+        logger.debug({ sig: signature.slice(0, 12) }, 'No subscribed wallet in accountKeys (indirect interaction)');
         return signals;
       }
 

@@ -168,6 +168,9 @@ class RossyBotV2 {
     lastCurveFill: number;
   }> = new Map();
 
+  // Rate-limit mover detector "no alpha signal" logs: mint → last log timestamp
+  private moverLogThrottle: Map<string, number> = new Map();
+
   // Real-time curve state cache from PumpPortal (avoids 200-400ms RPC call in validation)
   // Key: tokenMint, Value: { vSol (virtual), realSol, updatedAt }
   private pumpFunCurveCache: Map<string, { vSol: number; realSol: number; updatedAt: number }> = new Map();
@@ -1510,13 +1513,19 @@ class RossyBotV2 {
   private async handleMoverDetected(mover: MoverToken): Promise<void> {
     const deferred = this.deferredEntries.get(mover.mint);
     if (!deferred) {
-      // No deferred entry — log for awareness but don't enter without alpha signal
-      logger.info({
-        token: mover.mint.slice(0, 8),
-        velocity: `${mover.velocitySolPerMin.toFixed(2)} SOL/min`,
-        curveFill: `${(mover.curveFillPct * 100).toFixed(0)}%`,
-        buyers: mover.uniqueBuyers,
-      }, 'Mover detected — no deferred entry (no alpha signal)');
+      // Rate-limit: only log first occurrence per token per 5-minute window
+      const now = Date.now();
+      const lastSeen = this.moverLogThrottle?.get(mover.mint) ?? 0;
+      if (now - lastSeen > 5 * 60_000) {
+        if (!this.moverLogThrottle) this.moverLogThrottle = new Map();
+        this.moverLogThrottle.set(mover.mint, now);
+        logger.info({
+          token: mover.mint.slice(0, 8),
+          velocity: `${mover.velocitySolPerMin.toFixed(2)} SOL/min`,
+          curveFill: `${(mover.curveFillPct * 100).toFixed(0)}%`,
+          buyers: mover.uniqueBuyers,
+        }, 'Mover detected — no deferred entry (no alpha signal)');
+      }
       return;
     }
 
@@ -1742,13 +1751,27 @@ class RossyBotV2 {
     const tierCfg = getTierConfig(this.capitalManager.tier);
     const maxSlots = tierCfg.walletsMonitored;
 
-    // Find low-quality wallets: quality = passed*2 + avgScore (normalized)
+    // Get noise stats from the transaction parser — wallets producing tons of TXs but no signals
+    const noiseStats = this.txParser.getWalletNoiseStats();
+    const noiseMap = new Map(noiseStats.map((n) => [n.wallet, n]));
+
+    // Find low-quality wallets: quality = passed*2 + avgScore (normalized) - noisePenalty
     const deadWeight: { addr: string; quality: number }[] = [];
     for (const addr of this.walletAddresses) {
       const sq = this.wsSignalQuality.get(addr);
-      const quality = sq
+      let quality = sq
         ? sq.passed * 2 + (sq.count > 0 ? sq.totalScore / sq.count / 20 : 0) // normalize score (0-100) to 0-5 range
         : 0; // no signals at all = 0 quality
+
+      // Noise penalty: wallets with high skip:signal ratios get quality reduced
+      // A wallet with 500+ skipped TXs and <2 signals is burning a slot for nothing
+      const noise = noiseMap.get(addr.slice(0, 8));
+      if (noise && noise.skipped > 200 && noise.signals < 3) {
+        quality -= 2; // Heavy penalty — these are bots/market makers, not traders
+      } else if (noise && noise.skipped > 100 && noise.ratio < 0.01) {
+        quality -= 1; // Moderate penalty — very noisy, almost no signal
+      }
+
       if (quality < RossyBotV2.WS_MIN_QUALITY_FOR_KEEP) {
         deadWeight.push({ addr, quality });
       }
@@ -1773,8 +1796,8 @@ class RossyBotV2 {
       return;
     }
 
-    // Evict up to half the dead-weight wallets per rotation (gradual, not aggressive)
-    const maxEvictions = Math.max(1, Math.floor(deadWeight.length / 2));
+    // Cap at 5 evictions per cycle — prevents full-roster churn and signal gaps
+    const maxEvictions = Math.min(5, Math.max(1, Math.floor(deadWeight.length / 2)));
     const toEvict = deadWeight.slice(0, maxEvictions);
     const toAdd = candidates.slice(0, toEvict.length);
 
@@ -1793,12 +1816,14 @@ class RossyBotV2 {
       await this.wsManager.addWallet(addAddr);
 
       const sq = this.wsSignalQuality.get(evictAddr);
+      const noise = noiseMap.get(evictAddr.slice(0, 8));
       logger.info({
         evicted: evictAddr.slice(0, 8),
         added: addAddr.slice(0, 8),
         signals: sq?.count || 0,
         passed: sq?.passed || 0,
         quality: toEvict[i].quality.toFixed(1),
+        skippedTxs: noise?.skipped || 0,
       }, 'WS slot rotated — low-quality wallet evicted');
     }
 
@@ -1808,6 +1833,7 @@ class RossyBotV2 {
         added: toAdd.length,
         totalSlots: this.walletAddresses.size,
         maxSlots,
+        deadWeightRemaining: deadWeight.length - toEvict.length,
       }, 'WS rotation complete');
     }
 

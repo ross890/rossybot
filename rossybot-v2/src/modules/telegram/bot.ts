@@ -1429,44 +1429,159 @@ export class TelegramService {
       }
     });
 
-    // /tuning — aggregate tuning report for copy-paste analysis
+    // /tuning — comprehensive tuning report across ALL position types
     this.bot.onText(/\/tuning/, async (msg) => {
       if (msg.chat.id.toString() !== this.chatId) return;
       try {
-        // 1. Overall performance
-        const overall = await getOne<Record<string, unknown>>(
+        // Determine which tables to query based on mode
+        const isLive = !config.shadowMode;
+        const dexTable = isLive ? 'positions' : 'shadow_positions';
+        const dexSolCol = isLive ? 'entry_sol' : 'simulated_entry_sol';
+        const dexNetPnlExpr = isLive ? 'net_pnl_sol' : `(${dexSolCol} * pnl_percent)`;
+        const dexFeesExpr = isLive ? 'fees_paid_sol' : '0';
+
+        // Get current config for context
+        const cfgStatus = this.getStatus?.() || {};
+        const cfgCapSol = cfgStatus.capitalSol as number || 0;
+        const cfgTier = getTierForCapital(cfgCapSol);
+        const cfgTc = getTierConfig(cfgTier);
+        const pf = config.pumpFun;
+
+        // ── SECTION 1: COMBINED OVERVIEW (all tables) ──
+        const dexOverall = await getOne<Record<string, unknown>>(
           `SELECT
              COUNT(*) as total,
              COUNT(*) FILTER (WHERE pnl_percent > 0) as wins,
              COALESCE(AVG(pnl_percent), 0) as avg_pnl,
-             COALESCE(SUM(net_pnl_sol), 0) as total_pnl_sol,
+             COALESCE(SUM(${dexNetPnlExpr}), 0) as net_sol,
+             COALESCE(SUM(${dexFeesExpr}), 0) as fees,
              COALESCE(AVG(hold_time_mins), 0) as avg_hold,
-             COALESCE(AVG(peak_curve_fill_pct), 0) as avg_peak_curve,
+             COALESCE(AVG(EXTRACT(EPOCH FROM (entry_time - alpha_buy_time))), 0) as avg_lag
+           FROM ${dexTable} WHERE status = 'CLOSED'`,
+        );
+
+        const pfOverall = await getOne<Record<string, unknown>>(
+          `SELECT
+             COUNT(*) as total,
+             COUNT(*) FILTER (WHERE pnl_percent > 0) as wins,
+             COALESCE(AVG(pnl_percent), 0) as avg_pnl,
+             COALESCE(SUM(net_pnl_sol), 0) as net_sol,
+             COALESCE(SUM(fees_paid_sol), 0) as fees,
+             COALESCE(AVG(hold_time_mins), 0) as avg_hold,
+             COALESCE(AVG(EXTRACT(EPOCH FROM (entry_time - alpha_buy_time))), 0) as avg_lag,
              COALESCE(AVG(curve_fill_pct_at_entry), 0) as avg_entry_curve,
-             COALESCE(AVG(EXTRACT(EPOCH FROM (entry_time - alpha_buy_time))), 0) as avg_alpha_lag_secs,
+             COALESCE(AVG(peak_curve_fill_pct), 0) as avg_peak_curve,
              COUNT(*) FILTER (WHERE graduated = TRUE) as graduated
            FROM pumpfun_positions WHERE status = 'CLOSED'`,
         );
 
-        const total = Number(overall?.total || 0);
-        if (total === 0) {
+        const dexTotal = Number(dexOverall?.total || 0);
+        const pfTotal = Number(pfOverall?.total || 0);
+        const grandTotal = dexTotal + pfTotal;
+
+        if (grandTotal === 0) {
           await this.bot.sendMessage(msg.chat.id, '📭 No closed trades yet');
           return;
         }
 
-        const wins = Number(overall?.wins || 0);
-        const losses = total - wins;
-        const wr = (wins / total * 100).toFixed(0);
-        const avgPnl = (Number(overall?.avg_pnl || 0) * 100).toFixed(1);
-        const totalPnlSol = Number(overall?.total_pnl_sol || 0).toFixed(4);
-        const avgHold = Number(overall?.avg_hold || 0).toFixed(0);
-        const avgPeakCurve = (Number(overall?.avg_peak_curve || 0) * 100).toFixed(0);
-        const avgEntryCurve = (Number(overall?.avg_entry_curve || 0) * 100).toFixed(0);
-        const avgAlphaLag = Number(overall?.avg_alpha_lag_secs || 0).toFixed(0);
-        const gradCount = Number(overall?.graduated || 0);
+        const dexWins = Number(dexOverall?.wins || 0);
+        const pfWins = Number(pfOverall?.wins || 0);
+        const grandWins = dexWins + pfWins;
+        const grandLosses = grandTotal - grandWins;
+        const grandWr = (grandWins / grandTotal * 100).toFixed(0);
+        const dexNetSol = Number(dexOverall?.net_sol || 0);
+        const pfNetSol = Number(pfOverall?.net_sol || 0);
+        const grandNetSol = dexNetSol + pfNetSol;
+        const dexFees = Number(dexOverall?.fees || 0);
+        const pfFees = Number(pfOverall?.fees || 0);
+        const grandFees = dexFees + pfFees;
 
-        // 2. Entry type breakdown
-        const entryTypes = await getMany<Record<string, unknown>>(
+        // ── SECTION 2: DEX TRADES (positions/shadow_positions) ──
+        const dexByTier = await getMany<Record<string, unknown>>(
+          `SELECT
+             capital_tier${isLive ? '_at_entry' : ''} as tier,
+             COUNT(*) as total,
+             COUNT(*) FILTER (WHERE pnl_percent > 0) as wins,
+             COALESCE(AVG(pnl_percent), 0) as avg_pnl,
+             COALESCE(SUM(${dexNetPnlExpr}), 0) as net_sol,
+             COALESCE(AVG(hold_time_mins), 0) as avg_hold
+           FROM ${dexTable} WHERE status = 'CLOSED'
+           GROUP BY 1 ORDER BY total DESC`,
+        );
+
+        const dexTierLines = dexByTier.map((t) => {
+          const tTotal = Number(t.total);
+          const tWins = Number(t.wins);
+          const tWr = tTotal > 0 ? (tWins / tTotal * 100).toFixed(0) : '0';
+          const tPnl = (Number(t.avg_pnl) * 100).toFixed(1);
+          const tSol = Number(t.net_sol).toFixed(4);
+          const tHold = Number(t.avg_hold).toFixed(0);
+          return `│ ${t.tier}: ${tTotal}t ${tWr}%W avg${tPnl}% ${tSol}SOL hold${tHold}m`;
+        });
+
+        const dexExitReasons = await getMany<Record<string, unknown>>(
+          `SELECT exit_reason, COUNT(*) as total,
+                  COUNT(*) FILTER (WHERE pnl_percent > 0) as wins,
+                  COALESCE(AVG(pnl_percent), 0) as avg_pnl
+           FROM ${dexTable} WHERE status = 'CLOSED' AND exit_reason IS NOT NULL
+           GROUP BY exit_reason ORDER BY total DESC LIMIT 10`,
+        );
+
+        const dexExitLines = dexExitReasons.map((r) => {
+          const rTotal = Number(r.total);
+          const rWins = Number(r.wins);
+          const rWr = rTotal > 0 ? (rWins / rTotal * 100).toFixed(0) : '0';
+          const rPnl = (Number(r.avg_pnl) * 100).toFixed(1);
+          return `│ ${rTotal}x ${r.exit_reason} (${rWr}%W, avg ${rPnl}%)`;
+        });
+
+        // DEX alpha lag
+        const dexLag = await getMany<Record<string, unknown>>(
+          `SELECT
+             CASE
+               WHEN EXTRACT(EPOCH FROM (entry_time - alpha_buy_time)) < 5 THEN '<5s'
+               WHEN EXTRACT(EPOCH FROM (entry_time - alpha_buy_time)) < 15 THEN '5-15s'
+               WHEN EXTRACT(EPOCH FROM (entry_time - alpha_buy_time)) < 30 THEN '15-30s'
+               WHEN EXTRACT(EPOCH FROM (entry_time - alpha_buy_time)) < 60 THEN '30-60s'
+               ELSE '60s+'
+             END as lag_bucket,
+             COUNT(*) as total,
+             COUNT(*) FILTER (WHERE pnl_percent > 0) as wins,
+             COALESCE(AVG(pnl_percent), 0) as avg_pnl
+           FROM ${dexTable} WHERE status = 'CLOSED'
+           GROUP BY lag_bucket ORDER BY lag_bucket`,
+        );
+
+        const dexLagLines = dexLag.map((l) => {
+          const lTotal = Number(l.total);
+          const lWins = Number(l.wins);
+          const lWr = lTotal > 0 ? (lWins / lTotal * 100).toFixed(0) : '0';
+          const lPnl = (Number(l.avg_pnl) * 100).toFixed(1);
+          return `│ ${(l.lag_bucket as string).padEnd(6)} ${String(lTotal).padStart(3)}t ${lWr}%W avg${lPnl}%`;
+        });
+
+        // DEX recent trades
+        const dexRecent = await getMany<Record<string, unknown>>(
+          `SELECT token_address, token_symbol, pnl_percent, ${dexNetPnlExpr} as net_pnl_sol,
+                  hold_time_mins, exit_reason, capital_tier${isLive ? '_at_entry' : ''} as tier,
+                  EXTRACT(EPOCH FROM (entry_time - alpha_buy_time)) as alpha_lag_secs
+           FROM ${dexTable} WHERE status = 'CLOSED'
+           ORDER BY closed_at DESC LIMIT 10`,
+        );
+
+        const dexRecentLines = dexRecent.map((r) => {
+          const rPnl = (Number(r.pnl_percent) * 100).toFixed(1);
+          const icon = Number(r.pnl_percent) > 0 ? '✅' : '❌';
+          const sym = r.token_symbol || (r.token_address as string).slice(0, 6);
+          const lag = Number(r.alpha_lag_secs || 0).toFixed(0);
+          const hold = Number(r.hold_time_mins || 0);
+          const sol = Number(r.net_pnl_sol || 0).toFixed(4);
+          return `│ ${icon} $${sym} ${rPnl}% ${sol}SOL ${hold}m lag${lag}s ${r.exit_reason || ''} [${r.tier}]`;
+        });
+
+        // ── SECTION 3: PUMP.FUN TRADES ──
+        // Entry type breakdown
+        const pfEntryTypes = await getMany<Record<string, unknown>>(
           `SELECT
              COALESCE(entry_type, 'DIRECT') as entry_type,
              COUNT(*) as total,
@@ -1481,7 +1596,7 @@ export class TelegramService {
            ORDER BY total DESC`,
         );
 
-        const entryTypeLines = entryTypes.map((et) => {
+        const pfEntryTypeLines = pfEntryTypes.map((et) => {
           const etTotal = Number(et.total);
           const etWins = Number(et.wins);
           const etWr = etTotal > 0 ? (etWins / etTotal * 100).toFixed(0) : '0';
@@ -1493,18 +1608,16 @@ export class TelegramService {
           return `│ ${et.entry_type}: ${etTotal}t ${etWr}%W avg${etPnl}% ${etSol}SOL hold${etHold}m peak${etPeak}% lag${etLag}s`;
         });
 
-        // 3. Exit reason breakdown with WR
-        const exitReasons = await getMany<Record<string, unknown>>(
-          `SELECT
-             exit_reason,
-             COUNT(*) as total,
-             COUNT(*) FILTER (WHERE pnl_percent > 0) as wins,
-             COALESCE(AVG(pnl_percent), 0) as avg_pnl
+        // Pump.fun exit reasons
+        const pfExitReasons = await getMany<Record<string, unknown>>(
+          `SELECT exit_reason, COUNT(*) as total,
+                  COUNT(*) FILTER (WHERE pnl_percent > 0) as wins,
+                  COALESCE(AVG(pnl_percent), 0) as avg_pnl
            FROM pumpfun_positions WHERE status = 'CLOSED' AND exit_reason IS NOT NULL
-           GROUP BY exit_reason ORDER BY total DESC LIMIT 8`,
+           GROUP BY exit_reason ORDER BY total DESC LIMIT 10`,
         );
 
-        const exitLines = exitReasons.map((r) => {
+        const pfExitLines = pfExitReasons.map((r) => {
           const rTotal = Number(r.total);
           const rWins = Number(r.wins);
           const rWr = rTotal > 0 ? (rWins / rTotal * 100).toFixed(0) : '0';
@@ -1512,7 +1625,7 @@ export class TelegramService {
           return `│ ${rTotal}x ${r.exit_reason} (${rWr}%W, avg ${rPnl}%)`;
         });
 
-        // 4. Curve entry zone analysis — where do wins vs losses enter?
+        // Curve entry zone analysis
         const curveZones = await getMany<Record<string, unknown>>(
           `SELECT
              CASE
@@ -1540,8 +1653,8 @@ export class TelegramService {
           return `│ ${(z.zone as string).padEnd(6)} ${String(zTotal).padStart(3)}t ${zWr}%W avg${zPnl}% peak${zPeak}%`;
         });
 
-        // 5. Alpha lag buckets — how does lag correlate with outcomes?
-        const lagBuckets = await getMany<Record<string, unknown>>(
+        // Pump.fun alpha lag
+        const pfLag = await getMany<Record<string, unknown>>(
           `SELECT
              CASE
                WHEN EXTRACT(EPOCH FROM (entry_time - alpha_buy_time)) < 5 THEN '<5s'
@@ -1557,7 +1670,7 @@ export class TelegramService {
            GROUP BY lag_bucket ORDER BY lag_bucket`,
         );
 
-        const lagLines = lagBuckets.map((l) => {
+        const pfLagLines = pfLag.map((l) => {
           const lTotal = Number(l.total);
           const lWins = Number(l.wins);
           const lWr = lTotal > 0 ? (lWins / lTotal * 100).toFixed(0) : '0';
@@ -1565,7 +1678,7 @@ export class TelegramService {
           return `│ ${(l.lag_bucket as string).padEnd(6)} ${String(lTotal).padStart(3)}t ${lWr}%W avg${lPnl}%`;
         });
 
-        // 6. Peak curve fill — wins vs losses
+        // Peak curve stats
         const peakStats = await getOne<Record<string, unknown>>(
           `SELECT
              COALESCE(AVG(peak_curve_fill_pct) FILTER (WHERE pnl_percent > 0), 0) as avg_peak_wins,
@@ -1580,18 +1693,17 @@ export class TelegramService {
         const medPeakWins = (Number(peakStats?.median_peak_wins || 0) * 100).toFixed(0);
         const medPeakLosses = (Number(peakStats?.median_peak_losses || 0) * 100).toFixed(0);
 
-        // 7. Recent trades detail (last 15 for context)
-        const recent = await getMany<Record<string, unknown>>(
+        // Pump.fun recent trades
+        const pfRecent = await getMany<Record<string, unknown>>(
           `SELECT token_address, pnl_percent, net_pnl_sol, hold_time_mins, exit_reason,
                   curve_fill_pct_at_entry, peak_curve_fill_pct, graduated,
                   COALESCE(entry_type, 'DIRECT') as entry_type,
-                  EXTRACT(EPOCH FROM (entry_time - alpha_buy_time)) as alpha_lag_secs,
-                  entry_time
+                  EXTRACT(EPOCH FROM (entry_time - alpha_buy_time)) as alpha_lag_secs
            FROM pumpfun_positions WHERE status = 'CLOSED'
-           ORDER BY closed_at DESC LIMIT 15`,
+           ORDER BY closed_at DESC LIMIT 10`,
         );
 
-        const recentLines = recent.map((r) => {
+        const pfRecentLines = pfRecent.map((r) => {
           const rPnl = (Number(r.pnl_percent) * 100).toFixed(1);
           const icon = Number(r.pnl_percent) > 0 ? '✅' : '❌';
           const entry = (Number(r.curve_fill_pct_at_entry) * 100).toFixed(0);
@@ -1599,41 +1711,108 @@ export class TelegramService {
           const lag = Number(r.alpha_lag_secs || 0).toFixed(0);
           const hold = Number(r.hold_time_mins || 0);
           const grad = r.graduated ? '🎓' : '';
-          const type = String(r.entry_type).charAt(0); // D/M/D
+          const type = String(r.entry_type).charAt(0);
           return `│ ${icon} ${(r.token_address as string).slice(0, 6)} ${rPnl}% ${hold}m e${entry}% p${peak}% ${type} ${lag}s ${r.exit_reason}${grad}`;
         });
 
-        // 8. Per-wallet performance
-        const walletPerf = await getMany<Record<string, unknown>>(
-          `SELECT w.label, COUNT(*) as trades,
-                  COUNT(*) FILTER (WHERE p.pnl_percent > 0) as wins,
-                  COALESCE(AVG(p.pnl_percent), 0) as avg_pnl,
-                  COALESCE(SUM(p.net_pnl_sol), 0) as total_pnl
-           FROM pumpfun_positions p
-           JOIN alpha_wallets w ON w.address = ANY(p.signal_wallets)
-           WHERE p.status = 'CLOSED'
-           GROUP BY w.label ORDER BY trades DESC LIMIT 10`,
-        );
+        // ── SECTION 4: WALLET PERFORMANCE (across all tables) ──
+        const walletPerfQuery = isLive
+          ? `SELECT label, SUM(trades) as trades, SUM(wins) as wins, SUM(net_sol) as net_sol
+             FROM (
+               SELECT w.label, COUNT(*) as trades,
+                      COUNT(*) FILTER (WHERE p.pnl_percent > 0) as wins,
+                      COALESCE(SUM(p.net_pnl_sol), 0) as net_sol
+               FROM pumpfun_positions p
+               JOIN alpha_wallets w ON w.address = ANY(p.signal_wallets)
+               WHERE p.status = 'CLOSED'
+               GROUP BY w.label
+               UNION ALL
+               SELECT w.label, COUNT(*) as trades,
+                      COUNT(*) FILTER (WHERE p.pnl_percent > 0) as wins,
+                      COALESCE(SUM(p.net_pnl_sol), 0) as net_sol
+               FROM positions p
+               JOIN alpha_wallets w ON w.address = p.signal_wallet
+               WHERE p.status = 'CLOSED'
+               GROUP BY w.label
+             ) combined
+             GROUP BY label ORDER BY SUM(trades) DESC LIMIT 15`
+          : `SELECT label, SUM(trades) as trades, SUM(wins) as wins, SUM(net_sol) as net_sol
+             FROM (
+               SELECT w.label, COUNT(*) as trades,
+                      COUNT(*) FILTER (WHERE p.pnl_percent > 0) as wins,
+                      COALESCE(SUM(p.net_pnl_sol), 0) as net_sol
+               FROM pumpfun_positions p
+               JOIN alpha_wallets w ON w.address = ANY(p.signal_wallets)
+               WHERE p.status = 'CLOSED'
+               GROUP BY w.label
+               UNION ALL
+               SELECT w.label, COUNT(*) as trades,
+                      COUNT(*) FILTER (WHERE p.pnl_percent > 0) as wins,
+                      COALESCE(SUM(p.simulated_entry_sol * p.pnl_percent), 0) as net_sol
+               FROM shadow_positions p
+               JOIN alpha_wallets w ON w.address = ANY(p.signal_wallets)
+               WHERE p.status = 'CLOSED'
+               GROUP BY w.label
+             ) combined
+             GROUP BY label ORDER BY SUM(trades) DESC LIMIT 15`;
+
+        const walletPerf = await getMany<Record<string, unknown>>(walletPerfQuery);
 
         const walletLines = walletPerf.map((w) => {
           const wTotal = Number(w.trades);
           const wWins = Number(w.wins);
           const wWr = wTotal > 0 ? (wWins / wTotal * 100).toFixed(0) : '0';
-          const wPnl = (Number(w.avg_pnl) * 100).toFixed(1);
-          const wSol = Number(w.total_pnl).toFixed(4);
-          return `│ ${w.label}: ${wTotal}t ${wWr}%W avg${wPnl}% ${wSol}SOL`;
+          const wSol = Number(w.net_sol).toFixed(4);
+          return `│ ${w.label}: ${wTotal}t ${wWr}%W ${Number(w.net_sol) >= 0 ? '+' : ''}${wSol}SOL`;
         });
 
-        // Get current config for context
-        const cfgStatus = this.getStatus?.() || {};
-        const cfgCapSol = cfgStatus.capitalSol as number || 0;
-        const cfgTier = getTierForCapital(cfgCapSol);
-        const cfgTc = getTierConfig(cfgTier);
-        const pf = config.pumpFun;
+        // ── SECTION 5: SIGNAL FUNNEL ──
+        const funnel = await getOne<Record<string, unknown>>(
+          `SELECT
+             COUNT(*) as total,
+             COUNT(*) FILTER (WHERE action_taken = 'EXECUTED') as executed,
+             COUNT(*) FILTER (WHERE action_taken = 'SKIPPED_VALIDATION') as skipped_val,
+             COUNT(*) FILTER (WHERE action_taken = 'SKIPPED_MAX_POSITIONS') as skipped_max,
+             COUNT(*) FILTER (WHERE action_taken = 'SKIPPED_DAILY_LIMIT') as skipped_daily,
+             COUNT(*) FILTER (WHERE action_taken = 'SKIPPED_MIN_POSITION') as skipped_min
+           FROM signal_events`,
+        );
 
-        // Build the full report
+        const totalSignals = Number(funnel?.total || 0);
+        const executed = Number(funnel?.executed || 0);
+        const skippedVal = Number(funnel?.skipped_val || 0);
+        const skippedMax = Number(funnel?.skipped_max || 0);
+        const skippedDaily = Number(funnel?.skipped_daily || 0);
+        const skippedMin = Number(funnel?.skipped_min || 0);
+
+        const rejections = await getMany<Record<string, unknown>>(
+          `SELECT validation_result, COUNT(*) as total
+           FROM signal_events WHERE validation_result != 'PASSED'
+           GROUP BY validation_result ORDER BY total DESC`,
+        );
+
+        const rejectionLines = rejections.map((r) => {
+          const reason = (r.validation_result as string).replace('FAILED_', '');
+          const count = Number(r.total);
+          const pct = totalSignals > 0 ? (count / totalSignals * 100).toFixed(0) : '0';
+          return `│ ${reason}: ${count} (${pct}%)`;
+        });
+
+        // ── BUILD THE FULL REPORT ──
+        const dexAvgPnl = (Number(dexOverall?.avg_pnl || 0) * 100).toFixed(1);
+        const dexAvgHold = Number(dexOverall?.avg_hold || 0).toFixed(0);
+        const dexAvgLag = Number(dexOverall?.avg_lag || 0).toFixed(0);
+        const pfAvgPnl = (Number(pfOverall?.avg_pnl || 0) * 100).toFixed(1);
+        const pfAvgHold = Number(pfOverall?.avg_hold || 0).toFixed(0);
+        const pfAvgLag = Number(pfOverall?.avg_lag || 0).toFixed(0);
+        const pfAvgEntryCurve = (Number(pfOverall?.avg_entry_curve || 0) * 100).toFixed(0);
+        const pfAvgPeakCurve = (Number(pfOverall?.avg_peak_curve || 0) * 100).toFixed(0);
+        const pfGradCount = Number(pfOverall?.graduated || 0);
+        const dexWr = dexTotal > 0 ? (dexWins / dexTotal * 100).toFixed(0) : 'N/A';
+        const pfWr = pfTotal > 0 ? (pfWins / pfTotal * 100).toFixed(0) : 'N/A';
+
         const lines = [
-          `🔧 TUNING REPORT (${total} trades) — copy entire message to Claude`,
+          `🔧 TUNING REPORT (${grandTotal} trades) — copy entire message to Claude`,
           ``,
           `┌─ ACTIVE CONFIG`,
           `│ Tier: ${cfgTier} | ${cfgCapSol.toFixed(2)} SOL | ${config.shadowMode ? 'SHADOW' : 'LIVE'}`,
@@ -1642,36 +1821,85 @@ export class TelegramService {
           `│ Pump.fun: entry ${(pf.curveEntryMin * 100).toFixed(0)}-${(pf.curveEntryMax * 100).toFixed(0)}% | TP ${(pf.curveProfitTarget * 100).toFixed(0)}% | stale ${pf.staleTimeKillMins}m`,
           `│ Conviction: ${pf.minConvictionSol}SOL | Velocity: ${pf.curveVelocityMin}SOL/m | Age: ${pf.maxTokenAgeMins}m`,
           `│`,
-          `├─ OVERVIEW`,
-          `│ ${wins}W/${losses}L (${wr}%) · Avg PnL: ${avgPnl}% · Total: ${totalPnlSol} SOL`,
-          `│ Avg hold: ${avgHold}min · Avg entry curve: ${avgEntryCurve}% · Avg peak: ${avgPeakCurve}%`,
-          `│ Avg alpha lag: ${avgAlphaLag}s · Graduated: ${gradCount}/${total}`,
+          `├─ COMBINED OVERVIEW`,
+          `│ ${grandWins}W/${grandLosses}L (${grandWr}%) · Net: ${grandNetSol >= 0 ? '+' : ''}${grandNetSol.toFixed(4)} SOL · Fees: ${grandFees.toFixed(4)} SOL`,
+          `│ DEX: ${dexTotal}t ${dexWr}%W avg${dexAvgPnl}% ${dexNetSol >= 0 ? '+' : ''}${dexNetSol.toFixed(4)}SOL hold${dexAvgHold}m lag${dexAvgLag}s`,
+          `│ PF:  ${pfTotal}t ${pfWr}%W avg${pfAvgPnl}% ${pfNetSol >= 0 ? '+' : ''}${pfNetSol.toFixed(4)}SOL hold${pfAvgHold}m lag${pfAvgLag}s`,
           `│`,
-          `├─ ENTRY TYPE BREAKDOWN`,
-          ...(entryTypeLines.length > 0 ? entryTypeLines : ['│  (all DIRECT)']),
-          `│`,
-          `├─ EXIT REASONS`,
-          ...(exitLines.length > 0 ? exitLines : ['│  (none)']),
-          `│`,
-          `├─ ENTRY CURVE ZONE → OUTCOME`,
-          ...zoneLines,
-          `│`,
-          `├─ ALPHA LAG → OUTCOME`,
-          ...lagLines,
-          `│`,
-          `├─ PEAK CURVE (wins vs losses)`,
-          `│ Wins: avg ${avgPeakWins}% median ${medPeakWins}%`,
-          `│ Losses: avg ${avgPeakLosses}% median ${medPeakLosses}%`,
-          `│`,
-          `├─ WALLET PERFORMANCE`,
+        ];
+
+        // DEX section (only if there are DEX trades)
+        if (dexTotal > 0) {
+          lines.push(
+            `├─ DEX TRADES (${isLive ? 'LIVE' : 'SHADOW'}: ${dexTotal} trades)`,
+            `│ ${dexWins}W/${dexTotal - dexWins}L (${dexWr}%) · Avg PnL: ${dexAvgPnl}% · Net: ${dexNetSol >= 0 ? '+' : ''}${dexNetSol.toFixed(4)} SOL`,
+            `│ Avg hold: ${dexAvgHold}m · Avg lag: ${dexAvgLag}s${dexFees > 0 ? ` · Fees: ${dexFees.toFixed(4)} SOL` : ''}`,
+            `│`,
+            `│ By tier:`,
+            ...(dexTierLines.length > 0 ? dexTierLines : ['│  (none)']),
+            `│`,
+            `│ Exit reasons:`,
+            ...(dexExitLines.length > 0 ? dexExitLines : ['│  (none)']),
+            `│`,
+            `│ Alpha lag → outcome:`,
+            ...(dexLagLines.length > 0 ? dexLagLines : ['│  (none)']),
+            `│`,
+            `│ Recent DEX trades:`,
+            ...dexRecentLines,
+            `│`,
+          );
+        }
+
+        // Pump.fun section (only if there are PF trades)
+        if (pfTotal > 0) {
+          lines.push(
+            `├─ PUMP.FUN TRADES (${pfTotal} trades)`,
+            `│ ${pfWins}W/${pfTotal - pfWins}L (${pfWr}%) · Avg PnL: ${pfAvgPnl}% · Net: ${pfNetSol >= 0 ? '+' : ''}${pfNetSol.toFixed(4)} SOL`,
+            `│ Avg hold: ${pfAvgHold}m · Entry curve: ${pfAvgEntryCurve}% · Peak: ${pfAvgPeakCurve}% · Graduated: ${pfGradCount}/${pfTotal}`,
+            `│`,
+            `│ Entry type breakdown:`,
+            ...(pfEntryTypeLines.length > 0 ? pfEntryTypeLines : ['│  (all DIRECT)']),
+            `│`,
+            `│ Exit reasons:`,
+            ...(pfExitLines.length > 0 ? pfExitLines : ['│  (none)']),
+            `│`,
+            `│ Entry curve zone → outcome:`,
+            ...zoneLines,
+            `│`,
+            `│ Alpha lag → outcome:`,
+            ...(pfLagLines.length > 0 ? pfLagLines : ['│  (none)']),
+            `│`,
+            `│ Peak curve (wins vs losses):`,
+            `│ Wins: avg ${avgPeakWins}% median ${medPeakWins}%`,
+            `│ Losses: avg ${avgPeakLosses}% median ${medPeakLosses}%`,
+            `│`,
+            `│ Recent PF trades:`,
+            ...pfRecentLines,
+            `│`,
+          );
+        }
+
+        // Wallet performance (combined)
+        lines.push(
+          `├─ WALLET PERFORMANCE (all trades)`,
           ...(walletLines.length > 0 ? walletLines : ['│  (none)']),
           `│`,
-          `├─ RECENT TRADES (newest first)`,
-          `│ [icon token pnl hold entry peak type lag exit]`,
-          ...recentLines,
-          `│`,
+        );
+
+        // Signal funnel
+        if (totalSignals > 0) {
+          lines.push(
+            `├─ SIGNAL FUNNEL`,
+            `│ Total: ${totalSignals} · Executed: ${executed} (${(executed / totalSignals * 100).toFixed(0)}%)`,
+            `│ Rejected: validation ${skippedVal} · max pos ${skippedMax} · daily limit ${skippedDaily} · min pos ${skippedMin}`,
+            ...(rejectionLines.length > 0 ? [`│ By reason:`, ...rejectionLines] : []),
+            `│`,
+          );
+        }
+
+        lines.push(
           `└─ Send to Claude: "here's my tuning report, analyze and suggest config changes"`,
-        ];
+        );
 
         for (const chunk of this.chunkMessage(lines.join('\n'))) {
           await this.bot.sendMessage(msg.chat.id, chunk);

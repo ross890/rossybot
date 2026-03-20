@@ -58,6 +58,8 @@ export class ShadowTracker {
       closed_at: null,
       hold_time_mins: null,
       partial_exits: [],
+      momentum_extensions: new Map(),
+      reentry_count: 0,
     };
 
     this.positions.set(pos.id, pos);
@@ -172,10 +174,29 @@ export class ShadowTracker {
       if (pnl <= tierCfg.stopLoss) { await this.closePosition(pos, `Stop loss (${(pnl * 100).toFixed(1)}%)`); return; }
       if (pnl >= tierCfg.profitTarget) { await this.closePosition(pos, `Profit target (${(pnl * 100).toFixed(1)}%)`); return; }
 
-      // Time kills from tier config
-      for (const tk of tierCfg.timeKills) {
-        if (holdMins >= tk.hours * 60 && pnl < tk.minPnlPct) {
-          await this.closePosition(pos, `Time kill ${tk.hours}h (<${(tk.minPnlPct * 100).toFixed(0)}%)`);
+      // Time kills from tier config (with momentum extension)
+      for (let i = 0; i < tierCfg.timeKills.length; i++) {
+        const tk = tierCfg.timeKills[i];
+        const extensionCount = pos.momentum_extensions.get(i) || 0;
+        const effectiveHours = tk.hours + (extensionCount * tierCfg.momentumExtensionHours);
+
+        if (holdMins >= effectiveHours * 60 && pnl < tk.minPnlPct) {
+          if (tierCfg.momentumExtensionEnabled &&
+              extensionCount < tierCfg.momentumExtensionMaxPerWindow &&
+              pnl >= tierCfg.momentumExtensionMinPnl &&
+              pos.current_price > pos.entry_price * 0.95 &&
+              pos.peak_price > pos.entry_price) {
+            pos.momentum_extensions.set(i, extensionCount + 1);
+            logger.info({
+              id: pos.id.slice(0, 8),
+              token: pos.token_symbol || pos.token_address.slice(0, 8),
+              window: `${tk.hours}h`,
+              extension: extensionCount + 1,
+              pnl: `${(pnl * 100).toFixed(1)}%`,
+            }, 'Momentum extension — time kill deferred');
+            continue;
+          }
+          await this.closePosition(pos, `Time kill ${effectiveHours}h (<${(tk.minPnlPct * 100).toFixed(0)}%)`);
           return;
         }
       }
@@ -200,8 +221,30 @@ export class ShadowTracker {
         pos.partial_exits.push({ time: new Date(), pct: 50, price: pos.current_price, reason: 'Partial 1 (+30%)' });
       }
 
-      if (holdMins >= 60 && pnl < 0.05) { await this.closePosition(pos, 'Time kill 1h (<5%)'); return; }
-      if (holdMins >= 240 && pnl < 0.15) { await this.closePosition(pos, 'Time kill 4h (<15%)'); return; }
+      // Time kills with momentum extension
+      for (let i = 0; i < tierCfg.timeKills.length; i++) {
+        const tk = tierCfg.timeKills[i];
+        const extensionCount = pos.momentum_extensions.get(i) || 0;
+        const effectiveHours = tk.hours + (extensionCount * tierCfg.momentumExtensionHours);
+        if (holdMins >= effectiveHours * 60 && pnl < tk.minPnlPct) {
+          if (tierCfg.momentumExtensionEnabled &&
+              extensionCount < tierCfg.momentumExtensionMaxPerWindow &&
+              pnl >= tierCfg.momentumExtensionMinPnl &&
+              pos.current_price > pos.entry_price * 0.95 &&
+              pos.peak_price > pos.entry_price) {
+            pos.momentum_extensions.set(i, extensionCount + 1);
+            logger.info({
+              id: pos.id.slice(0, 8),
+              token: pos.token_symbol || pos.token_address.slice(0, 8),
+              window: `${tk.hours}h`, extension: extensionCount + 1,
+              pnl: `${(pnl * 100).toFixed(1)}%`,
+            }, 'Momentum extension — time kill deferred (MEDIUM)');
+            continue;
+          }
+          await this.closePosition(pos, `Time kill ${effectiveHours}h (<${(tk.minPnlPct * 100).toFixed(0)}%)`);
+          return;
+        }
+      }
       return;
     }
 
@@ -226,9 +269,30 @@ export class ShadowTracker {
         pos.partial_exits.push({ time: new Date(), pct: 50, price: pos.current_price, reason: 'Partial 1 (+25%)' });
       }
 
-      if (holdMins >= 60 && pnl < 0.05) { await this.closePosition(pos, 'Time kill 1h (<5%)'); return; }
-      if (holdMins >= 240 && pnl < 0.15) { await this.closePosition(pos, 'Time kill 4h (<15%)'); return; }
-      if (holdMins >= 720 && pnl < 0.25) { await this.closePosition(pos, 'Time kill 12h (<25%)'); return; }
+      // Time kills with momentum extension
+      for (let i = 0; i < tierCfg.timeKills.length; i++) {
+        const tk = tierCfg.timeKills[i];
+        const extensionCount = pos.momentum_extensions.get(i) || 0;
+        const effectiveHours = tk.hours + (extensionCount * tierCfg.momentumExtensionHours);
+        if (holdMins >= effectiveHours * 60 && pnl < tk.minPnlPct) {
+          if (tierCfg.momentumExtensionEnabled &&
+              extensionCount < tierCfg.momentumExtensionMaxPerWindow &&
+              pnl >= tierCfg.momentumExtensionMinPnl &&
+              pos.current_price > pos.entry_price * 0.95 &&
+              pos.peak_price > pos.entry_price) {
+            pos.momentum_extensions.set(i, extensionCount + 1);
+            logger.info({
+              id: pos.id.slice(0, 8),
+              token: pos.token_symbol || pos.token_address.slice(0, 8),
+              window: `${tk.hours}h`, extension: extensionCount + 1,
+              pnl: `${(pnl * 100).toFixed(1)}%`,
+            }, 'Momentum extension — time kill deferred (FULL)');
+            continue;
+          }
+          await this.closePosition(pos, `Time kill ${effectiveHours}h (<${(tk.minPnlPct * 100).toFixed(0)}%)`);
+          return;
+        }
+      }
     }
   }
 
@@ -305,6 +369,8 @@ export class ShadowTracker {
         closed_at: null,
         hold_time_mins: null,
         partial_exits: (row.partial_exits as Array<{ time: Date; pct: number; price: number; reason: string }>) || [],
+        momentum_extensions: new Map(),
+        reentry_count: 0,
       };
       this.positions.set(pos.id, pos);
     }

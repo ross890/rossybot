@@ -119,6 +119,8 @@ export class LiveTracker {
       closed_at: null,
       sell_retry_count: 0,
       hold_time_mins: null,
+      momentum_extensions: new Map(),
+      reentry_count: 0,
     };
 
     this.positions.set(pos.id, pos);
@@ -363,9 +365,32 @@ export class LiveTracker {
     }
 
     // Time kills from config — use the tier's configured windows
-    for (const tk of tierCfg.timeKills) {
-      if (holdMins >= tk.hours * 60 && pnl < tk.minPnlPct) {
-        await this.closePosition(pos, `Time kill ${tk.hours}h (<${(tk.minPnlPct * 100).toFixed(0)}%)`);
+    for (let i = 0; i < tierCfg.timeKills.length; i++) {
+      const tk = tierCfg.timeKills[i];
+      const extensionCount = pos.momentum_extensions.get(i) || 0;
+      const effectiveHours = tk.hours + (extensionCount * tierCfg.momentumExtensionHours);
+
+      if (holdMins >= effectiveHours * 60 && pnl < tk.minPnlPct) {
+        // Check if momentum extension is allowed
+        if (tierCfg.momentumExtensionEnabled &&
+            extensionCount < tierCfg.momentumExtensionMaxPerWindow &&
+            pnl >= tierCfg.momentumExtensionMinPnl &&
+            pos.current_price > pos.entry_price * 0.95 && // Price near or above entry
+            pos.peak_price > pos.entry_price) { // Has shown upward movement
+          // Extend this window
+          pos.momentum_extensions.set(i, extensionCount + 1);
+          logger.info({
+            id: pos.id.slice(0, 8),
+            token: pos.token_symbol,
+            window: `${tk.hours}h`,
+            extension: extensionCount + 1,
+            pnl: `${(pnl * 100).toFixed(1)}%`,
+            newDeadline: `${effectiveHours + tierCfg.momentumExtensionHours}h`,
+          }, 'Momentum extension — time kill deferred');
+          continue; // Skip this time kill, check next window
+        }
+
+        await this.closePosition(pos, `Time kill ${effectiveHours}h (<${(tk.minPnlPct * 100).toFixed(0)}%)`);
         return;
       }
     }
@@ -578,6 +603,8 @@ export class LiveTracker {
         closed_at: null,
         hold_time_mins: null,
         sell_retry_count: 0,
+        momentum_extensions: new Map(),
+        reentry_count: 0,
       };
       this.positions.set(pos.id, pos);
     }

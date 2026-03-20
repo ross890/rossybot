@@ -130,6 +130,10 @@ export const TIER_CONFIGS: Record<CapitalTier, TierConfig> = {
       { hours: 6, minPnlPct: 0.20 },   // Must be +20% by 6h (was 12h/+25% — don't hold overnight)
     ],
     hardTimeHours: 12,                // 12h hard cap (was 48h — memecoins are fast, don't hold bags)
+    momentumExtensionEnabled: true,
+    momentumExtensionHours: 1,        // Extend time kill windows by 1h when momentum is strong
+    momentumExtensionMaxPerWindow: 1, // Max 1 extension per window (MICRO = quick trades)
+    momentumExtensionMinPnl: -0.02,   // Must be near breakeven or better to extend
     mcapMin: 30_000,
     mcapMax: 10_000_000,
     liquidityMin: 5_000,              // $5K min (was $10K — micro-cap tokens often have lower liq)
@@ -139,6 +143,10 @@ export const TIER_CONFIGS: Record<CapitalTier, TierConfig> = {
     volumeMultiplierMin: 1,
     tokenMaxAgeDays: 14,              // 14 days max age (was 30 — stale tokens less interesting)
     minSignalScore: 35,               // Lowered back from 45 — new wallets with 0.4 confidence can't mathematically reach 45
+    reentryEnabled: true,
+    reentryCooldownMins: 15,           // 15 min cooldown after exit before re-entry
+    reentryMaxPerToken: 1,             // Max 1 re-entry per token per session
+    reentrySizeMultiplier: 0.60,       // 60% of normal position size on re-entry
   },
   [CapitalTier.SMALL]: {
     tier: CapitalTier.SMALL,
@@ -158,6 +166,10 @@ export const TIER_CONFIGS: Record<CapitalTier, TierConfig> = {
       { hours: 6, minPnlPct: 0.20 },   // Must be +20% by 6h
     ],
     hardTimeHours: 24,                 // 24h hard cap (was 48h — memecoins resolve fast)
+    momentumExtensionEnabled: true,
+    momentumExtensionHours: 1,
+    momentumExtensionMaxPerWindow: 1,
+    momentumExtensionMinPnl: -0.02,
     mcapMin: 50_000,                   // $50K min (was $200K — best DEX wins were $52K-$144K mcap)
     mcapMax: 5_000_000,               // $5M max (was $2M — opens more signal space)
     liquidityMin: 15_000,              // $15K min (was $30K — $WORTHLESS had $36K liq, $Chibify $21K)
@@ -167,6 +179,10 @@ export const TIER_CONFIGS: Record<CapitalTier, TierConfig> = {
     volumeMultiplierMin: 1,
     tokenMaxAgeDays: 30,
     minSignalScore: 35,
+    reentryEnabled: true,
+    reentryCooldownMins: 15,
+    reentryMaxPerToken: 1,
+    reentrySizeMultiplier: 0.60,
   },
   [CapitalTier.MEDIUM]: {
     tier: CapitalTier.MEDIUM,
@@ -185,6 +201,10 @@ export const TIER_CONFIGS: Record<CapitalTier, TierConfig> = {
       { hours: 4, minPnlPct: 0.15 },
     ],
     hardTimeHours: 48,
+    momentumExtensionEnabled: true,
+    momentumExtensionHours: 2,        // MEDIUM: extend by 2h (larger positions need more room)
+    momentumExtensionMaxPerWindow: 2, // Max 2 extensions per window
+    momentumExtensionMinPnl: 0.0,     // Must be breakeven or better
     mcapMin: 100_000,
     mcapMax: 10_000_000,
     liquidityMin: 75_000,
@@ -194,6 +214,10 @@ export const TIER_CONFIGS: Record<CapitalTier, TierConfig> = {
     volumeMultiplierMin: 1,
     tokenMaxAgeDays: null,
     minSignalScore: 45,
+    reentryEnabled: true,
+    reentryCooldownMins: 30,           // 30 min cooldown for MEDIUM
+    reentryMaxPerToken: 1,
+    reentrySizeMultiplier: 0.50,       // 50% size on re-entry (more cautious with bigger positions)
   },
   [CapitalTier.FULL]: {
     tier: CapitalTier.FULL,
@@ -213,6 +237,10 @@ export const TIER_CONFIGS: Record<CapitalTier, TierConfig> = {
       { hours: 12, minPnlPct: 0.25 },
     ],
     hardTimeHours: 48,
+    momentumExtensionEnabled: true,
+    momentumExtensionHours: 2,
+    momentumExtensionMaxPerWindow: 2,
+    momentumExtensionMinPnl: 0.0,
     mcapMin: 100_000,
     mcapMax: 50_000_000,
     liquidityMin: 50_000,
@@ -222,6 +250,10 @@ export const TIER_CONFIGS: Record<CapitalTier, TierConfig> = {
     volumeMultiplierMin: 1,
     tokenMaxAgeDays: null,
     minSignalScore: 50,
+    reentryEnabled: true,
+    reentryCooldownMins: 30,
+    reentryMaxPerToken: 1,
+    reentrySizeMultiplier: 0.50,
   },
 };
 

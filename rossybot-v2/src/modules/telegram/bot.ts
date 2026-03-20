@@ -390,9 +390,11 @@ export class TelegramService {
     openPositions: number;
     wallets: Array<{
       address: string; label: string; tier: string; subscribed: boolean;
-      nansenRoi: number; nansenPnl: number; ourTrades: number; ourWinRate: number;
-      ourAvgPnl: number; consecutiveLosses: number; source: string;
-      lastActiveAgo?: string;
+      nansenRoi: number; nansenPnl: number; nansenTrades: number;
+      avgBuySizeSol: number; ourTrades: number; ourWinRate: number;
+      ourAvgPnl: number; ourAvgHoldMins: number; alphaScore: number;
+      consecutiveLosses: number; pumpfunOnly: boolean; source: string;
+      lastActiveHours: number | null;
     }>;
     wsConnected: boolean;
     wsFallbackActive: boolean;
@@ -427,20 +429,112 @@ export class TelegramService {
     tradesAllTime: number;
     discoveryTokens: number;
     discoveryWalletsAdded: number;
+    performance: {
+      pumpFun: {
+        total: number; wins: number; wr: number;
+        avgWinPct: number; avgLossPct: number; netSol: number;
+        totalFees: number; avgHoldMins: number; avgLagSecs: number;
+        profitFactor: number; expectancySol: number;
+      };
+      exitReasons: Array<{ reason: string; total: number; wins: number; avgPnl: number; netSol: number }>;
+      curveZones: Array<{ zone: string; total: number; wins: number; avgPnl: number; netSol: number }>;
+      entryTypes: Array<{ type: string; total: number; wins: number; avgPnl: number; netSol: number }>;
+      signalFunnel: { total: number; executed: number; skippedValidation: number; skippedMaxPos: number; skippedDaily: number };
+      rejections: Array<{ reason: string; count: number }>;
+      topWallets: Array<{ label: string; trades: number; wins: number; netSol: number; avgPnl: number }>;
+      bottomWallets: Array<{ label: string; trades: number; wins: number; netSol: number; avgPnl: number }>;
+      trend: { recentTrades: number; recentWins: number; recentSol: number; priorTrades: number; priorWins: number; priorSol: number };
+      tierChanges: Array<{ from: string; to: string; capital: number; at: Date }>;
+    };
+    activeConfig: {
+      minSignalScore: number; positionSizePct: number;
+      curveEntryMin: number; curveEntryMax: number; curveVelocityMin: number;
+      deferredEntryEnabled: boolean; deferredEntryMaxWaitMs: number;
+    };
   }): Promise<void> {
-    const walletLines = data.wallets.map((w) => {
-      const status = w.subscribed ? '📡' : '⏸️';
-      const stats: string[] = [];
-      if (w.nansenRoi > 0) stats.push(`ROI ${w.nansenRoi.toFixed(0)}%`);
-      if (w.nansenPnl > 0) stats.push(`PnL $${this.formatNum(w.nansenPnl)}`);
-      if (w.ourTrades > 0) stats.push(`${w.ourTrades}t ${(w.ourWinRate * 100).toFixed(0)}%W`);
-      if (w.consecutiveLosses > 0) stats.push(`${w.consecutiveLosses}L`);
-      if (w.lastActiveAgo) stats.push(`🕐${w.lastActiveAgo}`);
-      const statsStr = stats.length > 0 ? ` | ${stats.join(' · ')}` : '';
-      return `│  ${status} [${w.tier}] ${w.address.slice(0, 6)}...${w.address.slice(-4)}${statsStr}`;
-    }).join('\n');
-
     const isPumpFunOnly = data.capitalSol < data.minCapitalForStandardTrading;
+
+    // --- Group wallets by quality tier for readability ---
+    // Buckets based on estimated value: Nansen PnL + our data + alpha score
+    type WalletBucket = { label: string; wallets: typeof data.wallets };
+    const buckets: WalletBucket[] = [
+      { label: '🟢 HIGH VALUE (PnL $50K+ or α40+)', wallets: [] },
+      { label: '🟡 PROVEN ($5K-$50K PnL or our 3+ trades)', wallets: [] },
+      { label: '🔵 UNPROVEN (new / no our-side data yet)', wallets: [] },
+      { label: '🔴 UNDERPERFORMING (loss streaks / low α)', wallets: [] },
+    ];
+
+    for (const w of data.wallets) {
+      const hasLossStreak = w.consecutiveLosses >= 2;
+      const lowAlpha = w.alphaScore > 0 && w.alphaScore < 20 && w.ourTrades >= 3;
+
+      if (hasLossStreak || lowAlpha) {
+        buckets[3].wallets.push(w);
+      } else if (w.nansenPnl >= 50_000 || w.alphaScore >= 40) {
+        buckets[0].wallets.push(w);
+      } else if (w.nansenPnl >= 5_000 || w.ourTrades >= 3) {
+        buckets[1].wallets.push(w);
+      } else {
+        buckets[2].wallets.push(w);
+      }
+    }
+
+    const formatWallet = (w: typeof data.wallets[0]): string => {
+      const ws = w.subscribed ? '📡' : '⏸️';
+      const pf = w.pumpfunOnly ? '🎰' : '';
+      const parts: string[] = [];
+
+      // Nansen data
+      if (w.nansenPnl > 0) parts.push(`$${this.formatNum(w.nansenPnl)}`);
+      if (w.nansenRoi > 0) parts.push(`${w.nansenRoi.toFixed(0)}%ROI`);
+      if (w.avgBuySizeSol > 0) parts.push(`avg${w.avgBuySizeSol.toFixed(1)}◎`);
+
+      // Our data
+      if (w.ourTrades > 0) {
+        parts.push(`${w.ourTrades}t ${(w.ourWinRate * 100).toFixed(0)}%W`);
+        if (w.ourAvgPnl !== 0) parts.push(`${(w.ourAvgPnl * 100).toFixed(0)}%avg`);
+      }
+      if (w.alphaScore > 0) parts.push(`α${w.alphaScore.toFixed(0)}`);
+      if (w.consecutiveLosses > 0) parts.push(`🔥${w.consecutiveLosses}L`);
+
+      // Recency
+      if (w.lastActiveHours !== null) {
+        if (w.lastActiveHours <= 1) parts.push('🕐<1h');
+        else if (w.lastActiveHours <= 24) parts.push(`🕐${w.lastActiveHours}h`);
+        else parts.push(`🕐${Math.round(w.lastActiveHours / 24)}d`);
+      }
+
+      const info = parts.join(' · ');
+      return `│  ${ws}${pf} [${w.tier}] ${w.label.split(' |')[0].slice(0, 10)} ${info}`;
+    };
+
+    const walletSections: string[] = [];
+    const subscribedCount = data.wallets.filter((w) => w.subscribed).length;
+    const pfOnlyCount = data.wallets.filter((w) => w.pumpfunOnly).length;
+    const withBuySize = data.wallets.filter((w) => w.avgBuySizeSol > 0);
+    const avgBuyAll = withBuySize.length > 0
+      ? withBuySize.reduce((s, w) => s + w.avgBuySizeSol, 0) / withBuySize.length
+      : 0;
+
+    walletSections.push(
+      `├─ WALLETS (${data.wallets.length} active, ${subscribedCount} WS, ${pfOnlyCount} PF-only${avgBuyAll > 0 ? `, avg bid ${avgBuyAll.toFixed(1)}◎` : ''})`,
+    );
+
+    for (const bucket of buckets) {
+      if (bucket.wallets.length === 0) continue;
+      walletSections.push(`│`);
+      walletSections.push(`│ ${bucket.label} (${bucket.wallets.length})`);
+      // Show top 5 per bucket, summarize rest
+      const shown = bucket.wallets.slice(0, 5);
+      const hidden = bucket.wallets.length - shown.length;
+      for (const w of shown) {
+        walletSections.push(formatWallet(w));
+      }
+      if (hidden > 0) {
+        walletSections.push(`│  ... +${hidden} more`);
+      }
+    }
+    walletSections.push(`│`);
 
     const msg: string[] = [
       `🤖 ROSSYBOT V2 — STARTUP DIAGNOSTICS`,
@@ -469,9 +563,7 @@ export class TelegramService {
       `│ Discovery schedule: every 4h`,
       `│ Last run: ${data.discoveryTokens} tokens screened, ${data.discoveryWalletsAdded} wallets added`,
       `│`,
-      `├─ WALLETS MONITORED (${data.wallets.length})`,
-      walletLines,
-      `│`,
+      ...walletSections,
     ];
 
     if (isPumpFunOnly) {
@@ -523,15 +615,147 @@ export class TelegramService {
       );
     }
 
+    // --- PERFORMANCE DATA (for self-improving feedback loop) ---
+    const pf = data.performance.pumpFun;
+    const funnel = data.performance.signalFunnel;
+    const trend = data.performance.trend;
+    const cfg = data.activeConfig;
+
+    if (pf.total > 0) {
+      const pfWr = (pf.wr * 100).toFixed(0);
+      const pfFactor = pf.profitFactor > 0 ? pf.profitFactor.toFixed(2) : 'N/A';
+      const holdStr = pf.avgHoldMins < 60 ? `${pf.avgHoldMins.toFixed(0)}m` : `${(pf.avgHoldMins / 60).toFixed(1)}h`;
+
+      msg.push(
+        `├─ PUMP.FUN PERFORMANCE (${pf.total} trades)`,
+        `│ WR: ${pfWr}% (${pf.wins}W/${pf.total - pf.wins}L) | PF: ${pfFactor}`,
+        `│ Avg win: +${(pf.avgWinPct * 100).toFixed(1)}% | Avg loss: ${(pf.avgLossPct * 100).toFixed(1)}%`,
+        `│ Net: ${pf.netSol >= 0 ? '+' : ''}${pf.netSol.toFixed(4)} SOL | Fees: ${pf.totalFees.toFixed(4)} SOL`,
+        `│ EV: ${pf.expectancySol >= 0 ? '+' : ''}${pf.expectancySol.toFixed(4)} SOL/trade`,
+        `│ Avg hold: ${holdStr} | Avg lag: ${pf.avgLagSecs.toFixed(0)}s`,
+        `│`,
+      );
+
+      // Exit reason breakdown
+      if (data.performance.exitReasons.length > 0) {
+        msg.push(`│ ── EXIT REASONS`);
+        for (const r of data.performance.exitReasons) {
+          const rWr = r.total > 0 ? (r.wins / r.total * 100).toFixed(0) : '0';
+          msg.push(`│  ${r.reason}: ${r.total}t ${rWr}%W ${r.netSol >= 0 ? '+' : ''}${r.netSol.toFixed(4)}◎`);
+        }
+        msg.push(`│`);
+      }
+
+      // Curve zone breakdown
+      if (data.performance.curveZones.length > 0) {
+        msg.push(`│ ── ENTRY CURVE ZONE`);
+        for (const z of data.performance.curveZones) {
+          const zWr = z.total > 0 ? (z.wins / z.total * 100).toFixed(0) : '0';
+          msg.push(`│  ${z.zone}: ${z.total}t ${zWr}%W avg${(z.avgPnl * 100).toFixed(1)}% ${z.netSol >= 0 ? '+' : ''}${z.netSol.toFixed(4)}◎`);
+        }
+        msg.push(`│`);
+      }
+
+      // Entry type breakdown
+      if (data.performance.entryTypes.length > 0) {
+        msg.push(`│ ── ENTRY TYPE`);
+        for (const e of data.performance.entryTypes) {
+          const eWr = e.total > 0 ? (e.wins / e.total * 100).toFixed(0) : '0';
+          msg.push(`│  ${e.type}: ${e.total}t ${eWr}%W ${e.netSol >= 0 ? '+' : ''}${e.netSol.toFixed(4)}◎`);
+        }
+        msg.push(`│`);
+      }
+    }
+
+    // Signal funnel
+    if (funnel.total > 0) {
+      const passRate = (funnel.executed / funnel.total * 100).toFixed(0);
+      msg.push(
+        `├─ SIGNAL FUNNEL (${funnel.total} total)`,
+        `│ ${funnel.total} detected → ${funnel.executed} entered (${passRate}% pass)`,
+        `│ Rejected: ${funnel.skippedValidation} validation, ${funnel.skippedMaxPos} max-pos, ${funnel.skippedDaily} daily-limit`,
+      );
+      if (data.performance.rejections.length > 0) {
+        const rejStr = data.performance.rejections.map((r) => `${r.reason}:${r.count}`).join(' · ');
+        msg.push(`│ Top rejects: ${rejStr}`);
+      }
+      msg.push(`│`);
+    }
+
+    // Wallet leaderboard
+    if (data.performance.topWallets.length > 0) {
+      msg.push(`├─ WALLET LEADERBOARD`);
+      msg.push(`│ ── BEST (by SOL)`);
+      for (const w of data.performance.topWallets) {
+        const wWr = w.trades > 0 ? (w.wins / w.trades * 100).toFixed(0) : '0';
+        msg.push(`│  ${w.label}: ${w.trades}t ${wWr}%W ${w.netSol >= 0 ? '+' : ''}${w.netSol.toFixed(4)}◎`);
+      }
+      if (data.performance.bottomWallets.length > 0) {
+        msg.push(`│ ── WORST (by SOL)`);
+        for (const w of data.performance.bottomWallets) {
+          const wWr = w.trades > 0 ? (w.wins / w.trades * 100).toFixed(0) : '0';
+          msg.push(`│  ${w.label}: ${w.trades}t ${wWr}%W ${w.netSol >= 0 ? '+' : ''}${w.netSol.toFixed(4)}◎`);
+        }
+      }
+      msg.push(`│`);
+    }
+
+    // 7d trend
+    if (trend.recentTrades > 0 || trend.priorTrades > 0) {
+      const recentWr = trend.recentTrades > 0 ? (trend.recentWins / trend.recentTrades * 100).toFixed(0) : 'N/A';
+      const priorWr = trend.priorTrades > 0 ? (trend.priorWins / trend.priorTrades * 100).toFixed(0) : 'N/A';
+      const solDelta = trend.recentSol - trend.priorSol;
+      const improving = solDelta > 0;
+      msg.push(
+        `├─ 7D TREND ${improving ? '📈' : '📉'}`,
+        `│ This week: ${trend.recentTrades}t ${recentWr}%W ${trend.recentSol >= 0 ? '+' : ''}${trend.recentSol.toFixed(4)}◎`,
+        `│ Last week: ${trend.priorTrades}t ${priorWr}%W ${trend.priorSol >= 0 ? '+' : ''}${trend.priorSol.toFixed(4)}◎`,
+        `│ Delta: ${solDelta >= 0 ? '+' : ''}${solDelta.toFixed(4)}◎ ${improving ? '(improving)' : '(declining)'}`,
+        `│`,
+      );
+    }
+
+    // Tier history
+    if (data.performance.tierChanges.length > 0) {
+      msg.push(`├─ TIER HISTORY`);
+      for (const t of data.performance.tierChanges) {
+        const ago = Math.round((Date.now() - t.at.getTime()) / 3600000);
+        const agoStr = ago < 24 ? `${ago}h ago` : `${Math.round(ago / 24)}d ago`;
+        msg.push(`│ ${t.from} → ${t.to} at ${t.capital.toFixed(2)}◎ (${agoStr})`);
+      }
+      msg.push(`│`);
+    }
+
+    // Active tuning params (the knobs that matter)
+    msg.push(
+      `├─ ACTIVE TUNING PARAMS`,
+      `│ Min signal score: ${cfg.minSignalScore}`,
+      `│ Position size: ${(cfg.positionSizePct * 100).toFixed(0)}% of capital`,
+      `│ Curve entry: ${(cfg.curveEntryMin * 100).toFixed(0)}%-${(cfg.curveEntryMax * 100).toFixed(0)}% fill`,
+      `│ Curve velocity: ${cfg.curveVelocityMin} SOL/min`,
+      `│ Stall timer: ${data.pumpFunStaleTimeMins}min`,
+      `│ Conviction: ${data.pumpFunMinConviction}◎ min`,
+      `│ TP: ${(data.pumpFunCurveProfitTarget * 100).toFixed(0)}% fill | SL: ${(data.pumpFunStopLoss * 100).toFixed(0)}%`,
+      `│ Deferred: ${cfg.deferredEntryEnabled ? `ON (${(cfg.deferredEntryMaxWaitMs / 60000).toFixed(0)}min max)` : 'OFF'}`,
+      `│ PF size mult: ${data.pumpFunPositionSizeMultiplier}x`,
+      `│`,
+    );
+
     msg.push(
       `├─ STATS`,
       `│ Signals today: ${data.signalsToday}`,
       `│ All-time trades: ${data.tradesAllTime}`,
       `│`,
       `└─ STATUS: ✅ RUNNING`,
+      ``,
+      `💡 Copy this message to Claude for tuning recommendations`,
     );
 
-    await this.send(msg.join('\n'));
+    // Split into chunks if too long for Telegram (4096 char limit)
+    const fullMsg = msg.join('\n');
+    for (const chunk of this.chunkMessage(fullMsg)) {
+      await this.send(chunk);
+    }
   }
 
   // --- Command handlers ---

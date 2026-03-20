@@ -79,16 +79,25 @@ function scoreWalletQuality(
     const nansenWeight = 1.0 - ourWeight;
 
     // Estimate Nansen win rate from ROI: ROI > 100% maps to ~0.65 WR, > 500% to ~0.80
-    const nansenEstWinRate = ev.nansenTrades > 0
+    // Also infer from PnL USD when trade count is missing (seed wallets with backfilled data)
+    const hasNansenData = ev.nansenTrades > 0 || ev.nansenPnlUsd > 0;
+    const nansenEstWinRate = hasNansenData
       ? Math.min(0.85, 0.50 + Math.max(0, ev.nansenRoi) / 1000)
       : 0;
 
-    // Nansen avg PnL: sqrt curve instead of linear (roi/10 was too conservative)
+    // Nansen avg PnL estimate: use ROI when available, but also factor in absolute PnL.
+    // A wallet with $201K PnL but 1% ROI is a high-volume profitable trader — don't penalize for low ROI.
     // sqrt(27) * 3 = 15.6%, sqrt(100) * 3 = 30%, sqrt(500) * 3 = 50% (capped)
-    // This better reflects that even low-ROI Nansen wallets are profitable traders
-    const nansenEstAvgPnl = ev.nansenRoi > 0
+    const nansenRoiEstPnl = ev.nansenRoi > 0
       ? Math.min(50, Math.sqrt(ev.nansenRoi) * 3)
       : 0;
+    // PnL USD floor: $100K+ → 25%, $50K+ → 20%, $20K+ → 15%, $5K+ → 10%
+    const nansenPnlFloor = ev.nansenPnlUsd >= 100_000 ? 25
+      : ev.nansenPnlUsd >= 50_000 ? 20
+      : ev.nansenPnlUsd >= 20_000 ? 15
+      : ev.nansenPnlUsd >= 5_000 ? 10
+      : 0;
+    const nansenEstAvgPnl = Math.max(nansenRoiEstPnl, nansenPnlFloor);
 
     const blendedWinRate = ourWeight * ev.winRate + nansenWeight * nansenEstWinRate;
     const blendedAvgPnl = ourWeight * ev.avgPnl + nansenWeight * nansenEstAvgPnl;
@@ -114,9 +123,15 @@ function scoreWalletQuality(
     }
 
     // Confidence: ramp from 0.4 (no our trades, Nansen only) to 1.0 (10+ our trades)
-    // Nansen trades provide a confidence boost — these wallets were discovered as top PnL traders
-    const nansenConfBoost = Math.min(0.25, (ev.nansenTrades / 50) * 0.25);
-    const confidence = Math.min(1.0, 0.4 + (ev.trades / 10) * 0.6 + nansenConfBoost);
+    // Nansen data provides a confidence boost based on trades AND PnL USD.
+    // High-PnL wallets ($50K+) are Nansen-verified profitable — trust them more even with 0 our-trades.
+    const nansenTradeBoost = Math.min(0.15, (ev.nansenTrades / 50) * 0.15);
+    const nansenPnlBoost = ev.nansenPnlUsd >= 100_000 ? 0.20
+      : ev.nansenPnlUsd >= 50_000 ? 0.15
+      : ev.nansenPnlUsd >= 20_000 ? 0.10
+      : ev.nansenPnlUsd >= 5_000 ? 0.05
+      : 0;
+    const confidence = Math.min(1.0, 0.4 + (ev.trades / 10) * 0.6 + nansenTradeBoost + nansenPnlBoost);
 
     // Win rate component (0-15): 50% = 0, 70% = 10.5, 90% = 15
     const wrScore = Math.max(0, (blendedWinRate - 0.5) * 37.5);
@@ -133,10 +148,14 @@ function scoreWalletQuality(
     }
 
     // PnL USD bonus: wallets with significant realized PnL get a bump
-    // $50K+ → +2, $20K+ → +1 (Nansen verified profitable)
-    if (ev.nansenPnlUsd >= 50_000) {
-      walletScore += 2;
+    // Nansen-verified profitable traders deserve credit even with low ROI %
+    if (ev.nansenPnlUsd >= 100_000) {
+      walletScore += 4;
+    } else if (ev.nansenPnlUsd >= 50_000) {
+      walletScore += 3;
     } else if (ev.nansenPnlUsd >= 20_000) {
+      walletScore += 2;
+    } else if (ev.nansenPnlUsd >= 5_000) {
       walletScore += 1;
     }
 

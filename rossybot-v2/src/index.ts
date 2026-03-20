@@ -805,6 +805,29 @@ class RossyBotV2 {
 
         let positionSize = this.capitalManager.getPositionSize();
 
+        // Bid-size matching: scale position relative to alpha wallet's buy size.
+        // If the alpha spent 2 SOL and we have 6.5 SOL, don't blindly use 20% (1.3 SOL).
+        // Instead, cap our position to a reasonable ratio of their bid so we don't
+        // over-size on small-cap tokens where the alpha was cautious.
+        if (signal.alphaSolSpent > 0) {
+          const capitalSol = this.capitalManager.capital;
+          // Our max should be proportional: we spend at most (our capital / alpha capital estimate) × their bid
+          // Use their avg buy size if known, otherwise use this signal's spend
+          const alphaBid = signal.alphaSolSpent;
+          // Cap: don't exceed 50% of the alpha's bid (we're smaller, ride their wave)
+          // Floor: don't go below the tier minimum
+          const bidCapped = Math.min(positionSize, alphaBid * 0.50);
+          if (bidCapped < positionSize && bidCapped >= signal.tierConfig.minPositionSol) {
+            logger.info({
+              token: signal.tokenMint.slice(0, 8),
+              alphaBid: alphaBid.toFixed(3),
+              tierSize: positionSize.toFixed(3),
+              bidCapped: bidCapped.toFixed(3),
+            }, 'Bid-size matching — capped position to alpha bid ratio');
+            positionSize = bidCapped;
+          }
+        }
+
         // Scale position size down for dip entries — less capital at risk
         const entryMomentum = signal.validation.dexData?.priceChange?.h24 ?? 0;
         if (entryMomentum < 0) {
@@ -1885,20 +1908,26 @@ class RossyBotV2 {
       const walletRows = await (await import('./db/database.js')).getMany<{
         address: string; label: string; tier: string; helius_subscribed: boolean;
         source: string; nansen_roi_percent: number; nansen_pnl_usd: number;
+        nansen_trade_count: number; avg_buy_size_sol: number;
         our_total_trades: number; our_win_rate: number; our_avg_pnl_percent: number;
+        our_avg_hold_time_mins: number; short_term_alpha_score: number;
         consecutive_losses: number; last_active_at: string | null;
+        pumpfun_only: boolean;
       }>(`SELECT address, label, tier, helius_subscribed, source,
               COALESCE(nansen_roi_percent, 0) as nansen_roi_percent,
               COALESCE(nansen_pnl_usd, 0) as nansen_pnl_usd,
+              COALESCE(nansen_trade_count, 0) as nansen_trade_count,
+              COALESCE(avg_buy_size_sol, 0) as avg_buy_size_sol,
               COALESCE(our_total_trades, 0) as our_total_trades,
               COALESCE(our_win_rate, 0) as our_win_rate,
               COALESCE(our_avg_pnl_percent, 0) as our_avg_pnl_percent,
+              COALESCE(our_avg_hold_time_mins, 0) as our_avg_hold_time_mins,
+              COALESCE(short_term_alpha_score, 0) as short_term_alpha_score,
               COALESCE(consecutive_losses, 0) as consecutive_losses,
+              COALESCE(pumpfun_only, FALSE) as pumpfun_only,
               last_active_at
          FROM alpha_wallets WHERE active = TRUE
-         ORDER BY
-           CASE WHEN source = 'NANSEN_SEED' THEN 0 ELSE 1 END ASC,
-           tier ASC, nansen_roi_percent DESC`);
+         ORDER BY nansen_pnl_usd DESC`);
 
       const today = new Date().toISOString().split('T')[0];
       const signalRow = await (await import('./db/database.js')).getOne<{ count: string }>(
@@ -1918,6 +1947,212 @@ class RossyBotV2 {
         tokens_screened: number; wallets_added: number;
       }>(`SELECT tokens_screened, wallets_added FROM wallet_discovery_log ORDER BY run_at DESC LIMIT 1`);
 
+      // --- Performance aggregate queries (run in parallel for speed) ---
+      const db = await import('./db/database.js');
+      const [
+        pfOverall, pfExits, pfCurveZones, pfEntryTypes,
+        signalFunnel, signalRejections,
+        topWallets, bottomWallets,
+        recentTrend, tierHistory,
+      ] = await Promise.all([
+        // 1. Pump.fun overall performance
+        db.getOne<Record<string, unknown>>(
+          `SELECT COUNT(*) as total,
+                  COUNT(*) FILTER (WHERE pnl_percent > 0) as wins,
+                  COALESCE(AVG(pnl_percent), 0) as avg_pnl,
+                  COALESCE(AVG(pnl_percent) FILTER (WHERE pnl_percent > 0), 0) as avg_win,
+                  COALESCE(AVG(pnl_percent) FILTER (WHERE pnl_percent <= 0), 0) as avg_loss,
+                  COALESCE(SUM(net_pnl_sol), 0) as net_sol,
+                  COALESCE(SUM(fees_paid_sol), 0) as total_fees,
+                  COALESCE(AVG(hold_time_mins), 0) as avg_hold,
+                  COALESCE(AVG(EXTRACT(EPOCH FROM (entry_time - alpha_buy_time))), 0) as avg_lag,
+                  COALESCE(SUM(net_pnl_sol) FILTER (WHERE pnl_percent > 0), 0) as gross_wins,
+                  COALESCE(ABS(SUM(net_pnl_sol) FILTER (WHERE pnl_percent <= 0)), 0) as gross_losses
+           FROM pumpfun_positions WHERE status = 'CLOSED'`,
+        ),
+        // 2. Exit reason breakdown
+        db.getMany<Record<string, unknown>>(
+          `SELECT exit_reason,
+                  COUNT(*) as total,
+                  COUNT(*) FILTER (WHERE pnl_percent > 0) as wins,
+                  COALESCE(AVG(pnl_percent), 0) as avg_pnl,
+                  COALESCE(SUM(net_pnl_sol), 0) as net_sol
+           FROM pumpfun_positions WHERE status = 'CLOSED'
+           GROUP BY exit_reason ORDER BY total DESC`,
+        ),
+        // 3. Curve entry zone performance
+        db.getMany<Record<string, unknown>>(
+          `SELECT
+             CASE
+               WHEN curve_fill_pct_at_entry < 0.20 THEN '0-20%'
+               WHEN curve_fill_pct_at_entry < 0.30 THEN '20-30%'
+               WHEN curve_fill_pct_at_entry < 0.35 THEN '30-35%'
+               WHEN curve_fill_pct_at_entry < 0.40 THEN '35-40%'
+               ELSE '40%+'
+             END as zone,
+             COUNT(*) as total,
+             COUNT(*) FILTER (WHERE pnl_percent > 0) as wins,
+             COALESCE(AVG(pnl_percent), 0) as avg_pnl,
+             COALESCE(SUM(net_pnl_sol), 0) as net_sol
+           FROM pumpfun_positions WHERE status = 'CLOSED' AND curve_fill_pct_at_entry > 0
+           GROUP BY zone ORDER BY zone`,
+        ),
+        // 4. Entry type breakdown (DIRECT vs DEFERRED vs MOVER)
+        db.getMany<Record<string, unknown>>(
+          `SELECT COALESCE(entry_type, 'DIRECT') as entry_type,
+                  COUNT(*) as total,
+                  COUNT(*) FILTER (WHERE pnl_percent > 0) as wins,
+                  COALESCE(AVG(pnl_percent), 0) as avg_pnl,
+                  COALESCE(SUM(net_pnl_sol), 0) as net_sol
+           FROM pumpfun_positions WHERE status = 'CLOSED'
+           GROUP BY entry_type ORDER BY total DESC`,
+        ),
+        // 5. Signal funnel
+        db.getOne<Record<string, unknown>>(
+          `SELECT
+             COUNT(*) as total,
+             COUNT(*) FILTER (WHERE action_taken = 'EXECUTED') as executed,
+             COUNT(*) FILTER (WHERE action_taken = 'SKIPPED_VALIDATION') as skipped_validation,
+             COUNT(*) FILTER (WHERE action_taken = 'SKIPPED_MAX_POSITIONS') as skipped_max_pos,
+             COUNT(*) FILTER (WHERE action_taken = 'SKIPPED_DAILY_LIMIT') as skipped_daily
+           FROM signal_events`,
+        ),
+        // 6. Rejection reasons
+        db.getMany<Record<string, unknown>>(
+          `SELECT validation_result, COUNT(*) as total
+           FROM signal_events WHERE validation_result != 'PASSED'
+           GROUP BY validation_result ORDER BY total DESC LIMIT 5`,
+        ),
+        // 7. Top 5 wallets by SOL
+        db.getMany<Record<string, unknown>>(
+          `SELECT
+             COALESCE(w.label, p.signal_wallets[1]) as label,
+             COUNT(*) as trades,
+             COUNT(*) FILTER (WHERE p.pnl_percent > 0) as wins,
+             COALESCE(SUM(p.net_pnl_sol), 0) as net_sol,
+             COALESCE(AVG(p.pnl_percent), 0) as avg_pnl
+           FROM pumpfun_positions p
+           LEFT JOIN alpha_wallets w ON w.address = p.signal_wallets[1]
+           WHERE p.status = 'CLOSED'
+           GROUP BY COALESCE(w.label, p.signal_wallets[1])
+           HAVING COUNT(*) >= 2
+           ORDER BY net_sol DESC LIMIT 5`,
+        ),
+        // 8. Bottom 5 wallets by SOL
+        db.getMany<Record<string, unknown>>(
+          `SELECT
+             COALESCE(w.label, p.signal_wallets[1]) as label,
+             COUNT(*) as trades,
+             COUNT(*) FILTER (WHERE p.pnl_percent > 0) as wins,
+             COALESCE(SUM(p.net_pnl_sol), 0) as net_sol,
+             COALESCE(AVG(p.pnl_percent), 0) as avg_pnl
+           FROM pumpfun_positions p
+           LEFT JOIN alpha_wallets w ON w.address = p.signal_wallets[1]
+           WHERE p.status = 'CLOSED'
+           GROUP BY COALESCE(w.label, p.signal_wallets[1])
+           HAVING COUNT(*) >= 2
+           ORDER BY net_sol ASC LIMIT 5`,
+        ),
+        // 9. Recent 7d vs prior 7d trend
+        db.getOne<Record<string, unknown>>(
+          `SELECT
+             COUNT(*) FILTER (WHERE closed_at > NOW() - INTERVAL '7 days') as recent_trades,
+             COUNT(*) FILTER (WHERE pnl_percent > 0 AND closed_at > NOW() - INTERVAL '7 days') as recent_wins,
+             COALESCE(SUM(net_pnl_sol) FILTER (WHERE closed_at > NOW() - INTERVAL '7 days'), 0) as recent_sol,
+             COUNT(*) FILTER (WHERE closed_at BETWEEN NOW() - INTERVAL '14 days' AND NOW() - INTERVAL '7 days') as prior_trades,
+             COUNT(*) FILTER (WHERE pnl_percent > 0 AND closed_at BETWEEN NOW() - INTERVAL '14 days' AND NOW() - INTERVAL '7 days') as prior_wins,
+             COALESCE(SUM(net_pnl_sol) FILTER (WHERE closed_at BETWEEN NOW() - INTERVAL '14 days' AND NOW() - INTERVAL '7 days'), 0) as prior_sol
+           FROM pumpfun_positions WHERE status = 'CLOSED'`,
+        ),
+        // 10. Capital tier change history
+        db.getMany<Record<string, unknown>>(
+          `SELECT old_tier, new_tier, capital_at_change, changed_at
+           FROM capital_tier_changes ORDER BY changed_at DESC LIMIT 3`,
+        ),
+      ]);
+
+      // Build performance data object
+      const pfTotal = Number(pfOverall?.total || 0);
+      const pfWins = Number(pfOverall?.wins || 0);
+      const grossWins = Number(pfOverall?.gross_wins || 0);
+      const grossLosses = Number(pfOverall?.gross_losses || 0);
+
+      const performance = {
+        pumpFun: {
+          total: pfTotal,
+          wins: pfWins,
+          wr: pfTotal > 0 ? pfWins / pfTotal : 0,
+          avgWinPct: Number(pfOverall?.avg_win || 0),
+          avgLossPct: Number(pfOverall?.avg_loss || 0),
+          netSol: Number(pfOverall?.net_sol || 0),
+          totalFees: Number(pfOverall?.total_fees || 0),
+          avgHoldMins: Number(pfOverall?.avg_hold || 0),
+          avgLagSecs: Number(pfOverall?.avg_lag || 0),
+          profitFactor: grossLosses > 0 ? grossWins / grossLosses : 0,
+          expectancySol: pfTotal > 0 ? Number(pfOverall?.net_sol || 0) / pfTotal : 0,
+        },
+        exitReasons: pfExits.map((r) => ({
+          reason: String(r.exit_reason || 'Unknown'),
+          total: Number(r.total),
+          wins: Number(r.wins),
+          avgPnl: Number(r.avg_pnl),
+          netSol: Number(r.net_sol),
+        })),
+        curveZones: pfCurveZones.map((r) => ({
+          zone: String(r.zone),
+          total: Number(r.total),
+          wins: Number(r.wins),
+          avgPnl: Number(r.avg_pnl),
+          netSol: Number(r.net_sol),
+        })),
+        entryTypes: pfEntryTypes.map((r) => ({
+          type: String(r.entry_type),
+          total: Number(r.total),
+          wins: Number(r.wins),
+          avgPnl: Number(r.avg_pnl),
+          netSol: Number(r.net_sol),
+        })),
+        signalFunnel: {
+          total: Number(signalFunnel?.total || 0),
+          executed: Number(signalFunnel?.executed || 0),
+          skippedValidation: Number(signalFunnel?.skipped_validation || 0),
+          skippedMaxPos: Number(signalFunnel?.skipped_max_pos || 0),
+          skippedDaily: Number(signalFunnel?.skipped_daily || 0),
+        },
+        rejections: signalRejections.map((r) => ({
+          reason: String(r.validation_result).replace('FAILED_', ''),
+          count: Number(r.total),
+        })),
+        topWallets: topWallets.map((w) => ({
+          label: String(w.label || '').slice(0, 12),
+          trades: Number(w.trades),
+          wins: Number(w.wins),
+          netSol: Number(w.net_sol),
+          avgPnl: Number(w.avg_pnl),
+        })),
+        bottomWallets: bottomWallets.map((w) => ({
+          label: String(w.label || '').slice(0, 12),
+          trades: Number(w.trades),
+          wins: Number(w.wins),
+          netSol: Number(w.net_sol),
+          avgPnl: Number(w.avg_pnl),
+        })),
+        trend: {
+          recentTrades: Number(recentTrend?.recent_trades || 0),
+          recentWins: Number(recentTrend?.recent_wins || 0),
+          recentSol: Number(recentTrend?.recent_sol || 0),
+          priorTrades: Number(recentTrend?.prior_trades || 0),
+          priorWins: Number(recentTrend?.prior_wins || 0),
+          priorSol: Number(recentTrend?.prior_sol || 0),
+        },
+        tierChanges: tierHistory.map((t) => ({
+          from: String(t.old_tier),
+          to: String(t.new_tier),
+          capital: Number(t.capital_at_change),
+          at: new Date(t.changed_at as string),
+        })),
+      };
+
       const tierCfg = this.capitalManager.tierConfig;
       const wsStatus = this.wsManager.getStatus();
 
@@ -1935,14 +2170,19 @@ class RossyBotV2 {
           subscribed: this.walletAddresses.has(w.address),
           nansenRoi: Number(w.nansen_roi_percent) || 0,
           nansenPnl: Number(w.nansen_pnl_usd) || 0,
+          nansenTrades: Number(w.nansen_trade_count) || 0,
+          avgBuySizeSol: Number(w.avg_buy_size_sol) || 0,
           ourTrades: Number(w.our_total_trades) || 0,
           ourWinRate: Number(w.our_win_rate) || 0,
           ourAvgPnl: Number(w.our_avg_pnl_percent) || 0,
+          ourAvgHoldMins: Number(w.our_avg_hold_time_mins) || 0,
+          alphaScore: Number(w.short_term_alpha_score) || 0,
           consecutiveLosses: Number(w.consecutive_losses) || 0,
+          pumpfunOnly: !!w.pumpfun_only,
           source: w.source,
-          lastActiveAgo: w.last_active_at
-            ? `${Math.round((Date.now() - new Date(w.last_active_at).getTime()) / 3600000)}h`
-            : undefined,
+          lastActiveHours: w.last_active_at
+            ? Math.round((Date.now() - new Date(w.last_active_at).getTime()) / 3600000)
+            : null,
         })),
         wsConnected: wsStatus.connected,
         wsFallbackActive: wsStatus.fallbackMode,
@@ -1977,6 +2217,17 @@ class RossyBotV2 {
         tradesAllTime: parseInt(tradeRow?.count || '0'),
         discoveryTokens: discoveryRow?.tokens_screened || 0,
         discoveryWalletsAdded: discoveryRow?.wallets_added || 0,
+        performance,
+        // Active config for tuning context
+        activeConfig: {
+          minSignalScore: tierCfg.minSignalScore,
+          positionSizePct: tierCfg.positionSizePct,
+          curveEntryMin: config.pumpFun.curveEntryMin,
+          curveEntryMax: config.pumpFun.curveEntryMax,
+          curveVelocityMin: config.pumpFun.curveVelocityMin,
+          deferredEntryEnabled: config.pumpFun.deferredEntryEnabled,
+          deferredEntryMaxWaitMs: config.pumpFun.deferredEntryMaxWaitMs,
+        },
       });
     } catch (err) {
       console.error('Failed to send startup diagnostics:', err);

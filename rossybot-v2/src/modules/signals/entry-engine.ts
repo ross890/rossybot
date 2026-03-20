@@ -102,7 +102,9 @@ export class EntryEngine {
     const validation = await validateToken(mint, tierCfg);
 
     const walletAddresses = Array.from(pending.wallets.keys());
-    const firstSignal = Array.from(pending.wallets.values())[0].signal;
+    const walletSignals = Array.from(pending.wallets.values());
+    const firstSignal = walletSignals[0].signal;
+    const alphaSolSpent = walletSignals.reduce((sum, ws) => sum + Math.abs(ws.signal.solDelta), 0);
 
     // Log signal event
     const signalAction = validation.passed ? SignalAction.EXECUTED : SignalAction.SKIPPED_VALIDATION;
@@ -128,6 +130,7 @@ export class EntryEngine {
           walletAddresses,
           walletCount: walletAddresses.length,
           firstSignal,
+          alphaSolSpent,
           validation,
           tierConfig: tierCfg,
           detectedAt: new Date(pending.firstDetectedAt),
@@ -170,6 +173,7 @@ export class EntryEngine {
         walletAddresses,
         walletCount: walletAddresses.length,
         firstSignal,
+        alphaSolSpent,
         validation,
         tierConfig: tierCfg,
         detectedAt: new Date(pending.firstDetectedAt),
@@ -339,6 +343,8 @@ export interface ValidatedSignal {
   walletAddresses: string[];
   walletCount: number;
   firstSignal: ParsedSignal;
+  /** Total SOL spent by alpha wallets on this token (sum of all accumulated signals) */
+  alphaSolSpent: number;
   validation: import('../../types/index.js').FullValidationResult;
   tierConfig: TierConfig;
   detectedAt: Date;

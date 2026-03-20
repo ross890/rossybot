@@ -545,6 +545,7 @@ export class TelegramService {
       { command: 'positions', description: 'Open positions with PnL' },
       { command: 'pnl', description: 'P&L + expectancy + profit factor' },
       { command: 'signals', description: 'Recent signals with scores' },
+      { command: 'signaldump', description: 'Signal quality analytics (copy for Claude)' },
       { command: 'curve', description: 'Curve fill distribution analysis' },
       { command: 'tuning', description: 'Full tuning report (copy for Claude)' },
       { command: 'stats', description: 'Performance + signal stats (7d)' },
@@ -1609,7 +1610,7 @@ export class TelegramService {
                   COALESCE(AVG(p.pnl_percent), 0) as avg_pnl,
                   COALESCE(SUM(p.net_pnl_sol), 0) as total_pnl
            FROM pumpfun_positions p
-           JOIN wallets w ON w.address = ANY(p.signal_wallets)
+           JOIN alpha_wallets w ON w.address = ANY(p.signal_wallets)
            WHERE p.status = 'CLOSED'
            GROUP BY w.label ORDER BY trades DESC LIMIT 10`,
         );
@@ -1953,6 +1954,258 @@ export class TelegramService {
       } catch (err) {
         logger.error({ err }, 'Failed to generate edge analysis');
         await this.bot.sendMessage(msg.chat.id, '❌ Failed to load edge data');
+      }
+    });
+
+    // /signaldump — signal quality analytics for tuning
+    this.bot.onText(/\/signaldump/, async (msg) => {
+      if (msg.chat.id.toString() !== this.chatId) return;
+      try {
+        const status = this.getStatus?.() || {};
+        const capSol = status.capitalSol as number || 0;
+        const tierCfg = getTierConfig(getTierForCapital(capSol));
+
+        // 1. Overall signal funnel
+        const funnel = await getOne<Record<string, unknown>>(
+          `SELECT
+             COUNT(*) as total,
+             COUNT(*) FILTER (WHERE action_taken = 'EXECUTED') as executed,
+             COUNT(*) FILTER (WHERE action_taken = 'SKIPPED_VALIDATION') as skipped_validation,
+             COUNT(*) FILTER (WHERE action_taken = 'SKIPPED_MAX_POSITIONS') as skipped_max_pos,
+             COUNT(*) FILTER (WHERE action_taken = 'SKIPPED_DAILY_LIMIT') as skipped_daily,
+             COUNT(*) FILTER (WHERE action_taken = 'SKIPPED_MIN_POSITION') as skipped_min_pos
+           FROM signal_events`,
+        );
+
+        const totalSignals = Number(funnel?.total || 0);
+        if (totalSignals === 0) {
+          await this.bot.sendMessage(msg.chat.id, '📭 No signals recorded yet');
+          return;
+        }
+
+        const executed = Number(funnel?.executed || 0);
+        const skippedValidation = Number(funnel?.skipped_validation || 0);
+        const skippedMaxPos = Number(funnel?.skipped_max_pos || 0);
+        const skippedDaily = Number(funnel?.skipped_daily || 0);
+        const skippedMinPos = Number(funnel?.skipped_min_pos || 0);
+        const passRate = (executed / totalSignals * 100).toFixed(0);
+
+        // 2. Rejection breakdown by validation reason
+        const rejections = await getMany<Record<string, unknown>>(
+          `SELECT
+             validation_result,
+             COUNT(*) as total
+           FROM signal_events
+           WHERE validation_result != 'PASSED'
+           GROUP BY validation_result ORDER BY total DESC`,
+        );
+
+        const rejectionLines = rejections.map((r) => {
+          const reason = (r.validation_result as string).replace('FAILED_', '');
+          const count = Number(r.total);
+          const pct = (count / totalSignals * 100).toFixed(0);
+          return `│ ${reason}: ${count} (${pct}%)`;
+        });
+
+        // 3. Signal score distribution (executed signals only)
+        const scoreDist = await getMany<Record<string, unknown>>(
+          `SELECT
+             CASE
+               WHEN signal_score < 30 THEN '<30'
+               WHEN signal_score < 40 THEN '30-40'
+               WHEN signal_score < 50 THEN '40-50'
+               WHEN signal_score < 60 THEN '50-60'
+               WHEN signal_score < 70 THEN '60-70'
+               ELSE '70+'
+             END as band,
+             COUNT(*) as total
+           FROM signal_events
+           WHERE action_taken = 'EXECUTED' AND signal_score IS NOT NULL
+           GROUP BY band ORDER BY band`,
+        );
+
+        const scoreLines = scoreDist.map((s) => {
+          const count = Number(s.total);
+          const pct = executed > 0 ? (count / executed * 100).toFixed(0) : '0';
+          return `│ ${(s.band as string).padEnd(6)} ${String(count).padStart(3)} (${pct}%)`;
+        });
+
+        // 4. Signal score → trade outcome (wins/losses by score band)
+        const scoreOutcome = await getMany<Record<string, unknown>>(
+          `SELECT
+             CASE
+               WHEN se.signal_score < 40 THEN '<40'
+               WHEN se.signal_score < 50 THEN '40-50'
+               WHEN se.signal_score < 60 THEN '50-60'
+               WHEN se.signal_score < 70 THEN '60-70'
+               ELSE '70+'
+             END as band,
+             COUNT(*) as total,
+             COUNT(*) FILTER (WHERE p.pnl_percent > 0) as wins,
+             COALESCE(AVG(p.pnl_percent), 0) as avg_pnl,
+             COALESCE(SUM(p.net_pnl_sol), 0) as net_sol
+           FROM pumpfun_positions p
+           LEFT JOIN signal_events se ON se.position_id = p.id
+           WHERE p.status = 'CLOSED' AND se.signal_score IS NOT NULL
+           GROUP BY band ORDER BY band`,
+        );
+
+        const outcomeLines = scoreOutcome.map((s) => {
+          const sTotal = Number(s.total);
+          const sWins = Number(s.wins);
+          const sWr = sTotal > 0 ? (sWins / sTotal * 100).toFixed(0) : '0';
+          const sPnl = (Number(s.avg_pnl) * 100).toFixed(1);
+          const sSol = Number(s.net_sol).toFixed(4);
+          return `│ ${(s.band as string).padEnd(6)} ${String(sTotal).padStart(3)}t ${sWr}%W avg${sPnl}% ${sSol}SOL`;
+        });
+
+        // 5. Wallet confluence → outcome
+        const confluenceOutcome = await getMany<Record<string, unknown>>(
+          `SELECT
+             se.wallet_count,
+             COUNT(*) as total,
+             COUNT(*) FILTER (WHERE p.pnl_percent > 0) as wins,
+             COALESCE(AVG(p.pnl_percent), 0) as avg_pnl,
+             COALESCE(SUM(p.net_pnl_sol), 0) as net_sol
+           FROM signal_events se
+           JOIN pumpfun_positions p ON se.position_id = p.id
+           WHERE p.status = 'CLOSED'
+           GROUP BY se.wallet_count ORDER BY se.wallet_count`,
+        );
+
+        const confluenceLines = confluenceOutcome.map((c) => {
+          const cTotal = Number(c.total);
+          const cWins = Number(c.wins);
+          const cWr = cTotal > 0 ? (cWins / cTotal * 100).toFixed(0) : '0';
+          const cPnl = (Number(c.avg_pnl) * 100).toFixed(1);
+          const cSol = Number(c.net_sol).toFixed(4);
+          return `│ ${c.wallet_count}w: ${cTotal}t ${cWr}%W avg${cPnl}% ${cSol}SOL`;
+        });
+
+        // 6. Hourly signal volume (last 24h)
+        const hourly = await getMany<Record<string, unknown>>(
+          `SELECT
+             EXTRACT(HOUR FROM first_detected_at) as hr,
+             COUNT(*) as total,
+             COUNT(*) FILTER (WHERE action_taken = 'EXECUTED') as executed
+           FROM signal_events
+           WHERE first_detected_at > NOW() - INTERVAL '24 hours'
+           GROUP BY hr ORDER BY hr`,
+        );
+
+        const hourlyLines = hourly.map((h) => {
+          const hTotal = Number(h.total);
+          const hExec = Number(h.executed);
+          const bar = '█'.repeat(Math.min(Math.ceil(hTotal / 2), 20));
+          return `│ ${String(h.hr).padStart(2, '0')}h ${String(hTotal).padStart(3)} sig ${String(hExec).padStart(2)} exec ${bar}`;
+        });
+
+        // 7. Top signal wallets (which wallets produce winning signals?)
+        const topSignalWallets = await getMany<Record<string, unknown>>(
+          `SELECT
+             w.label,
+             COUNT(*) as signals,
+             COUNT(*) FILTER (WHERE se.action_taken = 'EXECUTED') as executed,
+             COUNT(*) FILTER (WHERE p.pnl_percent > 0) as wins,
+             COUNT(*) FILTER (WHERE p.pnl_percent <= 0) as losses,
+             COALESCE(AVG(p.pnl_percent) FILTER (WHERE p.id IS NOT NULL), 0) as avg_pnl
+           FROM signal_events se, unnest(se.wallet_addresses) sw
+           JOIN alpha_wallets w ON w.address = sw
+           LEFT JOIN pumpfun_positions p ON se.position_id = p.id AND p.status = 'CLOSED'
+           GROUP BY w.label
+           HAVING COUNT(*) >= 3
+           ORDER BY COUNT(*) FILTER (WHERE p.pnl_percent > 0) DESC LIMIT 10`,
+        );
+
+        const walletSignalLines = topSignalWallets.map((w) => {
+          const wSigs = Number(w.signals);
+          const wExec = Number(w.executed);
+          const wWins = Number(w.wins);
+          const wLosses = Number(w.losses);
+          const wPnl = (Number(w.avg_pnl) * 100).toFixed(1);
+          return `│ ${w.label}: ${wSigs}sig ${wExec}exec ${wWins}W/${wLosses}L avg${wPnl}%`;
+        });
+
+        // 8. Recent signal flow (last 20)
+        const recentSignals = await getMany<Record<string, unknown>>(
+          `SELECT
+             se.token_symbol, se.token_address, se.validation_result, se.action_taken,
+             se.signal_score, se.wallet_count, se.first_detected_at,
+             p.pnl_percent, p.status as pos_status
+           FROM signal_events se
+           LEFT JOIN pumpfun_positions p ON se.position_id = p.id
+           ORDER BY se.first_detected_at DESC LIMIT 20`,
+        );
+
+        const recentLines = recentSignals.map((s) => {
+          const sym = s.token_symbol || (s.token_address as string).slice(0, 6);
+          const ago = Math.round((Date.now() - new Date(s.first_detected_at as string).getTime()) / 60000);
+          const score = s.signal_score ? `S${Number(s.signal_score).toFixed(0)}` : 'S??';
+          const action = s.action_taken as string;
+
+          let outcome = '';
+          if (action === 'EXECUTED' && s.pos_status === 'CLOSED') {
+            const pnl = (Number(s.pnl_percent) * 100).toFixed(1);
+            outcome = Number(s.pnl_percent) > 0 ? `✅${pnl}%` : `❌${pnl}%`;
+          } else if (action === 'EXECUTED' && s.pos_status === 'OPEN') {
+            outcome = '⏳OPEN';
+          } else if (action === 'SKIPPED_VALIDATION') {
+            const reason = (s.validation_result as string).replace('FAILED_', '');
+            outcome = `🚫${reason}`;
+          } else if (action === 'SKIPPED_MAX_POSITIONS') {
+            outcome = '🚫MAX_POS';
+          } else if (action === 'SKIPPED_DAILY_LIMIT') {
+            outcome = '🚫DAILY';
+          } else if (action === 'SKIPPED_MIN_POSITION') {
+            outcome = '🚫MIN_POS';
+          }
+
+          return `│ $${sym} ${score} ${s.wallet_count}w ${outcome} ${ago}m`;
+        });
+
+        const lines = [
+          `📊 SIGNAL QUALITY DUMP — copy to Claude for tuning`,
+          ``,
+          `┌─ SIGNAL FUNNEL (all time)`,
+          `│ Total signals: ${totalSignals}`,
+          `│ Executed: ${executed} (${passRate}%)`,
+          `│ Rejected validation: ${skippedValidation}`,
+          `│ Rejected max positions: ${skippedMaxPos}`,
+          `│ Rejected daily limit: ${skippedDaily}`,
+          `│ Rejected min position: ${skippedMinPos}`,
+          `│`,
+          `├─ REJECTION REASONS`,
+          ...(rejectionLines.length > 0 ? rejectionLines : ['│  (none)']),
+          `│`,
+          `├─ EXECUTED SIGNAL SCORE DISTRIBUTION`,
+          ...(scoreLines.length > 0 ? scoreLines : ['│  (no scored signals)']),
+          `│ Min score threshold: ${tierCfg.minSignalScore}`,
+          `│`,
+          `├─ SCORE BAND → TRADE OUTCOME`,
+          ...(outcomeLines.length > 0 ? outcomeLines : ['│  (no closed trades with scores)']),
+          `│`,
+          `├─ WALLET CONFLUENCE → OUTCOME`,
+          ...(confluenceLines.length > 0 ? confluenceLines : ['│  (no data)']),
+          `│`,
+          `├─ HOURLY SIGNAL VOLUME (24h)`,
+          ...(hourlyLines.length > 0 ? hourlyLines : ['│  (no recent signals)']),
+          `│`,
+          `├─ WALLET SIGNAL QUALITY (3+ signals)`,
+          ...(walletSignalLines.length > 0 ? walletSignalLines : ['│  (not enough data)']),
+          `│`,
+          `├─ RECENT SIGNAL FLOW (newest first)`,
+          `│ [token score wallets outcome age]`,
+          ...recentLines,
+          `│`,
+          `└─ Send to Claude: "here's my signal dump, analyze quality and suggest tuning"`,
+        ];
+
+        for (const chunk of this.chunkMessage(lines.join('\n'))) {
+          await this.bot.sendMessage(msg.chat.id, chunk);
+        }
+      } catch (err) {
+        logger.error({ err }, 'Failed to generate signal dump');
+        await this.bot.sendMessage(msg.chat.id, '❌ Failed to load signal data');
       }
     });
 

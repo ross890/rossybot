@@ -143,7 +143,7 @@ export const TIER_CONFIGS: Record<CapitalTier, TierConfig> = {
   [CapitalTier.SMALL]: {
     tier: CapitalTier.SMALL,
     maxPositions: 3,
-    walletsMonitored: 15,              // 15 WS slots (was 5 — too restrictive, missed signals)
+    walletsMonitored: 35,              // 35 WS slots (was 5 — too restrictive, missed signals)
     positionSizePct: 0.20,            // 20% per position (was 40% — 3×40%=120% was over-allocated)
     minPositionSol: 0.3,
     profitTarget: 0.40,

@@ -14,7 +14,7 @@ import { LiveTracker } from './modules/positions/live-tracker.js';
 import { CapitalManager } from './modules/trading/capital-manager.js';
 import { SwapExecutor } from './modules/trading/swap-executor.js';
 import { TelegramService } from './modules/telegram/index.js';
-import { PumpFunTracker, validatePumpFunSignal, PumpPortalClient, PumpFunAlphaDiscovery, deriveBondingCurveAddress, MoversTracker, type MoverToken } from './modules/pumpfun/index.js';
+import { PumpFunTracker, validatePumpFunSignal, PumpPortalClient, PumpFunAlphaDiscovery, deriveBondingCurveAddress, MoversTracker, GraduationDiscovery, GraduatedTracker, type MoverToken, type GradSignal } from './modules/pumpfun/index.js';
 import { GraduationAnalyzer } from './modules/analysis/graduation-analyzer.js';
 import { runDailyAnalysis } from './modules/market-analyzer/index.js';
 import { fetchDexPair } from './modules/validation/dexscreener.js';
@@ -202,6 +202,10 @@ class RossyBotV2 {
   // Graduation retroanalysis — discovers wallets that buy early on tokens that graduate
   private graduationAnalyzer: GraduationAnalyzer;
 
+  // Graduation bounce discovery — monitors freshly graduated tokens for dip/recovery pattern
+  private graduationDiscovery: GraduationDiscovery;
+  private graduatedTracker: GraduatedTracker;
+
   private get isLive(): boolean {
     return !config.shadowMode && this.liveTracker !== null;
   }
@@ -231,6 +235,8 @@ class RossyBotV2 {
     this.pumpFunAlphaDiscovery = new PumpFunAlphaDiscovery();
     this.moversTracker = new MoversTracker();
     this.graduationAnalyzer = new GraduationAnalyzer();
+    this.graduationDiscovery = new GraduationDiscovery();
+    this.graduatedTracker = new GraduatedTracker();
 
     // Initialize position tracker based on mode
     if (!config.shadowMode && config.wallet.privateKey) {
@@ -238,7 +244,9 @@ class RossyBotV2 {
       this.liveTracker = new LiveTracker(this.swapExecutor);
       // Wire pump.fun tracker for live trading too
       this.pumpFunTracker.setSwapExecutor(this.swapExecutor);
-      logger.info('LIVE mode — Jupiter swap execution enabled (standard + pump.fun)');
+      // Wire graduated tracker for live trading
+      this.graduatedTracker.setSwapExecutor(this.swapExecutor);
+      logger.info('LIVE mode — Jupiter swap execution enabled (standard + pump.fun + graduation)');
     } else {
       this.shadowTracker = new ShadowTracker();
       logger.info('SHADOW mode — simulated positions only');
@@ -344,7 +352,9 @@ class RossyBotV2 {
       const closedMints = await dbGetMany<{ token_address: string }>(
         `SELECT DISTINCT token_address FROM positions WHERE status = 'CLOSED' AND closed_at > NOW() - INTERVAL '24 hours'
          UNION
-         SELECT DISTINCT token_address FROM pumpfun_positions WHERE status = 'CLOSED' AND closed_at > NOW() - INTERVAL '24 hours'`,
+         SELECT DISTINCT token_address FROM pumpfun_positions WHERE status = 'CLOSED' AND closed_at > NOW() - INTERVAL '24 hours'
+         UNION
+         SELECT DISTINCT token_address FROM graduated_positions WHERE status = 'CLOSED' AND closed_at > NOW() - INTERVAL '24 hours'`,
       );
       for (const row of closedMints) {
         this.blockedTokens.add(row.token_address);
@@ -372,6 +382,37 @@ class RossyBotV2 {
     // 8b. Start pump.fun tracker
     await this.pumpFunTracker.loadOpenPositions();
     this.pumpFunTracker.start();
+
+    // 8d. Start graduation bounce discovery + tracker
+    if (config.graduationDiscovery.enabled) {
+      await this.graduatedTracker.loadOpenPositions();
+      this.graduatedTracker.setCloseCallback((pos) => {
+        const emoji = pos.pnl_percent > 0 ? '🟢' : '🔴';
+        this.telegram.send(
+          `${emoji} GRAD CLOSE · ${pos.token_symbol || pos.token_address.slice(0, 8)}\n` +
+          `├ PnL: ${(pos.pnl_percent * 100).toFixed(1)}% · ${pos.net_pnl_sol.toFixed(4)} SOL\n` +
+          `├ Dip: ${(pos.dip_pct * 100).toFixed(0)}% · Recovery at entry: +${(pos.recovery_at_entry * 100).toFixed(0)}%\n` +
+          `├ Hold: ${pos.hold_time_mins}min · Reason: ${pos.exit_reason}\n` +
+          `└ ${this.graduatedTracker.isLive ? 'LIVE' : 'SHADOW'}`,
+        ).catch(() => {});
+      });
+      this.graduatedTracker.setSwapFailedCallback((symbol, error, type) => {
+        this.telegram.send(`⚠️ GRAD ${type} FAILED · ${symbol} · ${error}`).catch(() => {});
+      });
+      this.graduatedTracker.setBalanceRefreshCallback(async () => {
+        await this.capitalManager.refreshBalance();
+      });
+      this.graduatedTracker.start();
+
+      // Wire graduation discovery signal → open position
+      this.graduationDiscovery.setSignalCallback((signal: GradSignal) => {
+        this.handleGradSignal(signal).catch((err) =>
+          logger.error({ err, token: signal.mint.slice(0, 8) }, 'Graduation signal handler error'),
+        );
+      });
+      this.graduationDiscovery.start();
+      logger.info('Graduation bounce discovery ENABLED');
+    }
 
     // 8c. Start PumpPortal — real-time pump.fun trade stream for alpha wallet discovery
     this.pumpFunAlphaDiscovery.setNewAlphaCallback((address) => {
@@ -452,6 +493,15 @@ class RossyBotV2 {
       }
     });
 
+    // Wire PumpPortal migration (graduation) events → graduation bounce discovery
+    if (config.graduationDiscovery.enabled) {
+      this.pumpPortal.on('migration', (migration) => {
+        this.graduationDiscovery.onGraduation(migration.mint).catch((err) =>
+          logger.error({ err, mint: migration.mint?.slice(0, 8) }, 'Graduation discovery error'),
+        );
+      });
+    }
+
     this.pumpPortal.connect().catch((err) =>
       logger.error({ err }, 'PumpPortal connection failed — alpha discovery will not run'),
     );
@@ -461,13 +511,16 @@ class RossyBotV2 {
       const ppStats = this.pumpPortal.stats;
       const adStats = this.pumpFunAlphaDiscovery.getStats();
       if (ppStats.tradeCount > 0 || ppStats.createCount > 0) {
+        const gdStats = config.graduationDiscovery.enabled ? this.graduationDiscovery.getStats() : null;
         logger.info({
           connected: ppStats.connected,
           trades: ppStats.tradeCount,
           creates: ppStats.createCount,
+          migrations: ppStats.migrationCount,
           tokens: ppStats.subscribedTokens,
           tracked: adStats.tracked,
           promoted: adStats.promoted,
+          ...(gdStats ? { gradMonitored: gdStats.monitored, gradSignals: gdStats.signalsFired } : {}),
         }, 'PumpPortal alpha discovery stats');
       }
     }, 5 * 60 * 1000); // every 5 min
@@ -1723,6 +1776,70 @@ class RossyBotV2 {
       `└ <a href="https://pump.fun/coin/${tokenMint}">pump.fun</a> · <a href="https://dexscreener.com/solana/${tokenMint}">dex</a> · ${mode}`,
       { parse_mode: 'HTML' },
     );
+  }
+
+  /**
+   * Handle a graduation bounce signal — a freshly graduated token that dipped and is recovering.
+   * This is a NEW signal source: no alpha wallet needed, the pattern itself is the signal.
+   */
+  private async handleGradSignal(signal: GradSignal): Promise<void> {
+    try {
+      const cfg = config.graduationDiscovery;
+      const mint = signal.mint;
+
+      // Pre-flight: skip if we already hold this token anywhere
+      if (this.hasPosition(mint) || this.pumpFunTracker.hasPosition(mint) || this.graduatedTracker.hasPosition(mint)) {
+        logger.info({ token: mint.slice(0, 8) }, 'Grad signal skip — already holding');
+        return;
+      }
+
+      if (this.blockedTokens.has(mint)) {
+        logger.info({ token: mint.slice(0, 8) }, 'Grad signal skip — blocked token');
+        return;
+      }
+
+      if (this.graduatedTracker.getOpenCount() >= cfg.maxPositions) {
+        logger.info({ open: this.graduatedTracker.getOpenCount(), max: cfg.maxPositions },
+          'Grad signal skip — max positions reached');
+        return;
+      }
+
+      // Position sizing: use tier size * graduation multiplier
+      const tierSize = this.capitalManager.getPositionSize();
+      const posSize = tierSize * cfg.positionSizeMultiplier;
+
+      if (posSize < getTierConfig(this.capitalManager.tier).minPositionSol) {
+        logger.info({ posSize, token: mint.slice(0, 8) }, 'Grad signal skip — position too small');
+        return;
+      }
+
+      // Open the position
+      const pos = await this.graduatedTracker.openPosition(signal, posSize);
+
+      if (!pos) {
+        await this.telegram.send(
+          `⚠️ GRAD BUY FAILED · ${signal.symbol || mint.slice(0, 8)} · ${posSize.toFixed(4)} SOL`,
+        );
+        return;
+      }
+
+      this.blockedTokens.add(mint); // Don't re-enter this session
+
+      const mode = this.graduatedTracker.isLive ? 'LIVE' : 'SHADOW';
+      await this.telegram.send(
+        `🎓 GRAD BUY · ${signal.symbol || mint.slice(0, 8)} · ${posSize.toFixed(4)} SOL\n` +
+        `├ Dip: ${(signal.dipPct * 100).toFixed(0)}% from grad · Recovery: +${(signal.recoveryPct * 100).toFixed(0)}%\n` +
+        `├ MCap: $${signal.mcap.toLocaleString()} · Liq: $${signal.liquidity.toLocaleString()}\n` +
+        `├ Buy ratio: ${(signal.buyRatio * 100).toFixed(0)}% · ${signal.timeSinceGradMins.toFixed(0)}min post-grad\n` +
+        `├ TP +${(cfg.profitTarget * 100).toFixed(0)}% · SL ${(cfg.stopLoss * 100).toFixed(0)}% · Trail ${(cfg.trailingStopPct * 100).toFixed(0)}%\n` +
+        (pos.entry_tx ? `├ TX: ${pos.entry_tx.slice(0, 16)}...\n` : '') +
+        `└ <a href="https://dexscreener.com/solana/${mint}">dex</a> · <a href="https://pump.fun/coin/${mint}">pump.fun</a> · ${mode}`,
+        { parse_mode: 'HTML' },
+      );
+
+    } catch (err) {
+      logger.error({ err, token: signal.mint?.slice(0, 8) }, 'Error in graduation signal handler');
+    }
   }
 
   /** Handle sell signals from alpha wallets */

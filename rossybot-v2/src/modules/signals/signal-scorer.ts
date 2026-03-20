@@ -103,21 +103,20 @@ function scoreWalletQuality(
     const blendedAvgPnl = ourWeight * ev.avgPnl + nansenWeight * nansenEstAvgPnl;
 
     // Soft floor: penalty multiplier for wallets below quality thresholds.
-    // Relaxed from 50%/20% — with confidence already at 0.4x for new wallets,
-    // double-penalizing makes it mathematically impossible to reach minSignalScore.
+    // Relaxed further — new wallets with Nansen data should be able to enter.
     let floorPenalty = 1.0;
-    if (blendedWinRate < 0.45) {
-      floorPenalty *= Math.max(0.5, blendedWinRate / 0.45);
+    if (blendedWinRate < 0.35) {
+      floorPenalty *= Math.max(0.6, blendedWinRate / 0.35);
     }
-    if (blendedAvgPnl < 10) {
-      floorPenalty *= Math.max(0.5, blendedAvgPnl / 10);
+    if (blendedAvgPnl < 5) {
+      floorPenalty *= Math.max(0.6, blendedAvgPnl / 5);
     }
 
-    // Hard reject for bad wallets (raised from 30% WR / 5% PnL):
-    // - <40% WR AND <10% avg PnL → reject
-    // - Alpha score <15 with 3+ trades → reject (not profitable in our exit windows)
-    const meetsQuality = blendedWinRate >= 0.40 || blendedAvgPnl >= 10;
-    const failsAlpha = ev.shortTermAlpha < 15 && ev.trades >= 3;
+    // Hard reject only for truly terrible wallets:
+    // - <30% WR AND <5% avg PnL → reject (was 40%/10% — too strict, killing unproven wallets)
+    // - Alpha score <10 with 5+ trades → reject (need more data before rejecting on alpha score)
+    const meetsQuality = blendedWinRate >= 0.30 || blendedAvgPnl >= 5;
+    const failsAlpha = ev.shortTermAlpha < 10 && ev.trades >= 5;
     if (meetsQuality && !failsAlpha) {
       anyWalletPassesFloor = true;
     }

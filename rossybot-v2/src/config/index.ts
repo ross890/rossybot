@@ -79,7 +79,7 @@ export const config = {
   dailyLossLimitPct: 0.30, // 30%
   // Minimum SOL balance before standard V2 (migrated/Raydium) trading unlocks.
   // Below this, only pump.fun bonding curve trades are executed — faster compounding with small capital.
-  minCapitalForStandardTrading: 5.0, // 5 SOL
+  minCapitalForStandardTrading: 0.5, // 0.5 SOL (was 5 — need DEX trades for data even at low capital)
   pumpFun: {
     programId: '6EF8rrecthR5Dkzon8Nwu78hRvfCKubJ14M5uBEwF6P',
     positionSizeMultiplier: 1.20,      // 120% of normal tier sizing — tighter entry/exit controls justify bigger bets
@@ -114,46 +114,10 @@ export const config = {
 export const TIER_CONFIGS: Record<CapitalTier, TierConfig> = {
   [CapitalTier.MICRO]: {
     tier: CapitalTier.MICRO,
-    maxPositions: 3,                   // 3 max (was 4 — 3×25%=75% exposure, leaves buffer for fees + pump.fun)
-    walletsMonitored: 15,              // 15 WS slots (was 50 — inverted vs SMALL=5, now scales with capital)
-    positionSizePct: 0.25,            // 25% per position (was 30% — 3×30%=90% was too much exposure)
-    minPositionSol: 0.003,            // 0.003 SOL min (was 0.3 — bot couldn't trade with 0.025 SOL balance)
-    profitTarget: 0.40,                // 40% TP (was 50% — take profits slightly earlier)
-    stopLoss: -0.20,                  // 20% stop (was 15% — less whipsaw on volatile micro-caps)
-    hardKill: -0.25,                  // 25% hard kill (was 20% — give more room before force-exit)
-    partialExitsEnabled: false,
-    walletConfluenceRequired: 1,
-    confluenceWindow: 30,
-    timeKills: [
-      { hours: 1, minPnlPct: -0.05 },  // Cut losers at 1h (was 2h — memecoins resolve fast)
-      { hours: 2, minPnlPct: 0.10 },   // Must be +10% by 2h (was 4h/+15% — tighter)
-      { hours: 6, minPnlPct: 0.20 },   // Must be +20% by 6h (was 12h/+25% — don't hold overnight)
-    ],
-    hardTimeHours: 12,                // 12h hard cap (was 48h — memecoins are fast, don't hold bags)
-    momentumExtensionEnabled: true,
-    momentumExtensionHours: 1,        // Extend time kill windows by 1h when momentum is strong
-    momentumExtensionMaxPerWindow: 1, // Max 1 extension per window (MICRO = quick trades)
-    momentumExtensionMinPnl: -0.02,   // Must be near breakeven or better to extend
-    mcapMin: 30_000,
-    mcapMax: 10_000_000,
-    liquidityMin: 5_000,              // $5K min (was $10K — micro-cap tokens often have lower liq)
-    momentumWindow: '24h',
-    momentumMin: -50,
-    momentumMax: 300,
-    volumeMultiplierMin: 1,
-    tokenMaxAgeDays: 14,              // 14 days max age (was 30 — stale tokens less interesting)
-    minSignalScore: 35,               // Lowered back from 45 — new wallets with 0.4 confidence can't mathematically reach 45
-    reentryEnabled: true,
-    reentryCooldownMins: 15,           // 15 min cooldown after exit before re-entry
-    reentryMaxPerToken: 1,             // Max 1 re-entry per token per session
-    reentrySizeMultiplier: 0.60,       // 60% of normal position size on re-entry
-  },
-  [CapitalTier.SMALL]: {
-    tier: CapitalTier.SMALL,
-    maxPositions: 3,
-    walletsMonitored: 35,              // 35 WS slots (was 5 — too restrictive, missed signals)
-    positionSizePct: 0.20,            // 20% per position — ~0.33 SOL at 6.6 SOL capital (was 40%)
-    minPositionSol: 0.3,
+    maxPositions: 5,                   // 5 max (was 3 — need more concurrent trades for data collection)
+    walletsMonitored: 15,
+    positionSizePct: 0.15,            // 15% per position (was 25% — more positions = smaller each, 5×15%=75%)
+    minPositionSol: 0.003,
     profitTarget: 0.40,
     stopLoss: -0.20,
     hardKill: -0.25,
@@ -161,24 +125,60 @@ export const TIER_CONFIGS: Record<CapitalTier, TierConfig> = {
     walletConfluenceRequired: 1,
     confluenceWindow: 30,
     timeKills: [
-      { hours: 1, minPnlPct: -0.05 },  // Cut losers at 1h (was +5% — too aggressive, killed $Pete-type wins)
-      { hours: 2, minPnlPct: 0.10 },   // Must be +10% by 2h
-      { hours: 6, minPnlPct: 0.20 },   // Must be +20% by 6h
+      { hours: 1, minPnlPct: -0.05 },
+      { hours: 2, minPnlPct: 0.10 },
+      { hours: 6, minPnlPct: 0.20 },
     ],
-    hardTimeHours: 24,                 // 24h hard cap (was 48h — memecoins resolve fast)
+    hardTimeHours: 12,
     momentumExtensionEnabled: true,
     momentumExtensionHours: 1,
     momentumExtensionMaxPerWindow: 1,
     momentumExtensionMinPnl: -0.02,
-    mcapMin: 50_000,                   // $50K min (was $200K — best DEX wins were $52K-$144K mcap)
-    mcapMax: 5_000_000,               // $5M max (was $2M — opens more signal space)
-    liquidityMin: 15_000,              // $15K min (was $30K — $WORTHLESS had $36K liq, $Chibify $21K)
+    mcapMin: 10_000,                   // $10K min (was $30K — catch early tokens with low mcap)
+    mcapMax: 15_000_000,               // $15M max (was $10M — wider net)
+    liquidityMin: 2_000,              // $2K min (was $5K — micro positions can exit thin pools)
     momentumWindow: '24h',
-    momentumMin: -50,
-    momentumMax: 200,
-    volumeMultiplierMin: 1,
-    tokenMaxAgeDays: 30,
-    minSignalScore: 35,
+    momentumMin: -60,                  // -60% (was -50% — allow deeper dip buys)
+    momentumMax: 500,                  // +500% (was +300% — don't reject hot runners, data is data)
+    volumeMultiplierMin: 0.5,          // 0.5x (was 1x — less restrictive volume gate)
+    tokenMaxAgeDays: null,             // No age limit (was 14 — older tokens can have renewed interest)
+    minSignalScore: 20,               // 20 (was 35 — cast much wider net for data collection)
+    reentryEnabled: true,
+    reentryCooldownMins: 15,
+    reentryMaxPerToken: 1,
+    reentrySizeMultiplier: 0.60,
+  },
+  [CapitalTier.SMALL]: {
+    tier: CapitalTier.SMALL,
+    maxPositions: 5,                   // 5 max (was 3 — more positions for data)
+    walletsMonitored: 35,
+    positionSizePct: 0.12,            // 12% per position (was 20% — 5×12%=60%, room for pump.fun too)
+    minPositionSol: 0.15,              // 0.15 SOL min (was 0.3 — allow smaller bets to get more trades on)
+    profitTarget: 0.40,
+    stopLoss: -0.20,
+    hardKill: -0.25,
+    partialExitsEnabled: false,
+    walletConfluenceRequired: 1,
+    confluenceWindow: 30,
+    timeKills: [
+      { hours: 1, minPnlPct: -0.05 },
+      { hours: 2, minPnlPct: 0.10 },
+      { hours: 6, minPnlPct: 0.20 },
+    ],
+    hardTimeHours: 24,
+    momentumExtensionEnabled: true,
+    momentumExtensionHours: 1,
+    momentumExtensionMaxPerWindow: 1,
+    momentumExtensionMinPnl: -0.02,
+    mcapMin: 15_000,                   // $15K min (was $50K — catch earlier)
+    mcapMax: 15_000_000,               // $15M max (was $5M — wider net)
+    liquidityMin: 3_000,              // $3K min (was $15K — small positions can handle thin pools)
+    momentumWindow: '24h',
+    momentumMin: -60,                  // -60% (was -50%)
+    momentumMax: 500,                  // +500% (was +200% — don't reject runners)
+    volumeMultiplierMin: 0.5,          // 0.5x (was 1x)
+    tokenMaxAgeDays: null,             // No age limit (was 30)
+    minSignalScore: 20,               // 20 (was 35 — much wider net for data)
     reentryEnabled: true,
     reentryCooldownMins: 15,
     reentryMaxPerToken: 1,
@@ -307,13 +307,13 @@ export function getTierConfig(tier: CapitalTier): TierConfig {
     walletsMonitored: 50,      // Max WS coverage in shadow mode for data collection
     maxPositions: 20,         // 20 concurrent — shadow mode is data collection, not risk-managed
     positionSizePct: 0.10,    // 10% per shadow position (was 5% — user wants 0.5-1 SOL bids for bigger wins)
-    minSignalScore: 20,       // Lower from 35 — shadow mode needs to cast a wide net to build wallet performance data
-    mcapMin: 50_000,          // $50K (was $200K)
-    mcapMax: 10_000_000,      // $10M (was $2M) — $30M+ is noise at micro capital
-    liquidityMin: 5_000,      // $5K (was $20K)
-    momentumMin: -60,           // allow deeper dips in shadow mode for data collection
-    momentumMax: 500,         // up to 500% (was 200%)
-    volumeMultiplierMin: 1,   // 1x (was 2x)
-    tokenMaxAgeDays: null,    // no age limit (was 30d)
+    minSignalScore: 15,       // 15 — shadow mode = max data collection, score is informational only
+    mcapMin: 10_000,          // $10K — match relaxed MICRO min
+    mcapMax: 15_000_000,      // $15M
+    liquidityMin: 2_000,      // $2K — match relaxed MICRO min
+    momentumMin: -70,           // allow deep dips
+    momentumMax: 1000,        // up to 1000%
+    volumeMultiplierMin: 0.3, // 0.3x — very loose
+    tokenMaxAgeDays: null,    // no age limit
   };
 }

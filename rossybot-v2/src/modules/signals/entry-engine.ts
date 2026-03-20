@@ -13,7 +13,7 @@ interface PendingBuy {
 
 export class EntryEngine {
   private pendingBuys: Map<string, PendingBuy> = new Map();
-  private processedTokens: Set<string> = new Set(); // Dedup: don't re-enter same token
+  private processedTokens: Map<string, number> = new Map(); // tokenMint → timestamp (for expiry)
   private onSignalValid: ((signal: ValidatedSignal) => Promise<void>) | null = null;
   private onSignalValidated: ((signal: ValidatedSignal & { passed: boolean; failReason: string | null }, validation: import('../../types/index.js').FullValidationResult) => Promise<void>) | null = null;
   private allTrackedWallets: Set<string> = new Set(); // All wallets in DB (subscribed + unsubscribed)
@@ -45,8 +45,15 @@ export class EntryEngine {
 
     const mint = signal.tokenMint;
 
-    // Dedup: skip tokens we've already entered
-    if (this.processedTokens.has(mint)) return;
+    // Dedup: skip tokens we've already entered or recently processed
+    const processedAt = this.processedTokens.get(mint);
+    if (processedAt !== undefined) {
+      // Tokens that were entered (processedAt === 0) stay blocked until allowReentry()
+      // Tokens that failed validation expire after 10 minutes (re-evaluate with new wallets)
+      if (processedAt === 0 || Date.now() - processedAt < 10 * 60_000) return;
+      // Expired — allow re-processing
+      this.processedTokens.delete(mint);
+    }
 
     // Get or create pending buy tracker
     let pending = this.pendingBuys.get(mint);
@@ -89,9 +96,10 @@ export class EntryEngine {
     const confluenceOk = this.checkConfluence(pending, tierCfg);
     if (!confluenceOk) return;
 
-    // Confluence met — mark as processed immediately to prevent duplicate validation
-    // (concurrent processBuySignal calls can race past the dedup check at the top)
-    this.processedTokens.add(mint);
+    // Confluence met — mark as processing to prevent duplicate validation
+    // Uses current timestamp; will be updated to 0 (permanent) if entry succeeds,
+    // or left as-is to expire after 10min if validation fails.
+    this.processedTokens.set(mint, Date.now());
 
     // Confluence met — validate token
     logger.info({
@@ -158,12 +166,16 @@ export class EntryEngine {
         liquidity: validation.dexData?.liquidity?.usd,
         momentum24h: validation.dexData?.priceChange?.h24,
       }, `Signal skipped — ${validation.failReason}: ${failedCheck?.reason || 'unknown'}`);
-      // Keep in processedTokens — don't allow re-entry with different wallet combos
+      // Keep in processedTokens with timestamp — will expire after 10 min
+      // allowing re-evaluation if new wallets signal the same token
       this.pendingBuys.delete(mint);
       return;
     }
 
     this.pendingBuys.delete(mint);
+
+    // Mark as permanently processed (entered) — 0 = no expiry
+    this.processedTokens.set(mint, 0);
 
     // Fire callback with validated signal
     if (this.onSignalValid) {
@@ -289,10 +301,20 @@ export class EntryEngine {
       }
     }
 
-    // Clean processed tokens older than 48 hours
-    // (Simplified — in production would track timestamps)
-    if (this.processedTokens.size > 1000) {
-      this.processedTokens.clear();
+    // Clean expired processed tokens (failures expire after 10min, entries after 48h)
+    const ENTRY_TTL = 48 * 60 * 60_000; // 48 hours for entered tokens
+    for (const [mint, ts] of this.processedTokens) {
+      if (ts === 0) {
+        // Permanent entry — only clear after 48h (use Map insertion order as proxy)
+        // Will be cleared by allowReentry() if re-entry is eligible
+        continue;
+      }
+      if (now - ts > 10 * 60_000) {
+        this.processedTokens.delete(mint); // Failed validation — expired, allow re-evaluation
+      }
+    }
+    if (this.processedTokens.size > 2000) {
+      this.processedTokens.clear(); // Safety valve
     }
   }
 
@@ -333,8 +355,13 @@ export class EntryEngine {
    */
   allowReentry(tokenMint: string): void {
     this.processedTokens.delete(tokenMint);
-    this.pendingBuys.delete(tokenMint); // Clear any stale pending state
+    this.pendingBuys.delete(tokenMint);
     logger.info({ token: tokenMint.slice(0, 8) }, 'Token cleared for re-entry — removed from processedTokens');
+  }
+
+  /** Check if a token is currently being tracked/processed */
+  isProcessed(tokenMint: string): boolean {
+    return this.processedTokens.has(tokenMint);
   }
 
   /** Get pending buy status for debugging */

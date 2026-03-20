@@ -275,6 +275,7 @@ export function getTierConfig(tier: CapitalTier): TierConfig {
     walletsMonitored: 50,      // Max WS coverage in shadow mode for data collection
     maxPositions: 20,         // 20 concurrent — shadow mode is data collection, not risk-managed
     positionSizePct: 0.05,    // 5% per shadow position — keeps simulated P&L realistic at 20 positions
+    minSignalScore: 20,       // Lower from 35 — shadow mode needs to cast a wide net to build wallet performance data
     mcapMin: 50_000,          // $50K (was $200K)
     mcapMax: 10_000_000,      // $10M (was $2M) — $30M+ is noise at micro capital
     liquidityMin: 5_000,      // $5K (was $20K)

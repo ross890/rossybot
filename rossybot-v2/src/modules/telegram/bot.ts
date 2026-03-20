@@ -429,6 +429,28 @@ export class TelegramService {
     tradesAllTime: number;
     discoveryTokens: number;
     discoveryWalletsAdded: number;
+    performance: {
+      pumpFun: {
+        total: number; wins: number; wr: number;
+        avgWinPct: number; avgLossPct: number; netSol: number;
+        totalFees: number; avgHoldMins: number; avgLagSecs: number;
+        profitFactor: number; expectancySol: number;
+      };
+      exitReasons: Array<{ reason: string; total: number; wins: number; avgPnl: number; netSol: number }>;
+      curveZones: Array<{ zone: string; total: number; wins: number; avgPnl: number; netSol: number }>;
+      entryTypes: Array<{ type: string; total: number; wins: number; avgPnl: number; netSol: number }>;
+      signalFunnel: { total: number; executed: number; skippedValidation: number; skippedMaxPos: number; skippedDaily: number };
+      rejections: Array<{ reason: string; count: number }>;
+      topWallets: Array<{ label: string; trades: number; wins: number; netSol: number; avgPnl: number }>;
+      bottomWallets: Array<{ label: string; trades: number; wins: number; netSol: number; avgPnl: number }>;
+      trend: { recentTrades: number; recentWins: number; recentSol: number; priorTrades: number; priorWins: number; priorSol: number };
+      tierChanges: Array<{ from: string; to: string; capital: number; at: Date }>;
+    };
+    activeConfig: {
+      minSignalScore: number; positionSizePct: number;
+      curveEntryMin: number; curveEntryMax: number; curveVelocityMin: number;
+      deferredEntryEnabled: boolean; deferredEntryMaxWaitMs: number;
+    };
   }): Promise<void> {
     const isPumpFunOnly = data.capitalSol < data.minCapitalForStandardTrading;
 
@@ -593,15 +615,147 @@ export class TelegramService {
       );
     }
 
+    // --- PERFORMANCE DATA (for self-improving feedback loop) ---
+    const pf = data.performance.pumpFun;
+    const funnel = data.performance.signalFunnel;
+    const trend = data.performance.trend;
+    const cfg = data.activeConfig;
+
+    if (pf.total > 0) {
+      const pfWr = (pf.wr * 100).toFixed(0);
+      const pfFactor = pf.profitFactor > 0 ? pf.profitFactor.toFixed(2) : 'N/A';
+      const holdStr = pf.avgHoldMins < 60 ? `${pf.avgHoldMins.toFixed(0)}m` : `${(pf.avgHoldMins / 60).toFixed(1)}h`;
+
+      msg.push(
+        `├─ PUMP.FUN PERFORMANCE (${pf.total} trades)`,
+        `│ WR: ${pfWr}% (${pf.wins}W/${pf.total - pf.wins}L) | PF: ${pfFactor}`,
+        `│ Avg win: +${(pf.avgWinPct * 100).toFixed(1)}% | Avg loss: ${(pf.avgLossPct * 100).toFixed(1)}%`,
+        `│ Net: ${pf.netSol >= 0 ? '+' : ''}${pf.netSol.toFixed(4)} SOL | Fees: ${pf.totalFees.toFixed(4)} SOL`,
+        `│ EV: ${pf.expectancySol >= 0 ? '+' : ''}${pf.expectancySol.toFixed(4)} SOL/trade`,
+        `│ Avg hold: ${holdStr} | Avg lag: ${pf.avgLagSecs.toFixed(0)}s`,
+        `│`,
+      );
+
+      // Exit reason breakdown
+      if (data.performance.exitReasons.length > 0) {
+        msg.push(`│ ── EXIT REASONS`);
+        for (const r of data.performance.exitReasons) {
+          const rWr = r.total > 0 ? (r.wins / r.total * 100).toFixed(0) : '0';
+          msg.push(`│  ${r.reason}: ${r.total}t ${rWr}%W ${r.netSol >= 0 ? '+' : ''}${r.netSol.toFixed(4)}◎`);
+        }
+        msg.push(`│`);
+      }
+
+      // Curve zone breakdown
+      if (data.performance.curveZones.length > 0) {
+        msg.push(`│ ── ENTRY CURVE ZONE`);
+        for (const z of data.performance.curveZones) {
+          const zWr = z.total > 0 ? (z.wins / z.total * 100).toFixed(0) : '0';
+          msg.push(`│  ${z.zone}: ${z.total}t ${zWr}%W avg${(z.avgPnl * 100).toFixed(1)}% ${z.netSol >= 0 ? '+' : ''}${z.netSol.toFixed(4)}◎`);
+        }
+        msg.push(`│`);
+      }
+
+      // Entry type breakdown
+      if (data.performance.entryTypes.length > 0) {
+        msg.push(`│ ── ENTRY TYPE`);
+        for (const e of data.performance.entryTypes) {
+          const eWr = e.total > 0 ? (e.wins / e.total * 100).toFixed(0) : '0';
+          msg.push(`│  ${e.type}: ${e.total}t ${eWr}%W ${e.netSol >= 0 ? '+' : ''}${e.netSol.toFixed(4)}◎`);
+        }
+        msg.push(`│`);
+      }
+    }
+
+    // Signal funnel
+    if (funnel.total > 0) {
+      const passRate = (funnel.executed / funnel.total * 100).toFixed(0);
+      msg.push(
+        `├─ SIGNAL FUNNEL (${funnel.total} total)`,
+        `│ ${funnel.total} detected → ${funnel.executed} entered (${passRate}% pass)`,
+        `│ Rejected: ${funnel.skippedValidation} validation, ${funnel.skippedMaxPos} max-pos, ${funnel.skippedDaily} daily-limit`,
+      );
+      if (data.performance.rejections.length > 0) {
+        const rejStr = data.performance.rejections.map((r) => `${r.reason}:${r.count}`).join(' · ');
+        msg.push(`│ Top rejects: ${rejStr}`);
+      }
+      msg.push(`│`);
+    }
+
+    // Wallet leaderboard
+    if (data.performance.topWallets.length > 0) {
+      msg.push(`├─ WALLET LEADERBOARD`);
+      msg.push(`│ ── BEST (by SOL)`);
+      for (const w of data.performance.topWallets) {
+        const wWr = w.trades > 0 ? (w.wins / w.trades * 100).toFixed(0) : '0';
+        msg.push(`│  ${w.label}: ${w.trades}t ${wWr}%W ${w.netSol >= 0 ? '+' : ''}${w.netSol.toFixed(4)}◎`);
+      }
+      if (data.performance.bottomWallets.length > 0) {
+        msg.push(`│ ── WORST (by SOL)`);
+        for (const w of data.performance.bottomWallets) {
+          const wWr = w.trades > 0 ? (w.wins / w.trades * 100).toFixed(0) : '0';
+          msg.push(`│  ${w.label}: ${w.trades}t ${wWr}%W ${w.netSol >= 0 ? '+' : ''}${w.netSol.toFixed(4)}◎`);
+        }
+      }
+      msg.push(`│`);
+    }
+
+    // 7d trend
+    if (trend.recentTrades > 0 || trend.priorTrades > 0) {
+      const recentWr = trend.recentTrades > 0 ? (trend.recentWins / trend.recentTrades * 100).toFixed(0) : 'N/A';
+      const priorWr = trend.priorTrades > 0 ? (trend.priorWins / trend.priorTrades * 100).toFixed(0) : 'N/A';
+      const solDelta = trend.recentSol - trend.priorSol;
+      const improving = solDelta > 0;
+      msg.push(
+        `├─ 7D TREND ${improving ? '📈' : '📉'}`,
+        `│ This week: ${trend.recentTrades}t ${recentWr}%W ${trend.recentSol >= 0 ? '+' : ''}${trend.recentSol.toFixed(4)}◎`,
+        `│ Last week: ${trend.priorTrades}t ${priorWr}%W ${trend.priorSol >= 0 ? '+' : ''}${trend.priorSol.toFixed(4)}◎`,
+        `│ Delta: ${solDelta >= 0 ? '+' : ''}${solDelta.toFixed(4)}◎ ${improving ? '(improving)' : '(declining)'}`,
+        `│`,
+      );
+    }
+
+    // Tier history
+    if (data.performance.tierChanges.length > 0) {
+      msg.push(`├─ TIER HISTORY`);
+      for (const t of data.performance.tierChanges) {
+        const ago = Math.round((Date.now() - t.at.getTime()) / 3600000);
+        const agoStr = ago < 24 ? `${ago}h ago` : `${Math.round(ago / 24)}d ago`;
+        msg.push(`│ ${t.from} → ${t.to} at ${t.capital.toFixed(2)}◎ (${agoStr})`);
+      }
+      msg.push(`│`);
+    }
+
+    // Active tuning params (the knobs that matter)
+    msg.push(
+      `├─ ACTIVE TUNING PARAMS`,
+      `│ Min signal score: ${cfg.minSignalScore}`,
+      `│ Position size: ${(cfg.positionSizePct * 100).toFixed(0)}% of capital`,
+      `│ Curve entry: ${(cfg.curveEntryMin * 100).toFixed(0)}%-${(cfg.curveEntryMax * 100).toFixed(0)}% fill`,
+      `│ Curve velocity: ${cfg.curveVelocityMin} SOL/min`,
+      `│ Stall timer: ${data.pumpFunStaleTimeMins}min`,
+      `│ Conviction: ${data.pumpFunMinConviction}◎ min`,
+      `│ TP: ${(data.pumpFunCurveProfitTarget * 100).toFixed(0)}% fill | SL: ${(data.pumpFunStopLoss * 100).toFixed(0)}%`,
+      `│ Deferred: ${cfg.deferredEntryEnabled ? `ON (${(cfg.deferredEntryMaxWaitMs / 60000).toFixed(0)}min max)` : 'OFF'}`,
+      `│ PF size mult: ${data.pumpFunPositionSizeMultiplier}x`,
+      `│`,
+    );
+
     msg.push(
       `├─ STATS`,
       `│ Signals today: ${data.signalsToday}`,
       `│ All-time trades: ${data.tradesAllTime}`,
       `│`,
       `└─ STATUS: ✅ RUNNING`,
+      ``,
+      `💡 Copy this message to Claude for tuning recommendations`,
     );
 
-    await this.send(msg.join('\n'));
+    // Split into chunks if too long for Telegram (4096 char limit)
+    const fullMsg = msg.join('\n');
+    for (const chunk of this.chunkMessage(fullMsg)) {
+      await this.send(chunk);
+    }
   }
 
   // --- Command handlers ---

@@ -165,14 +165,12 @@ export class HeliusWebSocketManager extends EventEmitter {
         if (typeof msg.result === 'number') {
           this.activeSubscriptionIds.push(msg.result);
         }
-        // Only log milestone confirmations to avoid spam with many wallets
-        if (this.activeSubscriptionIds.length <= 3 ||
-            this.activeSubscriptionIds.length === this.subscribedWallets.size) {
+        // Only log when all subscriptions are confirmed — single summary line
+        if (this.activeSubscriptionIds.length >= this.subscribedWallets.size) {
           logger.info({
-            subscriptionId: msg.result,
             confirmed: this.activeSubscriptionIds.length,
             total: this.subscribedWallets.size,
-          }, 'logsSubscribe confirmed');
+          }, 'All logsSubscribe confirmed');
         }
         return;
       }

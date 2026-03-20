@@ -126,16 +126,10 @@ export class TransactionParser {
       const isPumpFun = pumpFunCurve !== null;
 
       if (isPumpFun) {
-        logger.info({
+        logger.debug({
           sig: signature.slice(0, 12),
           wallets: involvedWallets.map((w) => w.slice(0, 8)),
           curve: pumpFunCurve?.slice(0, 12),
-          preTokenBalances: (tx.meta.preTokenBalances || []).length,
-          postTokenBalances: (tx.meta.postTokenBalances || []).length,
-          tokenOwners: [...new Set([
-            ...(tx.meta.preTokenBalances || []).map((b: TokenBalanceEntry) => `${b.owner?.slice(0, 8)}(idx${b.accountIndex})`),
-            ...(tx.meta.postTokenBalances || []).map((b: TokenBalanceEntry) => `${b.owner?.slice(0, 8)}(idx${b.accountIndex})`),
-          ])],
         }, 'Pump.fun interaction detected in TX');
       }
 
@@ -366,7 +360,13 @@ export class TransactionParser {
         if (now - lastLog >= TransactionParser.SKIP_LOG_INTERVAL_MS) {
           this.walletLastSkipLog.set(wallet, now);
           const signals = this.walletSignalCounts.get(wallet) || 0;
-          console.log(`⏭️ wallet ${wallet.slice(0, 8)} | ${skipCount} skipped TXs (${signals} signals) | no token transfers`);
+          // Only log at info for wallets with decent signal rates; noisy ones go to debug
+          const ratio = signals / (skipCount + signals || 1);
+          if (ratio > 0.05) {
+            logger.info({ wallet: wallet.slice(0, 8), skipped: skipCount, signals }, 'Wallet skip summary');
+          } else {
+            logger.debug({ wallet: wallet.slice(0, 8), skipped: skipCount, signals, ratio: (ratio * 100).toFixed(1) + '%' }, 'Noisy wallet skip summary');
+          }
         }
       }
     } catch (err) {

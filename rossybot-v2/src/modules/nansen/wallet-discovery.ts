@@ -27,10 +27,17 @@ export class WalletDiscovery {
   private discoveryInterval: ReturnType<typeof setInterval> | null = null;
   private onNewWallet: ((address: string) => void) | null = null;
   private onHoldTimeResults: ((results: { deactivated: string[]; demoted: string[] }) => void) | null = null;
+  private walletRankCache: { addresses: string[]; pumpFunOnly: boolean; fetchedAt: number } | null = null;
+  private static readonly WALLET_CACHE_TTL_MS = 5 * 60_000; // 5 minutes
 
   constructor(nansen: NansenClient) {
     this.nansen = nansen;
     this.holdTimeAnalyzer = new HoldTimeAnalyzer();
+  }
+
+  /** Invalidate the cached wallet ranking (call after add/remove/deactivate) */
+  invalidateWalletCache(): void {
+    this.walletRankCache = null;
   }
 
   /** Set callback for hold-time enforcement results */
@@ -79,6 +86,7 @@ export class WalletDiscovery {
 
     const pfCount = eligible.filter((w) => w.pumpfunOnly).length;
     logger.info({ count: eligible.length, pumpfun: pfCount, tier: capitalTier }, 'Seed wallets loaded');
+    this.invalidateWalletCache();
     return eligible.map((w) => w.address);
   }
 
@@ -122,6 +130,7 @@ export class WalletDiscovery {
     const count = result.rowCount || 0;
     if (count > 0) {
       logger.info({ count, minPnl: MIN_PNL_USD }, 'Deactivated wallets below minimum PnL threshold on startup');
+      this.invalidateWalletCache();
     }
     return count;
   }
@@ -175,6 +184,7 @@ export class WalletDiscovery {
     }
     if (total > 0) {
       console.log(`Purged ${total} weak/unproven wallets on startup (${seedCount} seeds, ${discoveredCount} discovered)`);
+      this.invalidateWalletCache();
     }
     return total;
   }
@@ -232,6 +242,7 @@ export class WalletDiscovery {
         cleanupReasons: cleanup.reasons,
         durationMs: duration,
       }, 'Discovery cycle complete');
+      this.invalidateWalletCache();
     } catch (err: unknown) {
       const axiosErr = err as { response?: { status?: number; data?: unknown }; message?: string };
       if (axiosErr.response) {
@@ -499,45 +510,55 @@ export class WalletDiscovery {
   async enforceTradeActivity(forceCheckAll = false): Promise<number> {
     const INACTIVE_DAYS = 7;
     const cutoff = new Date(Date.now() - INACTIVE_DAYS * 24 * 60 * 60 * 1000);
+    const SEED_HARD_CUTOFF_DAYS = 30;
+    const seedCutoff = new Date(Date.now() - SEED_HARD_CUTOFF_DAYS * 24 * 60 * 60 * 1000);
 
     const wallets = await getMany<{ address: string; source: string; last_active_at: string | null }>(
       `SELECT address, source, last_active_at FROM alpha_wallets WHERE active = TRUE`,
     );
 
-    console.log(`🔍 Checking on-chain activity for ${wallets.length} wallets (force=${forceCheckAll})...`);
+    console.log(`Checking on-chain activity for ${wallets.length} wallets (force=${forceCheckAll})...`);
 
     let deactivated = 0;
     let checked = 0;
     let skipped = 0;
 
+    // Split into wallets that need checking vs known-active
+    const toCheck: typeof wallets = [];
     for (const wallet of wallets) {
-      // Skip wallets known active within 7d (unless force-checking all)
       if (!forceCheckAll && wallet.last_active_at) {
         const lastActive = new Date(wallet.last_active_at);
         if (lastActive.getTime() > cutoff.getTime()) {
           skipped++;
-          continue; // Known active within window, skip RPC call
+          continue;
         }
       }
+      toCheck.push(wallet);
+    }
 
-      try {
-        const lastTxTime = await this.getLastTransactionTime(wallet.address);
+    // Process in batches of 10 (parallel within batch, sequential between)
+    const BATCH_SIZE = 10;
+    for (let i = 0; i < toCheck.length; i += BATCH_SIZE) {
+      const batch = toCheck.slice(i, i + BATCH_SIZE);
+      const results = await Promise.allSettled(
+        batch.map(async (wallet) => {
+          const lastTxTime = await this.getLastTransactionTime(wallet.address);
+          return { wallet, lastTxTime };
+        }),
+      );
+
+      for (const result of results) {
+        if (result.status === 'rejected') continue;
         checked++;
-
+        const { wallet, lastTxTime } = result.value;
         const isSeed = wallet.source === 'NANSEN_SEED' || wallet.source === 'PUMPFUN_SEED' || wallet.source === 'GRADUATION_SEED';
-        // Even seed wallets should be deactivated if dead for 30+ days — no wallet is worth
-        // watching after a month of silence (e.g. abandoned wallets, compromised keys)
-        const SEED_HARD_CUTOFF_DAYS = 30;
-        const seedCutoff = new Date(Date.now() - SEED_HARD_CUTOFF_DAYS * 24 * 60 * 60 * 1000);
 
         if (lastTxTime) {
-          // Update last_active_at with actual on-chain activity time
           await query(
             `UPDATE alpha_wallets SET last_active_at = $1 WHERE address = $2`,
             [new Date(lastTxTime * 1000), wallet.address],
           );
 
-          // Deactivate if inactive for too long
           if (!isSeed && lastTxTime * 1000 < cutoff.getTime()) {
             await query(`UPDATE alpha_wallets SET active = FALSE WHERE address = $1`, [wallet.address]);
             deactivated++;
@@ -546,7 +567,6 @@ export class WalletDiscovery {
               lastActiveAgo: `${Math.round((Date.now() - lastTxTime * 1000) / 86400000)}d`,
             }, 'Deactivated inactive wallet');
           } else if (isSeed && lastTxTime * 1000 < seedCutoff.getTime()) {
-            // Seed wallets inactive 30+ days — deactivate (likely abandoned)
             await query(`UPDATE alpha_wallets SET active = FALSE WHERE address = $1`, [wallet.address]);
             deactivated++;
             logger.info({
@@ -556,30 +576,24 @@ export class WalletDiscovery {
             }, 'Deactivated seed wallet — inactive >30d');
           }
         } else {
-          // No transactions found at all — deactivate non-seeds
-          if (!isSeed) {
-            await query(`UPDATE alpha_wallets SET active = FALSE WHERE address = $1`, [wallet.address]);
-            deactivated++;
-            logger.info({ address: wallet.address.slice(0, 8) }, 'Deactivated wallet — no on-chain activity found');
-          } else {
-            // Seed wallet with zero on-chain activity — deactivate
-            await query(`UPDATE alpha_wallets SET active = FALSE WHERE address = $1`, [wallet.address]);
-            deactivated++;
-            logger.info({ address: wallet.address.slice(0, 8), source: wallet.source },
-              'Deactivated seed wallet — no on-chain activity found');
-          }
+          // No transactions found — deactivate (seeds included)
+          await query(`UPDATE alpha_wallets SET active = FALSE WHERE address = $1`, [wallet.address]);
+          deactivated++;
+          logger.info({ address: wallet.address.slice(0, 8), source: wallet.source },
+            'Deactivated wallet — no on-chain activity found');
         }
+      }
 
-        // Rate-limit RPC calls: ~100ms between each
-        if (checked % 10 === 0) {
-          await new Promise((r) => setTimeout(r, 1000));
-        }
-      } catch (err) {
-        logger.debug({ err, address: wallet.address.slice(0, 8) }, 'Failed to check wallet activity');
+      // Brief pause between batches to respect Helius rate limits
+      if (i + BATCH_SIZE < toCheck.length) {
+        await new Promise((r) => setTimeout(r, 200));
       }
     }
 
-    console.log(`✅ Activity check: ${checked} checked, ${skipped} skipped (known active), ${deactivated} deactivated (inactive >${INACTIVE_DAYS}d)`);
+    console.log(`Activity check: ${checked} checked, ${skipped} skipped (known active), ${deactivated} deactivated (inactive >${INACTIVE_DAYS}d)`);
+    if (deactivated > 0) {
+      this.invalidateWalletCache();
+    }
     if (deactivated > 0 || checked > 0) {
       logger.info({ checked, skipped, deactivated, total: wallets.length, inactiveDays: INACTIVE_DAYS },
         'Trade activity check complete');
@@ -619,79 +633,56 @@ export class WalletDiscovery {
   async autoCleanup(): Promise<{ removed: number; reasons: Record<string, number> }> {
     const reasons: Record<string, number> = {};
     let totalRemoved = 0;
-
-    // 1. Stale wallets: discovered >3 days ago, no trade data from us, not a seed
     const staleCutoff = new Date(Date.now() - STALE_WALLET_DAYS * 24 * 60 * 60 * 1000);
-    const staleResult = await query(
+
+    // Combined cleanup: stale + slow holders + proven losers + low alpha (single query)
+    const cleanupResult = await getMany<{ address: string; reason: string }>(
       `UPDATE alpha_wallets SET active = FALSE
-       WHERE active = TRUE
-         AND source NOT IN ('NANSEN_SEED', 'PUMPFUN_SEED', 'GRADUATION_SEED')
-         AND COALESCE(our_total_trades, 0) = 0
-         AND COALESCE(round_trips_analyzed, 0) = 0
-         AND discovered_at < $1
-       RETURNING address`,
+       WHERE active = TRUE AND (
+         -- Stale: no trade data, not a seed, discovered >3 days ago
+         (source NOT IN ('NANSEN_SEED', 'PUMPFUN_SEED', 'GRADUATION_SEED')
+          AND COALESCE(our_total_trades, 0) = 0
+          AND COALESCE(round_trips_analyzed, 0) = 0
+          AND discovered_at < $1)
+         -- Slow holders: median hold >12h with 3+ analyzed trips
+         OR (COALESCE(median_hold_time_mins, 0) > 720
+             AND COALESCE(round_trips_analyzed, 0) >= 3)
+         -- Proven losers: 5+ trades with <40% WR or negative avg PnL
+         OR (COALESCE(our_total_trades, 0) >= 5
+             AND (COALESCE(our_win_rate, 0) < 0.40 OR COALESCE(our_avg_pnl_percent, 0) < 0))
+         -- Low alpha score: <15 with 3+ rounds analyzed
+         OR (COALESCE(round_trips_analyzed, 0) >= 3
+             AND COALESCE(short_term_alpha_score, 0) < 15)
+       )
+       RETURNING address,
+         CASE
+           WHEN source NOT IN ('NANSEN_SEED', 'PUMPFUN_SEED', 'GRADUATION_SEED')
+             AND COALESCE(our_total_trades, 0) = 0 AND COALESCE(round_trips_analyzed, 0) = 0
+             AND discovered_at < $1 THEN 'stale (no trade data)'
+           WHEN COALESCE(median_hold_time_mins, 0) > 720
+             AND COALESCE(round_trips_analyzed, 0) >= 3 THEN 'slow holder (median >12h)'
+           WHEN COALESCE(our_total_trades, 0) >= 5
+             AND (COALESCE(our_win_rate, 0) < 0.40 OR COALESCE(our_avg_pnl_percent, 0) < 0) THEN 'proven loser'
+           ELSE 'low alpha score (<15)'
+         END as reason`,
       [staleCutoff],
     );
-    const staleCount = staleResult.rowCount || 0;
-    if (staleCount > 0) {
-      reasons['stale (no trade data)'] = staleCount;
-      totalRemoved += staleCount;
-      logger.info({ count: staleCount }, 'Removed stale wallets with no trade data');
+
+    for (const row of cleanupResult) {
+      reasons[row.reason] = (reasons[row.reason] || 0) + 1;
+      totalRemoved++;
+    }
+    if (totalRemoved > 0) {
+      logger.info({ totalRemoved, reasons }, 'Combined cleanup deactivated wallets');
     }
 
-    // 2. Proven slow holders: median hold >12h with 3+ analyzed trips — ALL wallets including seeds
-    const slowResult = await query(
-      `UPDATE alpha_wallets SET active = FALSE
-       WHERE active = TRUE
-         AND COALESCE(median_hold_time_mins, 0) > 720
-         AND COALESCE(round_trips_analyzed, 0) >= 3
-       RETURNING address`,
-    );
-    const slowCount = slowResult.rowCount || 0;
-    if (slowCount > 0) {
-      reasons['slow holder (median >12h)'] = slowCount;
-      totalRemoved += slowCount;
-      logger.info({ count: slowCount }, 'Removed slow-holder wallets (median hold >12h)');
-    }
-
-    // 3. Proven losers: 5+ trades with <40% WR or negative avg PnL — ALL wallets including seeds
-    const loserResult = await query(
-      `UPDATE alpha_wallets SET active = FALSE
-       WHERE active = TRUE
-         AND COALESCE(our_total_trades, 0) >= 5
-         AND (COALESCE(our_win_rate, 0) < 0.40 OR COALESCE(our_avg_pnl_percent, 0) < 0)
-       RETURNING address`,
-    );
-    const loserCount = loserResult.rowCount || 0;
-    if (loserCount > 0) {
-      reasons['proven loser (5+ trades, <40% WR or negative PnL)'] = loserCount;
-      totalRemoved += loserCount;
-      logger.info({ count: loserCount }, 'Removed proven loser wallets');
-    }
-
-    // 4. Low alpha score with data: alpha <15 with 3+ rounds = not profitable in our windows
-    const lowAlphaResult = await query(
-      `UPDATE alpha_wallets SET active = FALSE
-       WHERE active = TRUE
-         AND COALESCE(round_trips_analyzed, 0) >= 3
-         AND COALESCE(short_term_alpha_score, 0) < 15
-       RETURNING address`,
-    );
-    const lowAlphaCount = lowAlphaResult.rowCount || 0;
-    if (lowAlphaCount > 0) {
-      reasons['low alpha score (<15 with 3+ rounds)'] = lowAlphaCount;
-      totalRemoved += lowAlphaCount;
-      logger.info({ count: lowAlphaCount }, 'Removed low alpha score wallets');
-    }
-
-    // 5. Cap at MAX_ACTIVE_WALLETS — remove lowest-scoring non-seed wallets
+    // Cap at MAX_ACTIVE_WALLETS — remove lowest-scoring wallets (separate since it depends on above)
     const activeCount = await getMany<{ count: string }>(
       `SELECT COUNT(*) as count FROM alpha_wallets WHERE active = TRUE`,
     );
     const currentActive = parseInt(activeCount[0]?.count || '0');
     if (currentActive > MAX_ACTIVE_WALLETS) {
       const excess = currentActive - MAX_ACTIVE_WALLETS;
-      // Remove the lowest-scoring wallets (seeds included — earn your slot)
       const capResult = await query(
         `UPDATE alpha_wallets SET active = FALSE
          WHERE address IN (
@@ -715,6 +706,7 @@ export class WalletDiscovery {
     }
 
     if (totalRemoved > 0) {
+      this.invalidateWalletCache();
       logger.info({ totalRemoved, reasons }, 'Auto-cleanup complete');
     }
 
@@ -724,6 +716,13 @@ export class WalletDiscovery {
   /** Get all active wallet addresses — ranked by composite performance score.
    *  When pumpFunOnlyMode is true, heavily prioritize wallets that trade on bonding curves. */
   async getActiveWallets(pumpFunOnlyMode = false): Promise<string[]> {
+    // Return cached result if fresh and same mode
+    if (this.walletRankCache
+      && this.walletRankCache.pumpFunOnly === pumpFunOnlyMode
+      && (Date.now() - this.walletRankCache.fetchedAt) < WalletDiscovery.WALLET_CACHE_TTL_MS) {
+      return this.walletRankCache.addresses;
+    }
+
     const isPumpFunOnlyMode = pumpFunOnlyMode;
 
     const rows = await getMany<{ address: string }>(
@@ -783,11 +782,24 @@ export class WalletDiscovery {
                  AND COALESCE(our_total_trades, 0) = 0 THEN 25
                ELSE 0
              END
+           -- Recency decay: wallets added long ago with few/no trades for us are stale
+           - CASE
+               WHEN COALESCE(our_total_trades, 0) = 0
+                 AND discovered_at < NOW() - INTERVAL '14 days' THEN 20
+               WHEN COALESCE(our_total_trades, 0) = 0
+                 AND discovered_at < NOW() - INTERVAL '7 days' THEN 10
+               WHEN COALESCE(our_total_trades, 0) > 0
+                 AND COALESCE(our_total_trades, 0) < 3
+                 AND discovered_at < NOW() - INTERVAL '14 days' THEN 5
+               ELSE 0
+             END
          ) as score
        FROM alpha_wallets WHERE active = TRUE
        ORDER BY score DESC`,
       [isPumpFunOnlyMode],
     );
-    return rows.map((r) => r.address);
+    const addresses = rows.map((r) => r.address);
+    this.walletRankCache = { addresses, pumpFunOnly: pumpFunOnlyMode, fetchedAt: Date.now() };
+    return addresses;
   }
 }

@@ -78,6 +78,43 @@ function liveToView(p: ReturnType<LiveTracker['getOpenPositions']>[number]): Pos
   };
 }
 
+/** Set-backed wallet slot manager — O(1) lookups/removals, prevents duplicates */
+class WalletSlotManager {
+  private set = new Set<string>();
+  add(addr: string): boolean {
+    if (this.set.has(addr)) return false;
+    this.set.add(addr);
+    return true;
+  }
+  remove(addr: string): boolean {
+    return this.set.delete(addr);
+  }
+  has(addr: string): boolean {
+    return this.set.has(addr);
+  }
+  replace(oldAddr: string, newAddr: string): void {
+    this.set.delete(oldAddr);
+    this.set.add(newAddr);
+  }
+  get size(): number {
+    return this.set.size;
+  }
+  get length(): number {
+    return this.set.size;
+  }
+  toArray(): string[] {
+    return Array.from(this.set);
+  }
+  [Symbol.iterator](): IterableIterator<string> {
+    return this.set[Symbol.iterator]();
+  }
+  static from(addresses: string[]): WalletSlotManager {
+    const mgr = new WalletSlotManager();
+    for (const addr of addresses) mgr.set.add(addr);
+    return mgr;
+  }
+}
+
 class RossyBotV2 {
   private wsManager: HeliusWebSocketManager;
   private txParser: TransactionParser;
@@ -87,7 +124,7 @@ class RossyBotV2 {
   private entryEngine: EntryEngine;
   private capitalManager: CapitalManager;
   private telegram: TelegramService;
-  private walletAddresses: string[] = [];
+  private walletAddresses = new WalletSlotManager();
   private dailySummaryInterval: ReturnType<typeof setInterval> | null = null;
 
   // Position tracking — one or the other based on mode
@@ -107,11 +144,11 @@ class RossyBotV2 {
   // Throttle "slots full" Telegram messages — at most once per 2 minutes
   private lastSlotsFullMsgAt = 0;
 
-  // WS slot productivity tracking: wallet address → signal count since last rotation
-  private wsSignalCounts: Map<string, number> = new Map();
+  // WS slot productivity tracking: wallet address → signal quality since last rotation
+  private wsSignalQuality: Map<string, { count: number; passed: number; totalScore: number }> = new Map();
   private wsRotationInterval: ReturnType<typeof setInterval> | null = null;
   private static readonly WS_ROTATION_INTERVAL_MS = 10 * 60_000; // Rotate every 10 min
-  private static readonly WS_MIN_SIGNALS_FOR_KEEP = 1; // Must produce ≥1 signal per rotation window
+  private static readonly WS_MIN_QUALITY_FOR_KEEP = 1.0; // quality = passed*2 + totalScore/count
 
   // Pump.fun confluence tracking: multiple alpha wallets buying the same token
   private pumpFunConfluence: Map<string, { wallets: Set<string>; totalSol: number; firstSeen: number }> = new Map();
@@ -281,12 +318,12 @@ class RossyBotV2 {
     const allActiveWallets = await this.walletDiscovery.getActiveWallets(isPumpFunOnlyMode);
 
     // Helius WS monitors top N wallets (tier-limited)
-    this.walletAddresses = allActiveWallets.slice(0, tierCfg.walletsMonitored);
-    logger.info({ subscribed: this.walletAddresses.length, total: allActiveWallets.length }, 'Active wallets loaded');
+    this.walletAddresses = WalletSlotManager.from(allActiveWallets.slice(0, tierCfg.walletsMonitored));
+    logger.info({ subscribed: this.walletAddresses.size, total: allActiveWallets.length }, 'Active wallets loaded');
 
     // 4. Update parsers (subscribed wallets for WS detection)
-    this.txParser.updateWallets(this.walletAddresses);
-    this.fallbackPoller.updateWallets(this.walletAddresses);
+    this.txParser.updateWallets(this.walletAddresses.toArray());
+    this.fallbackPoller.updateWallets(this.walletAddresses.toArray());
 
     // Give entry engine ALL tracked wallets for on-chain confluence checks
     this.entryEngine.updateAllTrackedWallets(allActiveWallets);
@@ -320,7 +357,7 @@ class RossyBotV2 {
     this.wireCallbacks();
 
     // 7. Connect Helius WebSocket (THE CRITICAL STEP)
-    await this.wsManager.connect(this.walletAddresses);
+    await this.wsManager.connect(this.walletAddresses.toArray());
 
     // 8. Start position price monitoring
     if (this.liveTracker) {
@@ -337,11 +374,11 @@ class RossyBotV2 {
     this.pumpFunAlphaDiscovery.setNewAlphaCallback((address) => {
       // Respect WS slot cap — only subscribe if we have room
       const tierCfg = getTierConfig(this.capitalManager.tier);
-      if (this.walletAddresses.length < tierCfg.walletsMonitored) {
-        this.walletAddresses.push(address);
+      if (this.walletAddresses.size < tierCfg.walletsMonitored && !this.walletAddresses.has(address)) {
+        this.walletAddresses.add(address);
         this.txParser.addWallet(address);
         this.wsManager.addWallet(address);
-        logger.info({ address: address.slice(0, 8), total: this.walletAddresses.length }, 'PumpPortal alpha discovered — added to Helius WS');
+        logger.info({ address: address.slice(0, 8), total: this.walletAddresses.size }, 'PumpPortal alpha discovered — added to Helius WS');
       } else {
         logger.info({ address: address.slice(0, 8) }, 'PumpPortal alpha discovered — WS slots full, added for on-chain confluence only');
       }
@@ -536,9 +573,10 @@ class RossyBotV2 {
           const isPumpFunOnly = walletRow?.pumpfun_only === true;
 
           if (signal.type === SignalType.BUY) {
-            // Track actionable signal for WS rotation (only count buys that reach handlers)
-            const actionCount = this.wsSignalCounts.get(signal.walletAddress) || 0;
-            this.wsSignalCounts.set(signal.walletAddress, actionCount + 1);
+            // Track signal for WS rotation quality scoring
+            const sq = this.wsSignalQuality.get(signal.walletAddress) || { count: 0, passed: 0, totalScore: 0 };
+            sq.count++;
+            this.wsSignalQuality.set(signal.walletAddress, sq);
 
             if (signal.isPumpFun) {
               await this.handlePumpFunBuy(signal);
@@ -593,7 +631,7 @@ class RossyBotV2 {
         logger.info('Fallback mode DEACTIVATED');
         this.fallbackPoller.stop();
         await this.telegram.sendWebSocketAlert('restored', {
-          wallets: this.walletAddresses.length,
+          wallets: this.walletAddresses.size,
           downtime: 'recovered',
         });
       } catch (err) {
@@ -647,6 +685,15 @@ class RossyBotV2 {
         // Send signal log with actual scoring outcome (not just validation pass/fail)
         const minScore = signal.tierConfig.minSignalScore;
         const scorePassed = score.total >= minScore && !score.walletRejected;
+
+        // Update WS rotation quality tracking with scoring results
+        for (const walletAddr of signal.walletAddresses) {
+          const sq = this.wsSignalQuality.get(walletAddr);
+          if (sq) {
+            if (scorePassed) sq.passed++;
+            sq.totalScore += score.total;
+          }
+        }
         try {
           const dex = signal.validation.dexData;
           await this.telegram.sendSignalLog({
@@ -666,7 +713,7 @@ class RossyBotV2 {
                 nansenPnlUsd: stats?.nansenPnlUsd || 0,
               };
             }),
-            totalMonitored: this.walletAddresses.length,
+            totalMonitored: this.walletAddresses.size,
             safety: signal.validation.safety,
             liquidity: signal.validation.liquidity,
             momentum: signal.validation.momentum,
@@ -799,7 +846,7 @@ class RossyBotV2 {
           tier: signal.tierConfig.tier,
           wallets: signal.walletAddresses,
           walletCount: signal.walletCount,
-          totalMonitored: this.walletAddresses.length,
+          totalMonitored: this.walletAddresses.size,
           walletEv: signal.walletAddresses.map((addr) => {
             const stats = walletEvMap.get(addr);
             return {
@@ -1041,14 +1088,14 @@ class RossyBotV2 {
         );
 
         const tierCfg = getTierConfig(this.capitalManager.tier);
-        if (this.walletAddresses.length >= tierCfg.walletsMonitored) {
-          logger.info({ address: address.slice(0, 8) }, 'New wallet added for on-chain confluence (WS slots full)');
+        if (this.walletAddresses.size >= tierCfg.walletsMonitored || this.walletAddresses.has(address)) {
+          logger.info({ address: address.slice(0, 8) }, 'New wallet added for on-chain confluence (WS slots full or duplicate)');
           return;
         }
-        this.walletAddresses.push(address);
+        this.walletAddresses.add(address);
         this.txParser.addWallet(address);
         await this.wsManager.addWallet(address);
-        logger.info({ address: address.slice(0, 8), total: this.walletAddresses.length }, 'New wallet subscribed via Helius');
+        logger.info({ address: address.slice(0, 8), total: this.walletAddresses.size }, 'New wallet subscribed via Helius');
       } catch (err) {
         logger.error({ err, address: address?.slice(0, 8) }, 'Error in new wallet callback');
       }
@@ -1695,31 +1742,34 @@ class RossyBotV2 {
     const tierCfg = getTierConfig(this.capitalManager.tier);
     const maxSlots = tierCfg.walletsMonitored;
 
-    // Find zero-signal wallets currently holding WS slots (exclude first 10 min after startup)
-    const deadWeight: string[] = [];
+    // Find low-quality wallets: quality = passed*2 + avgScore (normalized)
+    const deadWeight: { addr: string; quality: number }[] = [];
     for (const addr of this.walletAddresses) {
-      const count = this.wsSignalCounts.get(addr) || 0;
-      if (count < RossyBotV2.WS_MIN_SIGNALS_FOR_KEEP) {
-        deadWeight.push(addr);
+      const sq = this.wsSignalQuality.get(addr);
+      const quality = sq
+        ? sq.passed * 2 + (sq.count > 0 ? sq.totalScore / sq.count / 20 : 0) // normalize score (0-100) to 0-5 range
+        : 0; // no signals at all = 0 quality
+      if (quality < RossyBotV2.WS_MIN_QUALITY_FOR_KEEP) {
+        deadWeight.push({ addr, quality });
       }
     }
 
     if (deadWeight.length === 0) {
-      // Reset counters for next window
-      this.wsSignalCounts.clear();
+      this.wsSignalQuality.clear();
       return;
     }
+    // Sort by quality ascending — evict worst first
+    deadWeight.sort((a, b) => a.quality - b.quality);
 
     // Get current ranked wallets to find better candidates
     const isPfOnly = this.capitalManager.capital < config.minCapitalForStandardTrading;
     const rankedWallets = await this.walletDiscovery.getActiveWallets(isPfOnly);
 
     // Find unsubscribed wallets that rank higher than dead weight
-    const subscribedSet = new Set(this.walletAddresses);
-    const candidates = rankedWallets.filter((w) => !subscribedSet.has(w));
+    const candidates = rankedWallets.filter((w) => !this.walletAddresses.has(w));
 
     if (candidates.length === 0) {
-      this.wsSignalCounts.clear();
+      this.wsSignalQuality.clear();
       return;
     }
 
@@ -1729,37 +1779,40 @@ class RossyBotV2 {
     const toAdd = candidates.slice(0, toEvict.length);
 
     for (let i = 0; i < toEvict.length && i < toAdd.length; i++) {
-      const evictAddr = toEvict[i];
+      const evictAddr = toEvict[i].addr;
       const addAddr = toAdd[i];
 
       // Remove old wallet from WS
-      this.walletAddresses = this.walletAddresses.filter((a) => a !== evictAddr);
+      this.walletAddresses.remove(evictAddr);
       this.txParser.removeWallet(evictAddr);
       this.wsManager.removeWallet(evictAddr);
 
       // Add new wallet to WS
-      this.walletAddresses.push(addAddr);
+      this.walletAddresses.add(addAddr);
       this.txParser.addWallet(addAddr);
       await this.wsManager.addWallet(addAddr);
 
+      const sq = this.wsSignalQuality.get(evictAddr);
       logger.info({
         evicted: evictAddr.slice(0, 8),
         added: addAddr.slice(0, 8),
-        signals: this.wsSignalCounts.get(evictAddr) || 0,
-      }, 'WS slot rotated — evicted zero-signal wallet');
+        signals: sq?.count || 0,
+        passed: sq?.passed || 0,
+        quality: toEvict[i].quality.toFixed(1),
+      }, 'WS slot rotated — low-quality wallet evicted');
     }
 
     if (toEvict.length > 0) {
       logger.info({
         evicted: toEvict.length,
         added: toAdd.length,
-        totalSlots: this.walletAddresses.length,
+        totalSlots: this.walletAddresses.size,
         maxSlots,
       }, 'WS rotation complete');
     }
 
-    // Reset counters for next window
-    this.wsSignalCounts.clear();
+    // Reset quality tracking for next window
+    this.wsSignalQuality.clear();
   }
 
   private scheduleDailySummary(): void {
@@ -1851,7 +1904,7 @@ class RossyBotV2 {
           address: w.address,
           label: w.label,
           tier: w.tier,
-          subscribed: this.walletAddresses.includes(w.address),
+          subscribed: this.walletAddresses.has(w.address),
           nansenRoi: Number(w.nansen_roi_percent) || 0,
           nansenPnl: Number(w.nansen_pnl_usd) || 0,
           ourTrades: Number(w.our_total_trades) || 0,

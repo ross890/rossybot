@@ -114,9 +114,9 @@ export const config = {
 export const TIER_CONFIGS: Record<CapitalTier, TierConfig> = {
   [CapitalTier.MICRO]: {
     tier: CapitalTier.MICRO,
-    maxPositions: 4,
-    walletsMonitored: 50,
-    positionSizePct: 0.30,            // 30% per position (was 25% — small capital needs more concentration)
+    maxPositions: 3,                   // 3 max (was 4 — 3×25%=75% exposure, leaves buffer for fees + pump.fun)
+    walletsMonitored: 15,              // 15 WS slots (was 50 — inverted vs SMALL=5, now scales with capital)
+    positionSizePct: 0.25,            // 25% per position (was 30% — 3×30%=90% was too much exposure)
     minPositionSol: 0.003,            // 0.003 SOL min (was 0.3 — bot couldn't trade with 0.025 SOL balance)
     profitTarget: 0.40,                // 40% TP (was 50% — take profits slightly earlier)
     stopLoss: -0.20,                  // 20% stop (was 15% — less whipsaw on volatile micro-caps)
@@ -143,8 +143,8 @@ export const TIER_CONFIGS: Record<CapitalTier, TierConfig> = {
   [CapitalTier.SMALL]: {
     tier: CapitalTier.SMALL,
     maxPositions: 3,
-    walletsMonitored: 5,
-    positionSizePct: 0.40,
+    walletsMonitored: 15,              // 15 WS slots (was 5 — too restrictive, missed signals)
+    positionSizePct: 0.20,            // 20% per position (was 40% — 3×40%=120% was over-allocated)
     minPositionSol: 0.3,
     profitTarget: 0.40,
     stopLoss: -0.20,
@@ -171,7 +171,7 @@ export const TIER_CONFIGS: Record<CapitalTier, TierConfig> = {
   [CapitalTier.MEDIUM]: {
     tier: CapitalTier.MEDIUM,
     maxPositions: 5,
-    walletsMonitored: 10,
+    walletsMonitored: 20,              // 20 WS slots (was 10 — more capital = broader coverage)
     positionSizePct: 0.15,
     minPositionSol: 0.3,
     profitTarget: 0.30,
@@ -198,7 +198,7 @@ export const TIER_CONFIGS: Record<CapitalTier, TierConfig> = {
   [CapitalTier.FULL]: {
     tier: CapitalTier.FULL,
     maxPositions: 5,
-    walletsMonitored: 20,
+    walletsMonitored: 30,              // 30 WS slots (was 20 — max coverage for large capital)
     positionSizePct: 0.10,
     minPositionSol: 0.3,
     profitTarget: 0.25,
@@ -272,7 +272,9 @@ export function getTierConfig(tier: CapitalTier): TierConfig {
   // Shadow mode: loosen thresholds but still enforce gates
   return {
     ...base,
-    maxPositions: 20,         // 20 concurrent (was 2)
+    walletsMonitored: 50,      // Max WS coverage in shadow mode for data collection
+    maxPositions: 20,         // 20 concurrent — shadow mode is data collection, not risk-managed
+    positionSizePct: 0.05,    // 5% per shadow position — keeps simulated P&L realistic at 20 positions
     mcapMin: 50_000,          // $50K (was $200K)
     mcapMax: 10_000_000,      // $10M (was $2M) — $30M+ is noise at micro capital
     liquidityMin: 5_000,      // $5K (was $20K)

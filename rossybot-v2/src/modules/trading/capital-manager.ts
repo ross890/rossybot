@@ -70,10 +70,26 @@ export class CapitalManager {
     return Math.max(raw, cfg.minPositionSol);
   }
 
-  canOpenPosition(currentOpenPositions: number): boolean {
+  /** Max total exposure as % of capital (standard + pump.fun combined) */
+  private static readonly MAX_TOTAL_EXPOSURE_PCT = 0.80; // 80% — leave 20% for fees, slippage, safety
+
+  canOpenPosition(currentOpenPositions: number, currentExposureSol = 0): boolean {
     if (this.dailyLossLimitReached) return false;
     if (currentOpenPositions >= this.tierConfig.maxPositions) return false;
-    if (this.getPositionSize() < this.tierConfig.minPositionSol) return false;
+    const posSize = this.getPositionSize();
+    if (posSize < this.tierConfig.minPositionSol) return false;
+    // Hard exposure cap: don't open if total deployed would exceed 80% of capital
+    if (this.currentCapitalSol > 0) {
+      const projectedExposure = (currentExposureSol + posSize) / this.currentCapitalSol;
+      if (projectedExposure > CapitalManager.MAX_TOTAL_EXPOSURE_PCT) {
+        logger.info({
+          currentExposure: (currentExposureSol / this.currentCapitalSol * 100).toFixed(0) + '%',
+          projectedExposure: (projectedExposure * 100).toFixed(0) + '%',
+          cap: (CapitalManager.MAX_TOTAL_EXPOSURE_PCT * 100).toFixed(0) + '%',
+        }, 'Position blocked — exposure cap reached');
+        return false;
+      }
+    }
     return true;
   }
 

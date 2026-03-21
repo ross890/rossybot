@@ -46,6 +46,7 @@ export enum ValidationResult {
   FAILED_MCAP = 'FAILED_MCAP',
   FAILED_AGE = 'FAILED_AGE',
   FAILED_WALLET_COUNT = 'FAILED_WALLET_COUNT',
+  NO_DEX_DATA = 'NO_DEX_DATA',
 }
 
 export enum SignalAction {

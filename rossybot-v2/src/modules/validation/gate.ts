@@ -19,17 +19,17 @@ export async function validateToken(
 
   const skip = { passed: true, reason: 'Skipped (wallet quality is the validation)' };
 
-  // No DexScreener data — allow through, we trust the wallets
+  // No DexScreener data — reject for standard trades (can't assess MCap/Liq, risky exit)
   if (!dexPair) {
     const durationMs = Date.now() - start;
-    logger.info({ mint: tokenMint.slice(0, 8), durationMs }, 'No DexScreener data — allowing (wallet-validated)');
+    logger.info({ mint: tokenMint.slice(0, 8), durationMs }, 'No DexScreener data — rejecting (no market data to assess risk)');
     return {
-      passed: true,
-      failReason: null,
+      passed: false,
+      failReason: ValidationResult.NO_DEX_DATA,
       safety: skip,
-      liquidity: skip,
+      liquidity: { passed: false, reason: 'No DexScreener data — cannot verify liquidity for exit' },
       momentum: skip,
-      mcap: { passed: true, reason: 'No dex data to check' },
+      mcap: { passed: false, reason: 'No DexScreener data — cannot verify market cap' },
       age: skip,
       dexData: null,
       rugCheck: null,

@@ -668,6 +668,18 @@ class RossyBotV2 {
           // Route signals: pumpfun_only wallets skip standard pipeline
           const isPumpFunOnly = walletRow?.pumpfun_only === true;
 
+          // Block deployer wallets — they buy their own token creations, not real alpha
+          const walletLabel = walletRow?.label || '';
+          const isDeployer = /deployer|token creator/i.test(walletLabel);
+          if (isDeployer && signal.type === SignalType.BUY && !signal.isPumpFun) {
+            logger.info({
+              wallet: signal.walletAddress.slice(0, 8),
+              label: walletLabel,
+              token: signal.tokenMint.slice(0, 8),
+            }, 'Skipping deployer wallet — self-dealing, not alpha');
+            continue;
+          }
+
           if (signal.type === SignalType.BUY) {
             // Track signal for WS rotation quality scoring
             const sq = this.wsSignalQuality.get(signal.walletAddress) || { count: 0, passed: 0, totalScore: 0 };

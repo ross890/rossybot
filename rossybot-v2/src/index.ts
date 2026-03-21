@@ -2165,22 +2165,31 @@ class RossyBotV2 {
         our_total_trades: number; our_win_rate: number; our_avg_pnl_percent: number;
         our_avg_hold_time_mins: number; short_term_alpha_score: number;
         consecutive_losses: number; last_active_at: string | null;
-        pumpfun_only: boolean;
-      }>(`SELECT address, label, tier, helius_subscribed, source,
-              COALESCE(nansen_roi_percent, 0) as nansen_roi_percent,
-              COALESCE(nansen_pnl_usd, 0) as nansen_pnl_usd,
-              COALESCE(nansen_trade_count, 0) as nansen_trade_count,
-              COALESCE(avg_buy_size_sol, 0) as avg_buy_size_sol,
-              COALESCE(our_total_trades, 0) as our_total_trades,
-              COALESCE(our_win_rate, 0) as our_win_rate,
-              COALESCE(our_avg_pnl_percent, 0) as our_avg_pnl_percent,
-              COALESCE(our_avg_hold_time_mins, 0) as our_avg_hold_time_mins,
-              COALESCE(short_term_alpha_score, 0) as short_term_alpha_score,
-              COALESCE(consecutive_losses, 0) as consecutive_losses,
-              COALESCE(pumpfun_only, FALSE) as pumpfun_only,
-              last_active_at
-         FROM alpha_wallets WHERE active = TRUE
-         ORDER BY nansen_pnl_usd DESC`);
+        pumpfun_only: boolean; dex_signals: number;
+      }>(`SELECT w.address, w.label, w.tier, w.helius_subscribed, w.source,
+              COALESCE(w.nansen_roi_percent, 0) as nansen_roi_percent,
+              COALESCE(w.nansen_pnl_usd, 0) as nansen_pnl_usd,
+              COALESCE(w.nansen_trade_count, 0) as nansen_trade_count,
+              COALESCE(w.avg_buy_size_sol, 0) as avg_buy_size_sol,
+              COALESCE(w.our_total_trades, 0) as our_total_trades,
+              COALESCE(w.our_win_rate, 0) as our_win_rate,
+              COALESCE(w.our_avg_pnl_percent, 0) as our_avg_pnl_percent,
+              COALESCE(w.our_avg_hold_time_mins, 0) as our_avg_hold_time_mins,
+              COALESCE(w.short_term_alpha_score, 0) as short_term_alpha_score,
+              COALESCE(w.consecutive_losses, 0) as consecutive_losses,
+              COALESCE(w.pumpfun_only, FALSE) as pumpfun_only,
+              w.last_active_at,
+              COALESCE(d.dex_count, 0) as dex_signals
+         FROM alpha_wallets w
+         LEFT JOIN (
+           SELECT unnest(signal_wallets) as wallet, COUNT(*) as dex_count
+           FROM shadow_positions GROUP BY wallet
+         ) d ON d.wallet = w.address
+         WHERE w.active = TRUE
+         ORDER BY
+           CASE WHEN COALESCE(w.pumpfun_only, FALSE) = FALSE THEN 0 ELSE 1 END,
+           COALESCE(d.dex_count, 0) DESC,
+           w.nansen_pnl_usd DESC`);
 
       const today = new Date().toISOString().split('T')[0];
       const signalRow = await (await import('./db/database.js')).getOne<{ count: string }>(
@@ -2207,6 +2216,7 @@ class RossyBotV2 {
         signalFunnel, signalRejections,
         topWallets, bottomWallets,
         recentTrend, tierHistory,
+        pfGraduation, pfHoldBuckets, pfHourly, pfEdge,
       ] = await Promise.all([
         // 1. Pump.fun overall performance
         db.getOne<Record<string, unknown>>(
@@ -2276,33 +2286,47 @@ class RossyBotV2 {
            FROM signal_events WHERE validation_result != 'PASSED'
            GROUP BY validation_result ORDER BY total DESC LIMIT 5`,
         ),
-        // 7. Top 5 wallets by SOL
+        // 7. Top 5 wallets by SOL (combined pump.fun + standard DEX)
         db.getMany<Record<string, unknown>>(
-          `SELECT
-             COALESCE(w.label, p.signal_wallets[1]) as label,
+          `WITH combined AS (
+             SELECT signal_wallets[1] as wallet, net_pnl_sol, pnl_percent, 'PF' as src
+             FROM pumpfun_positions WHERE status = 'CLOSED'
+             UNION ALL
+             SELECT signal_wallets[1] as wallet, pnl_percent * simulated_entry_sol as net_pnl_sol, pnl_percent, 'DEX' as src
+             FROM shadow_positions WHERE status = 'CLOSED'
+           )
+           SELECT
+             COALESCE(w.label, c.wallet) as label,
              COUNT(*) as trades,
-             COUNT(*) FILTER (WHERE p.pnl_percent > 0) as wins,
-             COALESCE(SUM(p.net_pnl_sol), 0) as net_sol,
-             COALESCE(AVG(p.pnl_percent), 0) as avg_pnl
-           FROM pumpfun_positions p
-           LEFT JOIN alpha_wallets w ON w.address = p.signal_wallets[1]
-           WHERE p.status = 'CLOSED'
-           GROUP BY COALESCE(w.label, p.signal_wallets[1])
+             COUNT(*) FILTER (WHERE c.pnl_percent > 0) as wins,
+             COALESCE(SUM(c.net_pnl_sol), 0) as net_sol,
+             COALESCE(AVG(c.pnl_percent), 0) as avg_pnl,
+             COUNT(*) FILTER (WHERE c.src = 'DEX') as dex_trades
+           FROM combined c
+           LEFT JOIN alpha_wallets w ON w.address = c.wallet
+           GROUP BY COALESCE(w.label, c.wallet)
            HAVING COUNT(*) >= 2
            ORDER BY net_sol DESC LIMIT 5`,
         ),
-        // 8. Bottom 5 wallets by SOL
+        // 8. Bottom 5 wallets by SOL (combined pump.fun + standard DEX)
         db.getMany<Record<string, unknown>>(
-          `SELECT
-             COALESCE(w.label, p.signal_wallets[1]) as label,
+          `WITH combined AS (
+             SELECT signal_wallets[1] as wallet, net_pnl_sol, pnl_percent, 'PF' as src
+             FROM pumpfun_positions WHERE status = 'CLOSED'
+             UNION ALL
+             SELECT signal_wallets[1] as wallet, pnl_percent * simulated_entry_sol as net_pnl_sol, pnl_percent, 'DEX' as src
+             FROM shadow_positions WHERE status = 'CLOSED'
+           )
+           SELECT
+             COALESCE(w.label, c.wallet) as label,
              COUNT(*) as trades,
-             COUNT(*) FILTER (WHERE p.pnl_percent > 0) as wins,
-             COALESCE(SUM(p.net_pnl_sol), 0) as net_sol,
-             COALESCE(AVG(p.pnl_percent), 0) as avg_pnl
-           FROM pumpfun_positions p
-           LEFT JOIN alpha_wallets w ON w.address = p.signal_wallets[1]
-           WHERE p.status = 'CLOSED'
-           GROUP BY COALESCE(w.label, p.signal_wallets[1])
+             COUNT(*) FILTER (WHERE c.pnl_percent > 0) as wins,
+             COALESCE(SUM(c.net_pnl_sol), 0) as net_sol,
+             COALESCE(AVG(c.pnl_percent), 0) as avg_pnl,
+             COUNT(*) FILTER (WHERE c.src = 'DEX') as dex_trades
+           FROM combined c
+           LEFT JOIN alpha_wallets w ON w.address = c.wallet
+           GROUP BY COALESCE(w.label, c.wallet)
            HAVING COUNT(*) >= 2
            ORDER BY net_sol ASC LIMIT 5`,
         ),
@@ -2321,6 +2345,73 @@ class RossyBotV2 {
         db.getMany<Record<string, unknown>>(
           `SELECT old_tier, new_tier, capital_at_change, changed_at
            FROM capital_tier_changes ORDER BY changed_at DESC LIMIT 3`,
+        ),
+        // 11. Graduation funnel — on-curve vs graduated outcomes
+        db.getOne<Record<string, unknown>>(
+          `SELECT
+             COUNT(*) as total,
+             COUNT(*) FILTER (WHERE graduated = TRUE) as graduated,
+             COUNT(*) FILTER (WHERE graduated = FALSE AND status = 'CLOSED') as curve_exits,
+             COUNT(*) FILTER (WHERE graduated = FALSE AND pnl_percent > 0) as curve_wins,
+             COALESCE(SUM(net_pnl_sol) FILTER (WHERE graduated = FALSE), 0) as curve_sol,
+             COUNT(*) FILTER (WHERE graduated = TRUE AND pnl_percent > 0) as grad_wins,
+             COALESCE(SUM(net_pnl_sol) FILTER (WHERE graduated = TRUE), 0) as grad_sol,
+             COALESCE(AVG(pnl_percent) FILTER (WHERE graduated = FALSE), 0) as curve_avg_pnl,
+             COALESCE(AVG(pnl_percent) FILTER (WHERE graduated = TRUE), 0) as grad_avg_pnl
+           FROM pumpfun_positions WHERE status = 'CLOSED'`,
+        ),
+        // 12. Hold time buckets
+        db.getMany<Record<string, unknown>>(
+          `SELECT
+             CASE
+               WHEN hold_time_mins < 2 THEN '<2m'
+               WHEN hold_time_mins < 5 THEN '2-5m'
+               WHEN hold_time_mins < 15 THEN '5-15m'
+               WHEN hold_time_mins < 60 THEN '15-60m'
+               ELSE '60m+'
+             END as bucket,
+             COUNT(*) as total,
+             COUNT(*) FILTER (WHERE pnl_percent > 0) as wins,
+             COALESCE(AVG(pnl_percent), 0) as avg_pnl,
+             COALESCE(SUM(net_pnl_sol), 0) as net_sol
+           FROM pumpfun_positions WHERE status = 'CLOSED' AND hold_time_mins IS NOT NULL
+           GROUP BY bucket
+           ORDER BY MIN(hold_time_mins)`,
+        ),
+        // 13. Hourly performance (6h blocks)
+        db.getMany<Record<string, unknown>>(
+          `SELECT
+             CASE
+               WHEN EXTRACT(HOUR FROM entry_time) BETWEEN 0 AND 5 THEN '00-06'
+               WHEN EXTRACT(HOUR FROM entry_time) BETWEEN 6 AND 11 THEN '06-12'
+               WHEN EXTRACT(HOUR FROM entry_time) BETWEEN 12 AND 17 THEN '12-18'
+               ELSE '18-24'
+             END as block,
+             COUNT(*) as total,
+             COUNT(*) FILTER (WHERE pnl_percent > 0) as wins,
+             COALESCE(SUM(net_pnl_sol), 0) as net_sol,
+             COALESCE(AVG(pnl_percent), 0) as avg_pnl
+           FROM pumpfun_positions WHERE status = 'CLOSED'
+           GROUP BY block ORDER BY block`,
+        ),
+        // 14. Edge metrics — largest win/loss, streaks, fee drag
+        db.getOne<Record<string, unknown>>(
+          `SELECT
+             MAX(net_pnl_sol) as best_trade,
+             MIN(net_pnl_sol) as worst_trade,
+             MAX(pnl_percent) as best_pct,
+             MIN(pnl_percent) as worst_pct,
+             COALESCE(SUM(fees_paid_sol), 0) as total_fees,
+             COALESCE(SUM(simulated_entry_sol), 0) as total_deployed,
+             (SELECT COUNT(*) FROM (
+               SELECT pnl_percent > 0 as is_win,
+                      ROW_NUMBER() OVER (ORDER BY closed_at DESC) as rn
+               FROM pumpfun_positions WHERE status = 'CLOSED' ORDER BY closed_at DESC LIMIT 20
+             ) sub WHERE is_win = (SELECT pnl_percent > 0 FROM pumpfun_positions WHERE status = 'CLOSED' ORDER BY closed_at DESC LIMIT 1)
+               AND rn <= 20
+             ) as current_streak,
+             (SELECT pnl_percent > 0 FROM pumpfun_positions WHERE status = 'CLOSED' ORDER BY closed_at DESC LIMIT 1) as streak_winning
+           FROM pumpfun_positions WHERE status = 'CLOSED'`,
         ),
       ]);
 
@@ -2382,6 +2473,7 @@ class RossyBotV2 {
           wins: Number(w.wins),
           netSol: Number(w.net_sol),
           avgPnl: Number(w.avg_pnl),
+          dexTrades: Number(w.dex_trades || 0),
         })),
         bottomWallets: bottomWallets.map((w) => ({
           label: String(w.label || '').slice(0, 12),
@@ -2389,6 +2481,7 @@ class RossyBotV2 {
           wins: Number(w.wins),
           netSol: Number(w.net_sol),
           avgPnl: Number(w.avg_pnl),
+          dexTrades: Number(w.dex_trades || 0),
         })),
         trend: {
           recentTrades: Number(recentTrend?.recent_trades || 0),
@@ -2404,6 +2497,41 @@ class RossyBotV2 {
           capital: Number(t.capital_at_change),
           at: new Date(t.changed_at as string),
         })),
+        graduation: {
+          total: Number(pfGraduation?.total || 0),
+          graduated: Number(pfGraduation?.graduated || 0),
+          curveExits: Number(pfGraduation?.curve_exits || 0),
+          curveWins: Number(pfGraduation?.curve_wins || 0),
+          curveSol: Number(pfGraduation?.curve_sol || 0),
+          curveAvgPnl: Number(pfGraduation?.curve_avg_pnl || 0),
+          gradWins: Number(pfGraduation?.grad_wins || 0),
+          gradSol: Number(pfGraduation?.grad_sol || 0),
+          gradAvgPnl: Number(pfGraduation?.grad_avg_pnl || 0),
+        },
+        holdBuckets: pfHoldBuckets.map((r) => ({
+          bucket: String(r.bucket),
+          total: Number(r.total),
+          wins: Number(r.wins),
+          avgPnl: Number(r.avg_pnl),
+          netSol: Number(r.net_sol),
+        })),
+        hourly: pfHourly.map((r) => ({
+          block: String(r.block),
+          total: Number(r.total),
+          wins: Number(r.wins),
+          netSol: Number(r.net_sol),
+          avgPnl: Number(r.avg_pnl),
+        })),
+        edge: {
+          bestTrade: Number(pfEdge?.best_trade || 0),
+          worstTrade: Number(pfEdge?.worst_trade || 0),
+          bestPct: Number(pfEdge?.best_pct || 0),
+          worstPct: Number(pfEdge?.worst_pct || 0),
+          totalFees: Number(pfEdge?.total_fees || 0),
+          totalDeployed: Number(pfEdge?.total_deployed || 0),
+          currentStreak: Number(pfEdge?.current_streak || 0),
+          streakWinning: !!pfEdge?.streak_winning,
+        },
       };
 
       const tierCfg = this.capitalManager.tierConfig;
@@ -2432,6 +2560,7 @@ class RossyBotV2 {
           alphaScore: Number(w.short_term_alpha_score) || 0,
           consecutiveLosses: Number(w.consecutive_losses) || 0,
           pumpfunOnly: !!w.pumpfun_only,
+          dexSignals: Number(w.dex_signals) || 0,
           source: w.source,
           lastActiveHours: w.last_active_at
             ? Math.round((Date.now() - new Date(w.last_active_at).getTime()) / 3600000)

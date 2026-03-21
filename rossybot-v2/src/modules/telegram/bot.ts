@@ -400,8 +400,8 @@ export class TelegramService {
       nansenRoi: number; nansenPnl: number; nansenTrades: number;
       avgBuySizeSol: number; ourTrades: number; ourWinRate: number;
       ourAvgPnl: number; ourAvgHoldMins: number; alphaScore: number;
-      consecutiveLosses: number; pumpfunOnly: boolean; source: string;
-      lastActiveHours: number | null;
+      consecutiveLosses: number; pumpfunOnly: boolean; dexSignals: number;
+      source: string; lastActiveHours: number | null;
     }>;
     wsConnected: boolean;
     wsFallbackActive: boolean;
@@ -448,10 +448,21 @@ export class TelegramService {
       entryTypes: Array<{ type: string; total: number; wins: number; avgPnl: number; netSol: number }>;
       signalFunnel: { total: number; executed: number; skippedValidation: number; skippedMaxPos: number; skippedDaily: number };
       rejections: Array<{ reason: string; count: number }>;
-      topWallets: Array<{ label: string; trades: number; wins: number; netSol: number; avgPnl: number }>;
-      bottomWallets: Array<{ label: string; trades: number; wins: number; netSol: number; avgPnl: number }>;
+      topWallets: Array<{ label: string; trades: number; wins: number; netSol: number; avgPnl: number; dexTrades: number }>;
+      bottomWallets: Array<{ label: string; trades: number; wins: number; netSol: number; avgPnl: number; dexTrades: number }>;
       trend: { recentTrades: number; recentWins: number; recentSol: number; priorTrades: number; priorWins: number; priorSol: number };
       tierChanges: Array<{ from: string; to: string; capital: number; at: Date }>;
+      graduation: {
+        total: number; graduated: number; curveExits: number;
+        curveWins: number; curveSol: number; curveAvgPnl: number;
+        gradWins: number; gradSol: number; gradAvgPnl: number;
+      };
+      holdBuckets: Array<{ bucket: string; total: number; wins: number; avgPnl: number; netSol: number }>;
+      hourly: Array<{ block: string; total: number; wins: number; netSol: number; avgPnl: number }>;
+      edge: {
+        bestTrade: number; worstTrade: number; bestPct: number; worstPct: number;
+        totalFees: number; totalDeployed: number; currentStreak: number; streakWinning: boolean;
+      };
     };
     activeConfig: {
       minSignalScore: number; positionSizePct: number;
@@ -465,31 +476,37 @@ export class TelegramService {
     // Buckets based on estimated value: Nansen PnL + our data + alpha score
     type WalletBucket = { label: string; wallets: typeof data.wallets };
     const buckets: WalletBucket[] = [
-      { label: '🟢 HIGH VALUE (PnL $50K+ or α40+)', wallets: [] },
-      { label: '🟡 PROVEN ($5K-$50K PnL or our 3+ trades)', wallets: [] },
-      { label: '🔵 UNPROVEN (new / no our-side data yet)', wallets: [] },
-      { label: '🔴 UNDERPERFORMING (loss streaks / low α)', wallets: [] },
+      { label: '🟢 DEX ACTIVE (generated standard signals)', wallets: [] },
+      { label: '🟡 HIGH VALUE (PnL $50K+ or α40+)', wallets: [] },
+      { label: '🔵 UNPROVEN (new / no DEX signals yet)', wallets: [] },
+      { label: '🔴 PF-ONLY / UNDERPERFORMING', wallets: [] },
     ];
 
     for (const w of data.wallets) {
       const hasLossStreak = w.consecutiveLosses >= 2;
       const lowAlpha = w.alphaScore > 0 && w.alphaScore < 20 && w.ourTrades >= 3;
 
-      if (hasLossStreak || lowAlpha) {
+      if (w.pumpfunOnly || hasLossStreak || lowAlpha) {
         buckets[3].wallets.push(w);
-      } else if (w.nansenPnl >= 50_000 || w.alphaScore >= 40) {
+      } else if (w.dexSignals > 0) {
         buckets[0].wallets.push(w);
-      } else if (w.nansenPnl >= 5_000 || w.ourTrades >= 3) {
+      } else if (w.nansenPnl >= 50_000 || w.alphaScore >= 40) {
         buckets[1].wallets.push(w);
       } else {
         buckets[2].wallets.push(w);
       }
     }
 
+    // Sort DEX ACTIVE bucket by dex signal count (most active first)
+    buckets[0].wallets.sort((a, b) => b.dexSignals - a.dexSignals);
+
     const formatWallet = (w: typeof data.wallets[0]): string => {
       const ws = w.subscribed ? '📡' : '⏸️';
-      const pf = w.pumpfunOnly ? '🎰' : '';
+      const mode = w.pumpfunOnly ? '🎰' : w.dexSignals > 0 ? '📊' : '';
       const parts: string[] = [];
+
+      // DEX signal count (prioritized)
+      if (w.dexSignals > 0) parts.push(`${w.dexSignals}dex`);
 
       // Nansen data
       if (w.nansenPnl > 0) parts.push(`$${this.formatNum(w.nansenPnl)}`);
@@ -512,19 +529,20 @@ export class TelegramService {
       }
 
       const info = parts.join(' · ');
-      return `│  ${ws}${pf} [${w.tier}] ${w.label.split(' |')[0].slice(0, 10)} ${info}`;
+      return `│  ${ws}${mode} [${w.tier}] ${w.label.split(' |')[0].slice(0, 10)} ${info}`;
     };
 
     const walletSections: string[] = [];
     const subscribedCount = data.wallets.filter((w) => w.subscribed).length;
     const pfOnlyCount = data.wallets.filter((w) => w.pumpfunOnly).length;
+    const dexActiveCount = data.wallets.filter((w) => w.dexSignals > 0 && !w.pumpfunOnly).length;
     const withBuySize = data.wallets.filter((w) => w.avgBuySizeSol > 0);
     const avgBuyAll = withBuySize.length > 0
       ? withBuySize.reduce((s, w) => s + w.avgBuySizeSol, 0) / withBuySize.length
       : 0;
 
     walletSections.push(
-      `├─ WALLETS (${data.wallets.length} active, ${subscribedCount} WS, ${pfOnlyCount} PF-only${avgBuyAll > 0 ? `, avg bid ${avgBuyAll.toFixed(1)}◎` : ''})`,
+      `├─ WALLETS (${data.wallets.length} active, ${subscribedCount} WS, ${dexActiveCount} DEX, ${pfOnlyCount} PF-only${avgBuyAll > 0 ? `, avg bid ${avgBuyAll.toFixed(1)}◎` : ''})`,
     );
 
     for (const bucket of buckets) {
@@ -627,28 +645,49 @@ export class TelegramService {
     const funnel = data.performance.signalFunnel;
     const trend = data.performance.trend;
     const cfg = data.activeConfig;
+    const grad = data.performance.graduation;
+    const edge = data.performance.edge;
 
     if (pf.total > 0) {
       const pfWr = (pf.wr * 100).toFixed(0);
       const pfFactor = pf.profitFactor > 0 ? pf.profitFactor.toFixed(2) : 'N/A';
       const holdStr = pf.avgHoldMins < 60 ? `${pf.avgHoldMins.toFixed(0)}m` : `${(pf.avgHoldMins / 60).toFixed(1)}h`;
+      const avgLossAbs = Math.abs(pf.avgLossPct);
+      const breakEvenWr = avgLossAbs > 0 ? (avgLossAbs / (pf.avgWinPct + avgLossAbs) * 100).toFixed(0) : 'N/A';
+      const feeDrag = edge.totalDeployed > 0 ? (edge.totalFees / edge.totalDeployed * 100).toFixed(1) : '0';
 
       msg.push(
         `├─ PUMP.FUN PERFORMANCE (${pf.total} trades)`,
-        `│ WR: ${pfWr}% (${pf.wins}W/${pf.total - pf.wins}L) | PF: ${pfFactor}`,
+        `│ WR: ${pfWr}% (${pf.wins}W/${pf.total - pf.wins}L) | PF: ${pfFactor} | BE WR: ${breakEvenWr}%`,
         `│ Avg win: +${(pf.avgWinPct * 100).toFixed(1)}% | Avg loss: ${(pf.avgLossPct * 100).toFixed(1)}%`,
-        `│ Net: ${pf.netSol >= 0 ? '+' : ''}${pf.netSol.toFixed(4)} SOL | Fees: ${pf.totalFees.toFixed(4)} SOL`,
-        `│ EV: ${pf.expectancySol >= 0 ? '+' : ''}${pf.expectancySol.toFixed(4)} SOL/trade`,
+        `│ Net: ${pf.netSol >= 0 ? '+' : ''}${pf.netSol.toFixed(4)}◎ | EV: ${pf.expectancySol >= 0 ? '+' : ''}${pf.expectancySol.toFixed(4)}◎/trade`,
+        `│ Fees: ${pf.totalFees.toFixed(4)}◎ (${feeDrag}% drag) | Deployed: ${edge.totalDeployed.toFixed(2)}◎`,
         `│ Avg hold: ${holdStr} | Avg lag: ${pf.avgLagSecs.toFixed(0)}s`,
+        `│ Best: +${edge.bestTrade.toFixed(4)}◎ (+${(edge.bestPct * 100).toFixed(0)}%) | Worst: ${edge.worstTrade.toFixed(4)}◎ (${(edge.worstPct * 100).toFixed(0)}%)`,
+        `│ Streak: ${edge.currentStreak}${edge.streakWinning ? 'W' : 'L'}`,
         `│`,
       );
+
+      // Graduation funnel
+      if (grad.total > 0) {
+        const gradRate = (grad.graduated / grad.total * 100).toFixed(0);
+        const curveWr = grad.curveExits > 0 ? (grad.curveWins / grad.curveExits * 100).toFixed(0) : '0';
+        const gradWr = grad.graduated > 0 ? (grad.gradWins / grad.graduated * 100).toFixed(0) : '0';
+        msg.push(
+          `│ ── GRADUATION FUNNEL`,
+          `│  ${grad.total} entries → ${grad.graduated} graduated (${gradRate}%)`,
+          `│  On-curve: ${grad.curveExits}t ${curveWr}%W avg${(grad.curveAvgPnl * 100).toFixed(1)}% ${grad.curveSol >= 0 ? '+' : ''}${grad.curveSol.toFixed(4)}◎`,
+          `│  Post-grad: ${grad.graduated}t ${gradWr}%W avg${(grad.gradAvgPnl * 100).toFixed(1)}% ${grad.gradSol >= 0 ? '+' : ''}${grad.gradSol.toFixed(4)}◎`,
+          `│`,
+        );
+      }
 
       // Exit reason breakdown
       if (data.performance.exitReasons.length > 0) {
         msg.push(`│ ── EXIT REASONS`);
         for (const r of data.performance.exitReasons) {
           const rWr = r.total > 0 ? (r.wins / r.total * 100).toFixed(0) : '0';
-          msg.push(`│  ${r.reason}: ${r.total}t ${rWr}%W ${r.netSol >= 0 ? '+' : ''}${r.netSol.toFixed(4)}◎`);
+          msg.push(`│  ${r.reason}: ${r.total}t ${rWr}%W avg${(r.avgPnl * 100).toFixed(1)}% ${r.netSol >= 0 ? '+' : ''}${r.netSol.toFixed(4)}◎`);
         }
         msg.push(`│`);
       }
@@ -663,12 +702,33 @@ export class TelegramService {
         msg.push(`│`);
       }
 
+      // Hold time buckets
+      if (data.performance.holdBuckets.length > 0) {
+        msg.push(`│ ── HOLD TIME`);
+        for (const h of data.performance.holdBuckets) {
+          const hWr = h.total > 0 ? (h.wins / h.total * 100).toFixed(0) : '0';
+          msg.push(`│  ${h.bucket}: ${h.total}t ${hWr}%W avg${(h.avgPnl * 100).toFixed(1)}% ${h.netSol >= 0 ? '+' : ''}${h.netSol.toFixed(4)}◎`);
+        }
+        msg.push(`│`);
+      }
+
       // Entry type breakdown
       if (data.performance.entryTypes.length > 0) {
         msg.push(`│ ── ENTRY TYPE`);
         for (const e of data.performance.entryTypes) {
           const eWr = e.total > 0 ? (e.wins / e.total * 100).toFixed(0) : '0';
           msg.push(`│  ${e.type}: ${e.total}t ${eWr}%W ${e.netSol >= 0 ? '+' : ''}${e.netSol.toFixed(4)}◎`);
+        }
+        msg.push(`│`);
+      }
+
+      // Hourly heatmap
+      if (data.performance.hourly.length > 0) {
+        msg.push(`│ ── TIME OF DAY (UTC)`);
+        for (const h of data.performance.hourly) {
+          const hWr = h.total > 0 ? (h.wins / h.total * 100).toFixed(0) : '0';
+          const bar = h.netSol >= 0 ? '█'.repeat(Math.min(Math.round(h.netSol * 20), 8)) : '░'.repeat(Math.min(Math.round(Math.abs(h.netSol) * 20), 8));
+          msg.push(`│  ${h.block}: ${h.total}t ${hWr}%W ${h.netSol >= 0 ? '+' : ''}${h.netSol.toFixed(4)}◎ ${h.netSol >= 0 ? '🟢' : '🔴'}${bar}`);
         }
         msg.push(`│`);
       }
@@ -689,19 +749,21 @@ export class TelegramService {
       msg.push(`│`);
     }
 
-    // Wallet leaderboard
+    // Wallet leaderboard (combined PF + DEX)
     if (data.performance.topWallets.length > 0) {
-      msg.push(`├─ WALLET LEADERBOARD`);
+      msg.push(`├─ WALLET LEADERBOARD (PF+DEX combined)`);
       msg.push(`│ ── BEST (by SOL)`);
       for (const w of data.performance.topWallets) {
         const wWr = w.trades > 0 ? (w.wins / w.trades * 100).toFixed(0) : '0';
-        msg.push(`│  ${w.label}: ${w.trades}t ${wWr}%W ${w.netSol >= 0 ? '+' : ''}${w.netSol.toFixed(4)}◎`);
+        const dex = w.dexTrades > 0 ? ` [${w.dexTrades}dex]` : '';
+        msg.push(`│  ${w.label}: ${w.trades}t ${wWr}%W avg${(w.avgPnl * 100).toFixed(0)}% ${w.netSol >= 0 ? '+' : ''}${w.netSol.toFixed(4)}◎${dex}`);
       }
       if (data.performance.bottomWallets.length > 0) {
         msg.push(`│ ── WORST (by SOL)`);
         for (const w of data.performance.bottomWallets) {
           const wWr = w.trades > 0 ? (w.wins / w.trades * 100).toFixed(0) : '0';
-          msg.push(`│  ${w.label}: ${w.trades}t ${wWr}%W ${w.netSol >= 0 ? '+' : ''}${w.netSol.toFixed(4)}◎`);
+          const dex = w.dexTrades > 0 ? ` [${w.dexTrades}dex]` : '';
+          msg.push(`│  ${w.label}: ${w.trades}t ${wWr}%W avg${(w.avgPnl * 100).toFixed(0)}% ${w.netSol >= 0 ? '+' : ''}${w.netSol.toFixed(4)}◎${dex}`);
         }
       }
       msg.push(`│`);

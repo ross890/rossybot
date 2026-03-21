@@ -167,6 +167,9 @@ export const TIER_CONFIGS: Record<CapitalTier, TierConfig> = {
     momentumExtensionHours: 1,
     momentumExtensionMaxPerWindow: 1,
     momentumExtensionMinPnl: -0.02,
+    stopLossGuardMins: 3,              // 3 min — suppress SL (not hard kill) in first 3 min to ride through early dips
+    stopLossWidenMcapThreshold: 100_000, // $100K — tokens below this get a wider SL
+    stopLossWidenFactor: 1.5,          // 1.5x — e.g. -20% SL becomes -30% for micro-cap tokens
     mcapMin: 10_000,                   // $10K min (was $30K — catch early tokens with low mcap)
     mcapMax: 15_000_000,               // $15M max (was $10M — wider net)
     liquidityMin: 2_000,              // $2K min (was $5K — micro positions can exit thin pools)
@@ -203,6 +206,9 @@ export const TIER_CONFIGS: Record<CapitalTier, TierConfig> = {
     momentumExtensionHours: 1,
     momentumExtensionMaxPerWindow: 1,
     momentumExtensionMinPnl: -0.02,
+    stopLossGuardMins: 3,              // 3 min — suppress SL (not hard kill) in first 3 min to ride through early dips
+    stopLossWidenMcapThreshold: 100_000, // $100K — tokens below this get a wider SL
+    stopLossWidenFactor: 1.5,          // 1.5x — e.g. -20% SL becomes -30% for micro-cap tokens
     mcapMin: 15_000,                   // $15K min (was $50K — catch earlier)
     mcapMax: 15_000_000,               // $15M max (was $5M — wider net)
     liquidityMin: 3_000,              // $3K min (was $15K — small positions can handle thin pools)
@@ -238,6 +244,9 @@ export const TIER_CONFIGS: Record<CapitalTier, TierConfig> = {
     momentumExtensionHours: 2,        // MEDIUM: extend by 2h (larger positions need more room)
     momentumExtensionMaxPerWindow: 2, // Max 2 extensions per window
     momentumExtensionMinPnl: 0.0,     // Must be breakeven or better
+    stopLossGuardMins: 0,              // No SL guard for MEDIUM — these are more established tokens
+    stopLossWidenMcapThreshold: 0,     // Disabled for MEDIUM
+    stopLossWidenFactor: 1.0,
     mcapMin: 100_000,
     mcapMax: 10_000_000,
     liquidityMin: 75_000,
@@ -274,6 +283,9 @@ export const TIER_CONFIGS: Record<CapitalTier, TierConfig> = {
     momentumExtensionHours: 2,
     momentumExtensionMaxPerWindow: 2,
     momentumExtensionMinPnl: 0.0,
+    stopLossGuardMins: 0,              // No SL guard for FULL — established tokens
+    stopLossWidenMcapThreshold: 0,     // Disabled for FULL
+    stopLossWidenFactor: 1.0,
     mcapMin: 100_000,
     mcapMax: 50_000_000,
     liquidityMin: 50_000,

@@ -325,9 +325,26 @@ export class LiveTracker {
       return;
     }
 
-    // Hard kill and stop loss from config
+    // Hard kill — always fires, no guard period
     if (pnl <= tierCfg.hardKill) { await this.closePosition(pos, `Hard kill (${(pnl * 100).toFixed(1)}%)`); return; }
-    if (pnl <= tierCfg.stopLoss) { await this.closePosition(pos, `Stop loss (${(pnl * 100).toFixed(1)}%)`); return; }
+
+    // Stop loss — with hold-time guard and dynamic widening for micro-cap tokens
+    // During the guard period, only hard kill fires (SL is suppressed to ride through early volatility)
+    if (holdMins >= tierCfg.stopLossGuardMins) {
+      let effectiveSL = tierCfg.stopLoss;
+
+      // Widen SL for micro-cap tokens (high initial volatility)
+      const mcapAtEntry = (pos.momentum_at_entry as { mcap?: number })?.mcap || 0;
+      if (tierCfg.stopLossWidenMcapThreshold > 0 && mcapAtEntry > 0 && mcapAtEntry < tierCfg.stopLossWidenMcapThreshold) {
+        effectiveSL = tierCfg.stopLoss * tierCfg.stopLossWidenFactor; // e.g. -0.20 * 1.5 = -0.30
+      }
+
+      if (pnl <= effectiveSL) {
+        const tag = effectiveSL !== tierCfg.stopLoss ? ` [widened from ${(tierCfg.stopLoss * 100).toFixed(0)}%]` : '';
+        await this.closePosition(pos, `Stop loss (${(pnl * 100).toFixed(1)}%${tag})`);
+        return;
+      }
+    }
 
     // Profit target (MICRO/SMALL — non-partial tiers)
     if (!tierCfg.partialExitsEnabled && pnl >= tierCfg.profitTarget) {

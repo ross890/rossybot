@@ -223,6 +223,12 @@ export interface TierConfig {
   momentumExtensionMaxPerWindow: number;
   /** Minimum PnL to qualify for momentum extension (must be positive / near breakeven) */
   momentumExtensionMinPnl: number;
+  /** Minutes after entry during which only hard kill fires (SL is suppressed). Protects against early volatility dips. */
+  stopLossGuardMins: number;
+  /** MCap threshold below which SL is widened (multiplied by stopLossWidenFactor). 0 = disabled. */
+  stopLossWidenMcapThreshold: number;
+  /** Factor to widen SL for micro-cap tokens (e.g. 1.5 = -20% becomes -30%). Only applies when mcap < threshold. */
+  stopLossWidenFactor: number;
   mcapMin: number;
   mcapMax: number;
   liquidityMin: number;

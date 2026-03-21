@@ -304,9 +304,10 @@ export class ShadowTracker {
 
     await this.updatePosition(pos);
 
-    // NOTE: Shadow positions intentionally do NOT update wallet stats (our_win_rate, etc.)
-    // Only live trades should affect performance metrics to avoid inflating stats
-    // with simulated results that don't account for fees, slippage, or failed txns.
+    // Shadow positions update SHADOW-specific wallet stats (shadow_win_rate, etc.)
+    // These are kept separate from live stats (our_win_rate) to avoid inflating live metrics.
+    // Shadow stats are used for trust tier graduation: UNPROVEN → PROBATIONARY.
+    await this.updateShadowWalletStats(pos);
 
     logger.info({
       id: pos.id.slice(0, 8),
@@ -326,6 +327,35 @@ export class ShadowTracker {
 
     // Remove from active tracking
     this.positions.delete(pos.id);
+  }
+
+  /** Update shadow-specific wallet stats for trust tier graduation.
+   *  Tracks shadow_total_trades, shadow_win_rate, shadow_avg_pnl_percent separately from live stats. */
+  private async updateShadowWalletStats(pos: ShadowPosition): Promise<void> {
+    const isWin = pos.pnl_percent > 0;
+    const pnlPct = pos.pnl_percent * 100; // Convert to percentage
+
+    for (const walletAddr of pos.signal_wallets) {
+      try {
+        // Rolling average update: new_avg = old_avg + (new_value - old_avg) / new_count
+        await query(
+          `UPDATE alpha_wallets SET
+             shadow_total_trades = COALESCE(shadow_total_trades, 0) + 1,
+             shadow_win_rate = CASE
+               WHEN COALESCE(shadow_total_trades, 0) = 0 THEN ${isWin ? 1.0 : 0.0}
+               ELSE COALESCE(shadow_win_rate, 0) + (${isWin ? 1.0 : 0.0} - COALESCE(shadow_win_rate, 0)) / (COALESCE(shadow_total_trades, 0) + 1)
+             END,
+             shadow_avg_pnl_percent = CASE
+               WHEN COALESCE(shadow_total_trades, 0) = 0 THEN $1
+               ELSE COALESCE(shadow_avg_pnl_percent, 0) + ($1 - COALESCE(shadow_avg_pnl_percent, 0)) / (COALESCE(shadow_total_trades, 0) + 1)
+             END
+           WHERE address = $2`,
+          [pnlPct, walletAddr],
+        );
+      } catch (err) {
+        logger.error({ err, wallet: walletAddr.slice(0, 8) }, 'Failed to update shadow wallet stats');
+      }
+    }
   }
 
   private async updatePosition(pos: ShadowPosition): Promise<void> {

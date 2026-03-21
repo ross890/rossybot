@@ -8,7 +8,8 @@ import { testConnection } from './db/database.js';
 import { HeliusWebSocketManager, TransactionParser, FallbackPoller } from './modules/helius/index.js';
 import { NansenClient, WalletDiscovery } from './modules/nansen/index.js';
 import { EntryEngine, type ValidatedSignal } from './modules/signals/index.js';
-import { scoreSignal, formatScoreForTelegram, type WalletEv } from './modules/signals/signal-scorer.js';
+import { scoreSignal, formatScoreForTelegram, getBestWalletTrustTier, type WalletEv } from './modules/signals/signal-scorer.js';
+import { WalletTrustTier } from './types/index.js';
 import { ShadowTracker } from './modules/positions/index.js';
 import { LiveTracker } from './modules/positions/live-tracker.js';
 import { CapitalManager } from './modules/trading/capital-manager.js';
@@ -238,7 +239,11 @@ class RossyBotV2 {
     this.graduationDiscovery = new GraduationDiscovery();
     this.graduatedTracker = new GraduatedTracker();
 
-    // Initialize position tracker based on mode
+    // Initialize position trackers: BOTH shadow and live run concurrently.
+    // Shadow captures data from unproven wallets; live executes for proven/probationary wallets.
+    // Global shadowMode still works as a kill switch to disable all live trading.
+    this.shadowTracker = new ShadowTracker();
+
     if (!config.shadowMode && config.wallet.privateKey) {
       this.swapExecutor = new SwapExecutor();
       this.liveTracker = new LiveTracker(this.swapExecutor);
@@ -246,25 +251,28 @@ class RossyBotV2 {
       this.pumpFunTracker.setSwapExecutor(this.swapExecutor);
       // Wire graduated tracker for live trading
       this.graduatedTracker.setSwapExecutor(this.swapExecutor);
-      logger.info('LIVE mode — Jupiter swap execution enabled (standard + pump.fun + graduation)');
+      logger.info('HYBRID mode — live execution for proven/probationary wallets, shadow for unproven');
     } else {
-      this.shadowTracker = new ShadowTracker();
-      logger.info('SHADOW mode — simulated positions only');
+      logger.info('SHADOW mode — all signals routed to shadow tracker (no private key or shadowMode=true)');
     }
   }
 
-  // --- Unified position accessors ---
+  // --- Unified position accessors (check BOTH live and shadow) ---
   private getOpenPositions(): PositionView[] {
-    if (this.liveTracker) return this.liveTracker.getOpenPositions().map(liveToView);
-    return this.shadowTracker!.getOpenPositions().map(shadowToView);
+    const live = this.liveTracker?.getOpenPositions().map(liveToView) ?? [];
+    const shadow = this.shadowTracker!.getOpenPositions().map(shadowToView);
+    return [...live, ...shadow];
   }
 
+  /** Count of live positions only (shadow doesn't consume capital) */
   private getOpenCount(): number {
-    return this.liveTracker?.getOpenCount() ?? this.shadowTracker!.getOpenCount();
+    return this.liveTracker?.getOpenCount() ?? 0;
   }
 
   private hasPosition(tokenMint: string): boolean {
-    return this.liveTracker?.hasPosition(tokenMint) ?? this.shadowTracker!.hasPosition(tokenMint);
+    const inLive = this.liveTracker?.hasPosition(tokenMint) ?? false;
+    const inShadow = this.shadowTracker!.hasPosition(tokenMint);
+    return inLive || inShadow;
   }
 
   /**
@@ -738,12 +746,13 @@ class RossyBotV2 {
     // --- Entry Engine → Position Tracker ---
     this.entryEngine.setSignalCallback(async (signal: ValidatedSignal) => {
       try {
-        // Look up per-wallet EV stats from DB (our stats + Nansen bootstrap)
+        // Look up per-wallet EV stats from DB (our stats + Nansen bootstrap + shadow stats)
         const { getMany: dbGetMany } = await import('./db/database.js');
         const walletStats = await dbGetMany<{
           address: string; label: string; our_total_trades: number; our_win_rate: number; our_avg_pnl_percent: number;
           nansen_roi_percent: number; nansen_trade_count: number; nansen_pnl_usd: number;
           tier: string; short_term_alpha_score: number;
+          shadow_total_trades: number; shadow_win_rate: number; shadow_avg_pnl_percent: number;
         }>(
           `SELECT address, COALESCE(label, '') as label,
                   COALESCE(our_total_trades, 0) as our_total_trades,
@@ -753,7 +762,10 @@ class RossyBotV2 {
                   COALESCE(nansen_trade_count, 0) as nansen_trade_count,
                   COALESCE(nansen_pnl_usd, 0) as nansen_pnl_usd,
                   COALESCE(tier, 'B') as tier,
-                  COALESCE(short_term_alpha_score, 0) as short_term_alpha_score
+                  COALESCE(short_term_alpha_score, 0) as short_term_alpha_score,
+                  COALESCE(shadow_total_trades, 0) as shadow_total_trades,
+                  COALESCE(shadow_win_rate, 0) as shadow_win_rate,
+                  COALESCE(shadow_avg_pnl_percent, 0) as shadow_avg_pnl_percent
              FROM alpha_wallets WHERE address = ANY($1)`,
           [signal.walletAddresses],
         );
@@ -766,6 +778,9 @@ class RossyBotV2 {
           nansenPnlUsd: Number(w.nansen_pnl_usd),
           tier: w.tier,
           shortTermAlpha: Number(w.short_term_alpha_score),
+          shadowTrades: Number(w.shadow_total_trades),
+          shadowWinRate: Number(w.shadow_win_rate),
+          shadowAvgPnl: Number(w.shadow_avg_pnl_percent),
         }]));
 
         // Score the signal
@@ -966,11 +981,32 @@ class RossyBotV2 {
           }, 'Dip entry — reduced position size');
         }
 
+        // --- Wallet Trust Tier Routing ---
+        // Determine the best trust tier across all wallets in this signal.
+        // UNPROVEN → shadow only (data collection, zero capital at risk)
+        // PROBATIONARY → live at reduced size (paying tuition cheaply)
+        // PROVEN → full live execution (this is the edge)
+        const trustTier = getBestWalletTrustTier(signal.walletAddresses, walletEvMap);
+        const shouldGoLive = this.liveTracker && trustTier !== WalletTrustTier.UNPROVEN;
+
+        // Apply trust tier sizing (overrides base position size for non-proven wallets)
+        if (shouldGoLive && trustTier === WalletTrustTier.PROBATIONARY) {
+          const trustAdjusted = this.capitalManager.getPositionSizeForTrustTier(trustTier);
+          positionSize = Math.min(positionSize, trustAdjusted);
+        }
+
+        logger.info({
+          token: signal.tokenMint.slice(0, 8),
+          trustTier,
+          route: shouldGoLive ? 'LIVE' : 'SHADOW',
+          positionSize: positionSize.toFixed(4),
+        }, 'Trust tier routing decision');
+
         let posView: PositionView;
 
-        if (this.liveTracker) {
-          // LIVE: Execute real swap
-          const pos = await this.liveTracker.openPosition(signal, positionSize);
+        if (shouldGoLive) {
+          // LIVE: Execute real swap (PROVEN or PROBATIONARY wallets)
+          const pos = await this.liveTracker!.openPosition(signal, positionSize);
           if (!pos) return; // Swap failed — already logged
           if (isReentry) pos.reentry_count = (this.blockedTokens.get(signal.tokenMint)?.reentryCount || 0) + 1;
           posView = liveToView(pos);
@@ -978,7 +1014,7 @@ class RossyBotV2 {
           // Refresh balance after trade
           await this.capitalManager.refreshBalance();
         } else {
-          // SHADOW: Simulated
+          // SHADOW: Simulated (UNPROVEN wallets — collecting data for trust tier graduation)
           const pos = await this.shadowTracker!.openPosition(signal, positionSize);
           if (isReentry) pos.reentry_count = (this.blockedTokens.get(signal.tokenMint)?.reentryCount || 0) + 1;
           posView = shadowToView(pos);
@@ -1027,7 +1063,8 @@ class RossyBotV2 {
           hardTime: signal.tierConfig.hardTimeHours,
           entryTx: posView.entry_tx,
           feesSol: posView.fees_paid_sol,
-          isLive: this.isLive,
+          isLive: shouldGoLive,
+          trustTier,
         });
       } catch (err) {
         logger.error({ err, token: signal.tokenMint?.slice(0, 8) }, 'Error in entry signal callback');

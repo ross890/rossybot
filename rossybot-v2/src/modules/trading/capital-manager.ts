@@ -2,7 +2,7 @@ import { Connection, PublicKey, LAMPORTS_PER_SOL } from '@solana/web3.js';
 import { config, getTierForCapital, getTierConfig, SEED_WALLETS } from '../../config/index.js';
 import { logger } from '../../utils/logger.js';
 import { query } from '../../db/database.js';
-import { CapitalTier, type TierConfig } from '../../types/index.js';
+import { CapitalTier, WalletTrustTier, type TierConfig } from '../../types/index.js';
 
 export class CapitalManager {
   private connection: Connection;
@@ -107,6 +107,20 @@ export class CapitalManager {
       const tierOrder = [CapitalTier.MICRO, CapitalTier.SMALL, CapitalTier.MEDIUM, CapitalTier.FULL];
       return tierOrder.indexOf(w.minTier) <= tierOrder.indexOf(this.currentTier);
     });
+  }
+
+  /** Get position size adjusted for wallet trust tier.
+   *  UNPROVEN = 0 (shadow only), PROBATIONARY = 30%, PROVEN = 100% */
+  getPositionSizeForTrustTier(trustTier: WalletTrustTier): number {
+    const base = this.getPositionSize();
+    const multiplier = trustTier === WalletTrustTier.PROVEN
+      ? config.walletTrust.provenSizeMultiplier
+      : trustTier === WalletTrustTier.PROBATIONARY
+        ? config.walletTrust.probationarySizeMultiplier
+        : config.walletTrust.unprovenSizeMultiplier;
+
+    if (multiplier === 0) return 0; // Shadow only
+    return Math.max(base * multiplier, this.tierConfig.minPositionSol);
   }
 
   /** Calculate position size with confluence multipliers (MEDIUM+ only) */

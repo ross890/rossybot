@@ -26,6 +26,17 @@ export enum WalletTier {
   B = 'B',
 }
 
+/** Trust level for wallet-based capital allocation.
+ *  Controls whether signals route to shadow (data collection) or live (real capital). */
+export enum WalletTrustTier {
+  /** 0 live trades — shadow only, full safety gates enforced */
+  UNPROVEN = 'UNPROVEN',
+  /** 1-4 live trades OR graduated from shadow (3+ shadow trades, WR > 30%) — live at reduced size */
+  PROBATIONARY = 'PROBATIONARY',
+  /** 5+ live trades, WR > 35%, avg PnL > 8% — full position size, permissive gates */
+  PROVEN = 'PROVEN',
+}
+
 export enum SignalType {
   BUY = 'BUY',
   SELL = 'SELL',
@@ -97,6 +108,10 @@ export interface AlphaWallet {
   our_avg_pnl_percent: number;
   our_avg_hold_time_mins: number;
   consecutive_losses: number;
+  /** Shadow trade stats — used for trust tier graduation (UNPROVEN → PROBATIONARY) */
+  shadow_total_trades: number;
+  shadow_win_rate: number;
+  shadow_avg_pnl_percent: number;
 }
 
 export interface WalletTransaction {

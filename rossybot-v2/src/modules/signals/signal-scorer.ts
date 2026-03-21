@@ -1,4 +1,6 @@
 import type { FullValidationResult, DexScreenerPair } from '../../types/index.js';
+import { WalletTrustTier } from '../../types/index.js';
+import { config } from '../../config/index.js';
 import type { ValidatedSignal } from './entry-engine.js';
 
 export interface WalletEv {
@@ -10,6 +12,10 @@ export interface WalletEv {
   nansenPnlUsd: number;
   tier: string;           // 'A' (proven quick-flipper) or 'B' (standard)
   shortTermAlpha: number; // 0-100 alpha score from hold-time analysis
+  /** Shadow trade stats — used for trust tier graduation */
+  shadowTrades: number;
+  shadowWinRate: number;
+  shadowAvgPnl: number;
 }
 
 export interface SignalScore {
@@ -276,6 +282,58 @@ function scoreConfluence(walletCount: number): number {
   if (walletCount >= 3) return 8;
   if (walletCount >= 2) return 5;
   return 2; // Single wallet (shadow mode)
+}
+
+// --- Wallet Trust Tier ---
+// Determines capital allocation tier for a wallet based on live and shadow performance.
+// Wide funnel: shadow everything for data. Narrow gate: deploy capital only behind proven edges.
+
+/** Compute trust tier for a single wallet */
+export function getWalletTrustTier(ev: WalletEv): WalletTrustTier {
+  const trust = config.walletTrust;
+
+  // PROVEN: 5+ live trades with strong performance
+  if (
+    ev.trades >= trust.provenMinLiveTrades &&
+    ev.winRate >= trust.provenMinWinRate &&
+    ev.avgPnl >= trust.provenMinAvgPnl
+  ) {
+    return WalletTrustTier.PROVEN;
+  }
+
+  // PROBATIONARY: has some live trades (1-4), or graduated from shadow
+  if (ev.trades >= 1) {
+    return WalletTrustTier.PROBATIONARY;
+  }
+
+  // PROBATIONARY via shadow graduation: shadow performance proves the wallet works in our exit windows
+  if (
+    ev.shadowTrades >= trust.shadowGraduationMinTrades &&
+    ev.shadowWinRate >= trust.shadowGraduationMinWinRate
+  ) {
+    return WalletTrustTier.PROBATIONARY;
+  }
+
+  return WalletTrustTier.UNPROVEN;
+}
+
+/** Get the best (highest) trust tier across all wallets in a signal */
+export function getBestWalletTrustTier(
+  walletAddresses: string[],
+  walletEvs: Map<string, WalletEv>,
+): WalletTrustTier {
+  let best: WalletTrustTier = WalletTrustTier.UNPROVEN;
+
+  for (const addr of walletAddresses) {
+    const ev = walletEvs.get(addr);
+    if (!ev) continue;
+
+    const tier = getWalletTrustTier(ev);
+    if (tier === WalletTrustTier.PROVEN) return WalletTrustTier.PROVEN; // Can't do better
+    if (tier === WalletTrustTier.PROBATIONARY) best = WalletTrustTier.PROBATIONARY;
+  }
+
+  return best;
 }
 
 /**

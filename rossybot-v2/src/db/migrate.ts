@@ -391,6 +391,11 @@ async function migrate() {
     )
   `);
 
+  // --- Wallet Trust Tier: shadow stats columns for trust tier graduation ---
+  await pool.query(`ALTER TABLE alpha_wallets ADD COLUMN IF NOT EXISTS shadow_total_trades INT DEFAULT 0`);
+  await pool.query(`ALTER TABLE alpha_wallets ADD COLUMN IF NOT EXISTS shadow_win_rate DECIMAL DEFAULT 0`);
+  await pool.query(`ALTER TABLE alpha_wallets ADD COLUMN IF NOT EXISTS shadow_avg_pnl_percent DECIMAL DEFAULT 0`);
+
   console.log('✅ All migrations complete');
   await pool.end();
 }

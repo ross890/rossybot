@@ -140,6 +140,22 @@ export const config = {
     hardTimeHours: 4,                    // 4h max hold (graduation bounces resolve within hours)
     slippageBps: 300,                    // 3% slippage (freshly graduated = thin liquidity)
   },
+  // --- Wallet Trust Tier Thresholds ---
+  // Controls per-signal routing: shadow (data collection) vs live (real capital).
+  // Wide funnel at top (shadow everything), narrow at capital deployment layer.
+  walletTrust: {
+    // UNPROVEN → PROBATIONARY: graduate from shadow when shadow performance proves out
+    shadowGraduationMinTrades: 3,        // 3+ shadow trades before eligible
+    shadowGraduationMinWinRate: 0.30,    // 30%+ shadow win rate
+    // PROBATIONARY → PROVEN: graduate from reduced-size live when live performance proves out
+    provenMinLiveTrades: 5,              // 5+ live trades
+    provenMinWinRate: 0.35,              // 35%+ live win rate
+    provenMinAvgPnl: 8,                  // 8%+ avg PnL (percent, not decimal)
+    // Position size multipliers per trust tier
+    unprovenSizeMultiplier: 0,           // 0 = shadow only, no real capital
+    probationarySizeMultiplier: 0.30,    // 30% of normal position size
+    provenSizeMultiplier: 1.0,           // Full position size
+  },
 } as const;
 
 // --- Capital Tier Configurations ---

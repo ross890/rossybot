@@ -913,6 +913,26 @@ export class WalletDiscovery {
       logger.info({ totalRemoved, reasons }, 'Combined cleanup deactivated wallets');
     }
 
+    // Prune pump.fun-only bag-holders: wallets flagged as pumpfun_only that haven't been active
+    // in 3+ days are dead weight occupying WS slots. Fully deactivate to free slots for discovery.
+    const pumpfunPruned = await getMany<{ address: string }>(
+      `UPDATE alpha_wallets SET active = FALSE
+       WHERE active = TRUE
+         AND pumpfun_only = TRUE
+         AND source NOT IN ('NANSEN_SEED', 'PUMPFUN_SEED', 'GRADUATION_SEED')
+         AND (last_active_at IS NULL OR last_active_at < $1)
+       RETURNING address`,
+      [staleCutoff],
+    );
+    if (pumpfunPruned.length > 0) {
+      reasons['pumpfun-only bag-holder (inactive >3d)'] = pumpfunPruned.length;
+      totalRemoved += pumpfunPruned.length;
+      logger.info({
+        count: pumpfunPruned.length,
+        wallets: pumpfunPruned.map((w) => w.address.slice(0, 8)),
+      }, 'Pruned inactive pump.fun-only bag-holders — freeing WS slots');
+    }
+
     // Cap at MAX_ACTIVE_WALLETS — remove lowest-scoring wallets (separate since it depends on above)
     const activeCount = await getMany<{ count: string }>(
       `SELECT COUNT(*) as count FROM alpha_wallets WHERE active = TRUE`,

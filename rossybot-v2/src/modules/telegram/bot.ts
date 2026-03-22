@@ -682,12 +682,19 @@ export class TelegramService {
         );
       }
 
-      // Exit reason breakdown
+      // Exit reason breakdown (group rare types with ≤2 trades into "Other")
       if (data.performance.exitReasons.length > 0) {
         msg.push(`│ ── EXIT REASONS`);
-        for (const r of data.performance.exitReasons) {
+        const major = data.performance.exitReasons.filter(r => r.total > 2);
+        const minor = data.performance.exitReasons.filter(r => r.total <= 2);
+        for (const r of major) {
           const rWr = r.total > 0 ? (r.wins / r.total * 100).toFixed(0) : '0';
           msg.push(`│  ${r.reason}: ${r.total}t ${rWr}%W avg${(r.avgPnl * 100).toFixed(1)}% ${r.netSol >= 0 ? '+' : ''}${r.netSol.toFixed(4)}◎`);
+        }
+        if (minor.length > 0) {
+          const otherTotal = minor.reduce((s, r) => s + r.total, 0);
+          const otherNet = minor.reduce((s, r) => s + r.netSol, 0);
+          msg.push(`│  Other (${minor.length} types): ${otherTotal}t ${otherNet >= 0 ? '+' : ''}${otherNet.toFixed(4)}◎`);
         }
         msg.push(`│`);
       }
@@ -1820,13 +1827,7 @@ export class TelegramService {
            GROUP BY exit_reason ORDER BY total DESC LIMIT 10`,
         );
 
-        const dexExitLines = dexExitReasons.map((r) => {
-          const rTotal = Number(r.total);
-          const rWins = Number(r.wins);
-          const rWr = rTotal > 0 ? (rWins / rTotal * 100).toFixed(0) : '0';
-          const rPnl = (Number(r.avg_pnl) * 100).toFixed(1);
-          return `│ ${rTotal}x ${r.exit_reason} (${rWr}%W, avg ${rPnl}%)`;
-        });
+        const dexExitLines = this.compressExitReasons(dexExitReasons);
 
         // DEX alpha lag
         const dexLag = await getMany<Record<string, unknown>>(
@@ -1910,13 +1911,7 @@ export class TelegramService {
            GROUP BY exit_reason ORDER BY total DESC LIMIT 10`,
         );
 
-        const pfExitLines = pfExitReasons.map((r) => {
-          const rTotal = Number(r.total);
-          const rWins = Number(r.wins);
-          const rWr = rTotal > 0 ? (rWins / rTotal * 100).toFixed(0) : '0';
-          const rPnl = (Number(r.avg_pnl) * 100).toFixed(1);
-          return `│ ${rTotal}x ${r.exit_reason} (${rWr}%W, avg ${rPnl}%)`;
-        });
+        const pfExitLines = this.compressExitReasons(pfExitReasons);
 
         // Curve entry zone analysis
         const curveZones = await getMany<Record<string, unknown>>(
@@ -2915,6 +2910,26 @@ export class TelegramService {
     const hours = Math.floor(mins / 60);
     const m = mins % 60;
     return `${hours}h ${m}m`;
+  }
+
+  /** Compress exit reasons: show top types individually, group rare ones (≤2 trades) into "Other" */
+  private compressExitReasons(rows: Record<string, unknown>[]): string[] {
+    const major = rows.filter(r => Number(r.total) > 2);
+    const minor = rows.filter(r => Number(r.total) <= 2);
+    const lines = major.map((r) => {
+      const rTotal = Number(r.total);
+      const rWins = Number(r.wins);
+      const rWr = rTotal > 0 ? (rWins / rTotal * 100).toFixed(0) : '0';
+      const rPnl = (Number(r.avg_pnl) * 100).toFixed(1);
+      return `│ ${rTotal}x ${r.exit_reason} (${rWr}%W, avg ${rPnl}%)`;
+    });
+    if (minor.length > 0) {
+      const otherTotal = minor.reduce((s, r) => s + Number(r.total), 0);
+      const otherPnl = minor.reduce((s, r) => s + Number(r.avg_pnl) * Number(r.total), 0);
+      const avgPnl = otherTotal > 0 ? (otherPnl / otherTotal * 100).toFixed(1) : '0.0';
+      lines.push(`│ ${otherTotal}x Other (${minor.length} types, avg ${avgPnl}%)`);
+    }
+    return lines;
   }
 
   async shutdown(): Promise<void> {

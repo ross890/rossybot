@@ -144,6 +144,7 @@ class RossyBotV2 {
   // Throttle "slots full" Telegram messages — at most once per 2 minutes
   private lastSlotsFullMsgAt = 0;
   private slotsFullSkipCount = 0;
+  private consecutiveLosses = 0;
 
   // WS slot productivity tracking: wallet address → signal quality since last rotation
   private wsSignalQuality: Map<string, { count: number; passed: number; totalScore: number }> = new Map();
@@ -1087,6 +1088,7 @@ class RossyBotV2 {
       try {
         const pnl = posView.pnl_percent;
         if (pnl >= 0) {
+          this.consecutiveLosses = 0;
           await this.telegram.sendProfitTargetAlert({
             tokenSymbol: posView.token_symbol || posView.token_address.slice(0, 8),
             pnlPercent: pnl,
@@ -1101,6 +1103,7 @@ class RossyBotV2 {
             isLive: this.isLive,
           });
         } else {
+          this.consecutiveLosses++;
           this.capitalManager.recordLoss(Math.abs(posView.net_pnl_sol));
           await this.telegram.sendStopLossAlert({
             tokenSymbol: posView.token_symbol || posView.token_address.slice(0, 8),
@@ -1111,11 +1114,26 @@ class RossyBotV2 {
             feesSol: posView.fees_paid_sol,
             isLive: this.isLive,
           });
+          // Alert on losing streak
+          if (this.consecutiveLosses === 5) {
+            await this.telegram.sendActionableAlert('LOSING STREAK', [
+              `${this.consecutiveLosses} consecutive losses`,
+              `Review /tuning and /positions to assess strategy`,
+            ]);
+          }
         }
 
         // Refresh balance after close in live mode
         if (this.isLive) {
           await this.capitalManager.refreshBalance();
+          // Alert if balance critically low (< 0.1 SOL)
+          if (this.capitalManager.capital < 0.1) {
+            await this.telegram.sendActionableAlert('BALANCE CRITICALLY LOW', [
+              `Balance: ${this.capitalManager.capital.toFixed(4)} SOL`,
+              `Cannot open new positions`,
+              `Deposit SOL or close positions to continue trading`,
+            ]);
+          }
         }
 
         // Send detailed trade close log

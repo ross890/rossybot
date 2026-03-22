@@ -259,6 +259,15 @@ export class TelegramService {
     await this.send(msg);
   }
 
+  /** Send a high-priority alert that requires human attention */
+  async sendActionableAlert(title: string, details: string[]): Promise<void> {
+    const lines = [
+      `🚨 ACTION REQUIRED — ${title}`,
+      ...details.map(d => `│ ${d}`),
+    ];
+    await this.send(lines.join('\n'));
+  }
+
   async sendWebSocketAlert(status: 'down' | 'restored', details: Record<string, unknown>): Promise<void> {
     if (status === 'down') {
       const msg = [

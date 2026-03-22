@@ -143,6 +143,7 @@ class RossyBotV2 {
 
   // Throttle "slots full" Telegram messages — at most once per 2 minutes
   private lastSlotsFullMsgAt = 0;
+  private slotsFullSkipCount = 0;
 
   // WS slot productivity tracking: wallet address → signal quality since last rotation
   private wsSignalQuality: Map<string, { count: number; passed: number; totalScore: number }> = new Map();
@@ -1440,11 +1441,15 @@ class RossyBotV2 {
       if (this.pumpFunTracker.getOpenCount() >= cfg.maxPositions) {
         logger.info({ open: this.pumpFunTracker.getOpenCount(), max: cfg.maxPositions },
           'Pump.fun skip — max positions reached');
+        this.slotsFullSkipCount++;
         const slotNow = Date.now();
         if (slotNow - this.lastSlotsFullMsgAt >= 120_000) {
+          const skipped = this.slotsFullSkipCount;
+          this.slotsFullSkipCount = 0;
           this.lastSlotsFullMsgAt = slotNow;
           await this.telegram.send(
-            `⏸️ FULL · ${signal.tokenMint.slice(0, 8)} · ${this.pumpFunTracker.getOpenCount()}/${cfg.maxPositions} slots`,
+            `⏸️ FULL · ${this.pumpFunTracker.getOpenCount()}/${cfg.maxPositions} slots` +
+            (skipped > 1 ? ` · ${skipped} signals skipped` : ''),
           );
         }
         return;

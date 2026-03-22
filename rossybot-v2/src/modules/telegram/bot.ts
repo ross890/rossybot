@@ -359,13 +359,6 @@ export class TelegramService {
     await this.send(msg);
   }
 
-  async sendSignalSkippedAlert(data: {
-    walletLabel: string;
-    tokenSymbol: string;
-    reason: string;
-  }): Promise<void> {
-    await this.send(`⚠️ ${data.walletLabel} bought $${data.tokenSymbol} — skipped: ${data.reason}`);
-  }
 
   async sendTradeDetected(data: {
     action: 'BUY' | 'SELL';

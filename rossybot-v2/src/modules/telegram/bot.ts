@@ -22,6 +22,7 @@ export class TelegramService {
   private onGraduationAnalysis: (() => Promise<{ tokensAnalyzed: number; walletsFound: number; walletsPromoted: number }>) | null = null;
   private onMarketAnalysis: ((force: boolean) => Promise<{ status: string; message: string; totalGraduated: number; tokensAnalyzed: number; newDiscoveries: number; durationSeconds: number }>) | null = null;
   private getPumpFunPositions: (() => Array<Record<string, unknown>>) | null = null;
+  private onDiagnostics: (() => Promise<void>) | null = null;
 
   constructor() {
     this.bot = new TelegramBot(config.telegram.botToken, {
@@ -56,6 +57,7 @@ export class TelegramService {
   setGraduationCallback(cb: () => Promise<{ tokensAnalyzed: number; walletsFound: number; walletsPromoted: number }>): void { this.onGraduationAnalysis = cb; }
   setMarketAnalysisCallback(cb: (force: boolean) => Promise<{ status: string; message: string; totalGraduated: number; tokensAnalyzed: number; newDiscoveries: number; durationSeconds: number }>): void { this.onMarketAnalysis = cb; }
   setPumpFunPositionsCallback(cb: () => Array<Record<string, unknown>>): void { this.getPumpFunPositions = cb; }
+  setDiagnosticsCallback(cb: () => Promise<void>): void { this.onDiagnostics = cb; }
 
   get isPaused(): boolean { return this.paused; }
 
@@ -257,6 +259,15 @@ export class TelegramService {
     await this.send(msg);
   }
 
+  /** Send a high-priority alert that requires human attention */
+  async sendActionableAlert(title: string, details: string[]): Promise<void> {
+    const lines = [
+      `🚨 ACTION REQUIRED — ${title}`,
+      ...details.map(d => `│ ${d}`),
+    ];
+    await this.send(lines.join('\n'));
+  }
+
   async sendWebSocketAlert(status: 'down' | 'restored', details: Record<string, unknown>): Promise<void> {
     if (status === 'down') {
       const msg = [
@@ -357,13 +368,6 @@ export class TelegramService {
     await this.send(msg);
   }
 
-  async sendSignalSkippedAlert(data: {
-    walletLabel: string;
-    tokenSymbol: string;
-    reason: string;
-  }): Promise<void> {
-    await this.send(`⚠️ ${data.walletLabel} bought $${data.tokenSymbol} — skipped: ${data.reason}`);
-  }
 
   async sendTradeDetected(data: {
     action: 'BUY' | 'SELL';
@@ -389,6 +393,7 @@ export class TelegramService {
   }
 
   async sendStartupDiagnostics(data: {
+    summaryOnly?: boolean;
     version: string;
     shadowMode: boolean;
     capitalSol: number;
@@ -471,6 +476,65 @@ export class TelegramService {
     };
   }): Promise<void> {
     const isPumpFunOnly = data.capitalSol < data.minCapitalForStandardTrading;
+
+    // Summary mode: key metrics only (used at startup to reduce spam)
+    if (data.summaryOnly) {
+      const pf = data.performance.pumpFun;
+      const trend = data.performance.trend;
+      const edge = data.performance.edge;
+      const pfWr = pf.total > 0 ? (pf.wr * 100).toFixed(0) : 'N/A';
+      const pfFactor = pf.profitFactor > 0 ? pf.profitFactor.toFixed(2) : 'N/A';
+
+      const lines = [
+        `🤖 ROSSYBOT V2 — STARTUP`,
+        ``,
+        `┌─ STATUS`,
+        `│ Mode: ${data.shadowMode ? '👻 SHADOW' : '💰 LIVE'} | ${data.wsConnected ? 'WS ✅' : data.wsFallbackActive ? 'WS ⚠️ fallback' : 'WS ❌'}`,
+        `│ Capital: ${data.capitalSol.toFixed(4)} SOL [${data.tier}]`,
+        `│ Positions: ${data.openPositions}/${data.pumpFunMaxPositions} | Wallets: ${data.wallets.length}`,
+        `│`,
+      ];
+
+      if (pf.total > 0) {
+        lines.push(
+          `├─ PERFORMANCE (${pf.total} trades)`,
+          `│ WR: ${pfWr}% | PF: ${pfFactor} | Net: ${pf.netSol >= 0 ? '+' : ''}${pf.netSol.toFixed(4)}◎`,
+          `│ EV: ${pf.expectancySol >= 0 ? '+' : ''}${pf.expectancySol.toFixed(4)}◎/trade | Streak: ${edge.currentStreak}${edge.streakWinning ? 'W' : 'L'}`,
+          `│`,
+        );
+      }
+
+      // Top 3 exit reasons
+      const topExits = data.performance.exitReasons.slice(0, 3);
+      if (topExits.length > 0) {
+        lines.push(`├─ TOP EXITS`);
+        for (const r of topExits) {
+          const rWr = r.total > 0 ? (r.wins / r.total * 100).toFixed(0) : '0';
+          lines.push(`│ ${r.reason}: ${r.total}t ${rWr}%W ${r.netSol >= 0 ? '+' : ''}${r.netSol.toFixed(4)}◎`);
+        }
+        lines.push(`│`);
+      }
+
+      // 7d trend
+      if (trend.recentTrades > 0) {
+        const recentWr = (trend.recentWins / trend.recentTrades * 100).toFixed(0);
+        const solDelta = trend.recentSol - trend.priorSol;
+        lines.push(
+          `├─ 7D TREND ${solDelta > 0 ? '📈' : '📉'}`,
+          `│ This week: ${trend.recentTrades}t ${recentWr}%W ${trend.recentSol >= 0 ? '+' : ''}${trend.recentSol.toFixed(4)}◎`,
+          `│`,
+        );
+      }
+
+      lines.push(
+        `└─ ✅ RUNNING`,
+        ``,
+        `💡 Use /diagnostics for full startup dump`,
+      );
+
+      await this.send(lines.join('\n'));
+      return;
+    }
 
     // --- Group wallets by quality tier for readability ---
     // Buckets based on estimated value: Nansen PnL + our data + alpha score
@@ -682,12 +746,19 @@ export class TelegramService {
         );
       }
 
-      // Exit reason breakdown
+      // Exit reason breakdown (group rare types with ≤2 trades into "Other")
       if (data.performance.exitReasons.length > 0) {
         msg.push(`│ ── EXIT REASONS`);
-        for (const r of data.performance.exitReasons) {
+        const major = data.performance.exitReasons.filter(r => r.total > 2);
+        const minor = data.performance.exitReasons.filter(r => r.total <= 2);
+        for (const r of major) {
           const rWr = r.total > 0 ? (r.wins / r.total * 100).toFixed(0) : '0';
           msg.push(`│  ${r.reason}: ${r.total}t ${rWr}%W avg${(r.avgPnl * 100).toFixed(1)}% ${r.netSol >= 0 ? '+' : ''}${r.netSol.toFixed(4)}◎`);
+        }
+        if (minor.length > 0) {
+          const otherTotal = minor.reduce((s, r) => s + r.total, 0);
+          const otherNet = minor.reduce((s, r) => s + r.netSol, 0);
+          msg.push(`│  Other (${minor.length} types): ${otherTotal}t ${otherNet >= 0 ? '+' : ''}${otherNet.toFixed(4)}◎`);
         }
         msg.push(`│`);
       }
@@ -849,6 +920,7 @@ export class TelegramService {
       { command: 'discover', description: 'Trigger wallet discovery' },
       { command: 'market', description: 'Pump.fun market analysis' },
       { command: 'graduation', description: 'Graduation retroanalysis' },
+      { command: 'diagnostics', description: 'Full startup diagnostics dump' },
       { command: 'pause', description: 'Pause trading' },
       { command: 'resume', description: 'Resume trading' },
     ];
@@ -990,6 +1062,16 @@ export class TelegramService {
       } catch (err) {
         await this.bot.sendMessage(msg.chat.id, '❌ Failed to load wallets');
       }
+    });
+
+    this.bot.onText(/\/diagnostics/, async (msg) => {
+      if (msg.chat.id.toString() !== this.chatId) return;
+      if (!this.onDiagnostics) {
+        await this.send('Diagnostics not available yet (bot still initializing)');
+        return;
+      }
+      await this.send('Generating full diagnostics...');
+      await this.onDiagnostics();
     });
 
     this.bot.onText(/\/pause/, async (msg) => {
@@ -1820,13 +1902,7 @@ export class TelegramService {
            GROUP BY exit_reason ORDER BY total DESC LIMIT 10`,
         );
 
-        const dexExitLines = dexExitReasons.map((r) => {
-          const rTotal = Number(r.total);
-          const rWins = Number(r.wins);
-          const rWr = rTotal > 0 ? (rWins / rTotal * 100).toFixed(0) : '0';
-          const rPnl = (Number(r.avg_pnl) * 100).toFixed(1);
-          return `│ ${rTotal}x ${r.exit_reason} (${rWr}%W, avg ${rPnl}%)`;
-        });
+        const dexExitLines = this.compressExitReasons(dexExitReasons);
 
         // DEX alpha lag
         const dexLag = await getMany<Record<string, unknown>>(
@@ -1910,13 +1986,7 @@ export class TelegramService {
            GROUP BY exit_reason ORDER BY total DESC LIMIT 10`,
         );
 
-        const pfExitLines = pfExitReasons.map((r) => {
-          const rTotal = Number(r.total);
-          const rWins = Number(r.wins);
-          const rWr = rTotal > 0 ? (rWins / rTotal * 100).toFixed(0) : '0';
-          const rPnl = (Number(r.avg_pnl) * 100).toFixed(1);
-          return `│ ${rTotal}x ${r.exit_reason} (${rWr}%W, avg ${rPnl}%)`;
-        });
+        const pfExitLines = this.compressExitReasons(pfExitReasons);
 
         // Curve entry zone analysis
         const curveZones = await getMany<Record<string, unknown>>(
@@ -2915,6 +2985,26 @@ export class TelegramService {
     const hours = Math.floor(mins / 60);
     const m = mins % 60;
     return `${hours}h ${m}m`;
+  }
+
+  /** Compress exit reasons: show top types individually, group rare ones (≤2 trades) into "Other" */
+  private compressExitReasons(rows: Record<string, unknown>[]): string[] {
+    const major = rows.filter(r => Number(r.total) > 2);
+    const minor = rows.filter(r => Number(r.total) <= 2);
+    const lines = major.map((r) => {
+      const rTotal = Number(r.total);
+      const rWins = Number(r.wins);
+      const rWr = rTotal > 0 ? (rWins / rTotal * 100).toFixed(0) : '0';
+      const rPnl = (Number(r.avg_pnl) * 100).toFixed(1);
+      return `│ ${rTotal}x ${r.exit_reason} (${rWr}%W, avg ${rPnl}%)`;
+    });
+    if (minor.length > 0) {
+      const otherTotal = minor.reduce((s, r) => s + Number(r.total), 0);
+      const otherPnl = minor.reduce((s, r) => s + Number(r.avg_pnl) * Number(r.total), 0);
+      const avgPnl = otherTotal > 0 ? (otherPnl / otherTotal * 100).toFixed(1) : '0.0';
+      lines.push(`│ ${otherTotal}x Other (${minor.length} types, avg ${avgPnl}%)`);
+    }
+    return lines;
   }
 
   async shutdown(): Promise<void> {

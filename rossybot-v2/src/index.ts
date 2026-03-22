@@ -143,6 +143,8 @@ class RossyBotV2 {
 
   // Throttle "slots full" Telegram messages — at most once per 2 minutes
   private lastSlotsFullMsgAt = 0;
+  private slotsFullSkipCount = 0;
+  private consecutiveLosses = 0;
 
   // WS slot productivity tracking: wallet address → signal quality since last rotation
   private wsSignalQuality: Map<string, { count: number; passed: number; totalScore: number }> = new Map();
@@ -201,6 +203,10 @@ class RossyBotV2 {
 
   // Graduation retroanalysis — discovers wallets that buy early on tokens that graduate
   private graduationAnalyzer: GraduationAnalyzer;
+
+  // Hold-time enforcement deduplication: only send Telegram messages when wallet lists change
+  private previousHoldTimeDeactivated: Set<string> = new Set();
+  private previousHoldTimeDemoted: Set<string> = new Set();
 
   // Graduation bounce discovery — monitors freshly graduated tokens for dip/recovery pattern
   private graduationDiscovery: GraduationDiscovery;
@@ -634,8 +640,8 @@ class RossyBotV2 {
     // 11. Schedule daily summary at UTC midnight
     this.scheduleDailySummary();
 
-    // 12. Send full startup diagnostics to Telegram
-    await this.sendStartupDiagnostics();
+    // 12. Send condensed startup diagnostics to Telegram (use /diagnostics for full dump)
+    await this.sendStartupDiagnostics({ summaryOnly: true });
 
     logger.info('=== ROSSYBOT V2 — Running ===');
   }
@@ -1082,6 +1088,7 @@ class RossyBotV2 {
       try {
         const pnl = posView.pnl_percent;
         if (pnl >= 0) {
+          this.consecutiveLosses = 0;
           await this.telegram.sendProfitTargetAlert({
             tokenSymbol: posView.token_symbol || posView.token_address.slice(0, 8),
             pnlPercent: pnl,
@@ -1096,6 +1103,7 @@ class RossyBotV2 {
             isLive: this.isLive,
           });
         } else {
+          this.consecutiveLosses++;
           this.capitalManager.recordLoss(Math.abs(posView.net_pnl_sol));
           await this.telegram.sendStopLossAlert({
             tokenSymbol: posView.token_symbol || posView.token_address.slice(0, 8),
@@ -1106,11 +1114,26 @@ class RossyBotV2 {
             feesSol: posView.fees_paid_sol,
             isLive: this.isLive,
           });
+          // Alert on losing streak
+          if (this.consecutiveLosses === 5) {
+            await this.telegram.sendActionableAlert('LOSING STREAK', [
+              `${this.consecutiveLosses} consecutive losses`,
+              `Review /tuning and /positions to assess strategy`,
+            ]);
+          }
         }
 
         // Refresh balance after close in live mode
         if (this.isLive) {
           await this.capitalManager.refreshBalance();
+          // Alert if balance critically low (< 0.1 SOL)
+          if (this.capitalManager.capital < 0.1) {
+            await this.telegram.sendActionableAlert('BALANCE CRITICALLY LOW', [
+              `Balance: ${this.capitalManager.capital.toFixed(4)} SOL`,
+              `Cannot open new positions`,
+              `Deposit SOL or close positions to continue trading`,
+            ]);
+          }
         }
 
         // Send detailed trade close log
@@ -1333,6 +1356,7 @@ class RossyBotV2 {
     this.telegram.setMarketAnalysisCallback((force) => runDailyAnalysis({ force }));
     this.telegram.setPauseCallback(() => logger.info('Trading PAUSED via Telegram'));
     this.telegram.setResumeCallback(() => logger.info('Trading RESUMED via Telegram'));
+    this.telegram.setDiagnosticsCallback(() => this.sendStartupDiagnostics());
 
     // /kill command — live mode force close (sells token)
     // /drop command — remove from tracking without selling (for manually-sold tokens)
@@ -1354,24 +1378,37 @@ class RossyBotV2 {
       });
     }
 
-    // Hold-time enforcement alerts
+    // Hold-time enforcement alerts (deduplicated — only send when wallet lists change)
     this.walletDiscovery.setHoldTimeCallback(async (results) => {
-      if (results.deactivated.length > 0) {
-        await this.telegram.send(
-          `🎰 HOLD-TIME ENFORCEMENT\n` +
-          `├ Pump.fun only: ${results.deactivated.length} wallet(s) — bag-holders for standard trades\n` +
-          `│  ${results.deactivated.map((a) => a.slice(0, 8)).join(', ')}\n` +
-          `└ Still active for pump.fun signals (short holds work there)`,
-        );
+      const newDeactivated = new Set(results.deactivated);
+      const newDemoted = new Set(results.demoted);
+
+      // Compute diffs against previous cycle
+      const addedDeactivated = results.deactivated.filter(a => !this.previousHoldTimeDeactivated.has(a));
+      const removedDeactivated = [...this.previousHoldTimeDeactivated].filter(a => !newDeactivated.has(a));
+      const addedDemoted = results.demoted.filter(a => !this.previousHoldTimeDemoted.has(a));
+      const removedDemoted = [...this.previousHoldTimeDemoted].filter(a => !newDemoted.has(a));
+
+      const deactivatedChanged = addedDeactivated.length > 0 || removedDeactivated.length > 0;
+      const demotedChanged = addedDemoted.length > 0 || removedDemoted.length > 0;
+
+      if (deactivatedChanged && newDeactivated.size > 0) {
+        const lines = [`🎰 HOLD-TIME ENFORCEMENT · ${newDeactivated.size} wallet(s) PF-only`];
+        if (addedDeactivated.length > 0) lines.push(`├ +${addedDeactivated.length} added: ${addedDeactivated.map(a => a.slice(0, 8)).join(', ')}`);
+        if (removedDeactivated.length > 0) lines.push(`├ -${removedDeactivated.length} removed: ${removedDeactivated.map(a => a.slice(0, 8)).join(', ')}`);
+        lines.push(`└ Still active for pump.fun signals`);
+        await this.telegram.send(lines.join('\n'));
       }
-      if (results.demoted.length > 0) {
-        await this.telegram.send(
-          `⚠️ HOLD-TIME DEMOTION\n` +
-          `├ Demoted to Tier B: ${results.demoted.length} wallet(s)\n` +
-          `│  ${results.demoted.map((a) => a.slice(0, 8)).join(', ')}\n` +
-          `└ Poor short-term alpha — deprioritized in ranking`,
-        );
+      if (demotedChanged && newDemoted.size > 0) {
+        const lines = [`⚠️ HOLD-TIME DEMOTION · ${newDemoted.size} wallet(s) Tier B`];
+        if (addedDemoted.length > 0) lines.push(`├ +${addedDemoted.length} demoted: ${addedDemoted.map(a => a.slice(0, 8)).join(', ')}`);
+        if (removedDemoted.length > 0) lines.push(`├ -${removedDemoted.length} restored: ${removedDemoted.map(a => a.slice(0, 8)).join(', ')}`);
+        lines.push(`└ Poor short-term alpha — deprioritized in ranking`);
+        await this.telegram.send(lines.join('\n'));
       }
+
+      this.previousHoldTimeDeactivated = newDeactivated;
+      this.previousHoldTimeDemoted = newDemoted;
     });
   }
 
@@ -1422,11 +1459,15 @@ class RossyBotV2 {
       if (this.pumpFunTracker.getOpenCount() >= cfg.maxPositions) {
         logger.info({ open: this.pumpFunTracker.getOpenCount(), max: cfg.maxPositions },
           'Pump.fun skip — max positions reached');
+        this.slotsFullSkipCount++;
         const slotNow = Date.now();
         if (slotNow - this.lastSlotsFullMsgAt >= 120_000) {
+          const skipped = this.slotsFullSkipCount;
+          this.slotsFullSkipCount = 0;
           this.lastSlotsFullMsgAt = slotNow;
           await this.telegram.send(
-            `⏸️ FULL · ${signal.tokenMint.slice(0, 8)} · ${this.pumpFunTracker.getOpenCount()}/${cfg.maxPositions} slots`,
+            `⏸️ FULL · ${this.pumpFunTracker.getOpenCount()}/${cfg.maxPositions} slots` +
+            (skipped > 1 ? ` · ${skipped} signals skipped` : ''),
           );
         }
         return;
@@ -1481,10 +1522,6 @@ class RossyBotV2 {
             token: mint.slice(0, 8), wallet: walletLabel,
             winRate: `${(wr * 100).toFixed(0)}%`, consLosses, avgPnl: `${(avgPnl * 100).toFixed(1)}%`,
           }, 'Pump.fun REJECTED — wallet quality too low');
-          await this.telegram.send(
-            `⛔ SKIP · ${mint.slice(0, 8)} · Bad wallet\n` +
-            `└ ${walletLabel} · WR ${(wr * 100).toFixed(0)}% · PnL ${(avgPnl * 100).toFixed(1)}% · ${consLosses} consec losses`,
-          );
           return;
         }
       }
@@ -1495,10 +1532,6 @@ class RossyBotV2 {
           token: mint.slice(0, 8), wallet: walletLabel,
           alpha: walletRow.short_term_alpha_score, rounds: walletRow.round_trips_analyzed,
         }, 'Pump.fun REJECTED — alpha score too low');
-        await this.telegram.send(
-          `⛔ SKIP · ${mint.slice(0, 8)} · Low alpha\n` +
-          `└ ${walletLabel} · Alpha ${walletRow.short_term_alpha_score}/100 · ${walletRow.round_trips_analyzed} rounds`,
-        );
         return;
       }
 
@@ -1573,10 +1606,6 @@ class RossyBotV2 {
               reason: 'STAMPEDE',
               expiresAt: Date.now() + RossyBotV2.PUMP_FUN_REJECTION_TTL_MS,
             });
-            await this.telegram.send(
-              `⛔ SKIP · ${mint.slice(0, 8)} · Stampede\n` +
-              `└ ${effectiveBuyers} buyers · curve ${(curveFill * 100).toFixed(0)}% · ${walletLabel}`,
-            );
             return;
           } else {
             logger.info({
@@ -1650,18 +1679,6 @@ class RossyBotV2 {
             reason: validation.failReason!,
             expiresAt: Date.now() + RossyBotV2.PUMP_FUN_REJECTION_TTL_MS,
           });
-          if (validation.failReason === 'LOW_CONVICTION') {
-            await this.telegram.send(
-              `⛔ SKIP · ${mint.slice(0, 8)} · Low conviction\n` +
-              `└ ${walletLabel} · ${solSpent.toFixed(2)} SOL · curve ${(validation.curveFillPct * 100).toFixed(0)}%`,
-            );
-          }
-        } else {
-          // Other rejections still get Telegram alerts
-          await this.telegram.send(
-            `⛔ SKIP · ${mint.slice(0, 8)} · ${validation.failReason}\n` +
-            `└ ${walletLabel} · ${solSpent.toFixed(2)} SOL · curve ${(validation.curveFillPct * 100).toFixed(0)}%`,
-          );
         }
         return;
       }
@@ -2156,7 +2173,7 @@ class RossyBotV2 {
     }
   }
 
-  private async sendStartupDiagnostics(): Promise<void> {
+  private async sendStartupDiagnostics(opts?: { summaryOnly?: boolean }): Promise<void> {
     try {
       const walletRows = await (await import('./db/database.js')).getMany<{
         address: string; label: string; tier: string; helius_subscribed: boolean;
@@ -2538,6 +2555,7 @@ class RossyBotV2 {
       const wsStatus = this.wsManager.getStatus();
 
       await this.telegram.sendStartupDiagnostics({
+        summaryOnly: opts?.summaryOnly ?? false,
         version: 'v2.0.0',
         shadowMode: config.shadowMode,
         capitalSol: this.capitalManager.capital,

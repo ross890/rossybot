@@ -617,17 +617,29 @@ export class WalletDiscovery {
   private async addWallet(candidate: WalletCandidate): Promise<boolean> {
     try {
       // Check if wallet exists but was deactivated — reactivate if it now qualifies
-      const existing = await getMany<{ address: string; active: boolean; short_term_alpha_score: number | null }>(
-        `SELECT address, active, short_term_alpha_score FROM alpha_wallets WHERE address = $1`,
+      const existing = await getMany<{
+        address: string; active: boolean; short_term_alpha_score: number | null;
+        consecutive_losses: number; our_total_trades: number; our_avg_pnl_percent: number;
+      }>(
+        `SELECT address, active, short_term_alpha_score,
+                COALESCE(consecutive_losses, 0) as consecutive_losses,
+                COALESCE(our_total_trades, 0) as our_total_trades,
+                COALESCE(our_avg_pnl_percent, 0) as our_avg_pnl_percent
+         FROM alpha_wallets WHERE address = $1`,
         [candidate.address],
       );
 
       if (existing.length > 0 && !existing[0].active) {
+        // Kill-switched wallets are NEVER reactivated — they proved they're toxic
+        const w = existing[0];
+        if (Number(w.consecutive_losses) >= 3) return false;
+        if (Number(w.our_total_trades) >= 3 && Number(w.our_avg_pnl_percent) < -25) return false;
+
         // Previously deactivated — only reactivate if it was deactivated because it
         // had no data (score is null), not because it was proven bad (score < 15)
-        const score = existing[0].short_term_alpha_score;
+        const score = w.short_term_alpha_score;
         if (score !== null && score < 15) {
-          // Proven bad — don't reactivate (was < 25, lowered to give more second chances)
+          // Proven bad — don't reactivate
           return false;
         }
         // No score yet or decent score — reactivate
@@ -688,18 +700,28 @@ export class WalletDiscovery {
       `UPDATE alpha_wallets SET tier = 'B' WHERE tier = 'A' AND consecutive_losses >= 2`,
     );
 
-    // Deactivate: 5 consecutive losses — applies to ALL wallets (was 3 — too aggressive for memecoins)
-    const deactivated = await query(
+    // KILL SWITCH: Permanently deactivate wallets with 3+ consecutive losses
+    // OR wallets whose net PnL (our trades) is deeply negative.
+    // These wallets are toxic — stop bleeding capital behind them.
+    const killSwitched = await query(
       `UPDATE alpha_wallets SET active = FALSE
-       WHERE active = TRUE AND consecutive_losses >= 5
-       RETURNING address, label, source`,
+       WHERE active = TRUE AND (
+         -- 3+ consecutive losses (was 5 — too lenient, -99% losses compound fast)
+         consecutive_losses >= 3
+         -- OR proven losers: 3+ trades and deeply negative avg PnL (proxy for net < -0.3 SOL)
+         OR (COALESCE(our_total_trades, 0) >= 3 AND COALESCE(our_avg_pnl_percent, 0) < -25)
+       )
+       RETURNING address, label, source, consecutive_losses, our_total_trades, our_avg_pnl_percent`,
     );
-    if ((deactivated.rowCount || 0) > 0) {
-      const seedHits = deactivated.rows.filter((r) =>
-        ['NANSEN_SEED', 'PUMPFUN_SEED', 'GRADUATION_SEED'].includes((r as { source: string }).source));
-      if (seedHits.length > 0) {
-        logger.info({ wallets: seedHits.map((r) => (r as { label: string }).label) },
-          'Deactivated seed wallet(s) — 3 consecutive losses');
+    if ((killSwitched.rowCount || 0) > 0) {
+      for (const row of killSwitched.rows) {
+        const r = row as { address: string; label: string; source: string; consecutive_losses: number; our_avg_pnl_percent: number };
+        logger.warn({
+          wallet: r.label || r.address.slice(0, 8),
+          source: r.source,
+          consecutiveLosses: r.consecutive_losses,
+          avgPnl: `${(Number(r.our_avg_pnl_percent) * 100).toFixed(1)}%`,
+        }, 'KILL SWITCH — wallet permanently deactivated');
       }
     }
 
@@ -718,7 +740,7 @@ export class WalletDiscovery {
     // Check on-chain trade activity via Helius
     const activityDeactivated = await this.enforceTradeActivity();
 
-    return (deactivated.rowCount || 0) + (pnlPurged.rowCount || 0) + activityDeactivated;
+    return (killSwitched.rowCount || 0) + (pnlPurged.rowCount || 0) + activityDeactivated;
   }
 
   private async logDiscovery(
@@ -942,6 +964,39 @@ export class WalletDiscovery {
       }
     }
 
+    // Cap unproven wallets (0 our_total_trades + 0 shadow_total_trades) at 50.
+    // 194 unproven wallets is noise — keep a focused set, evict oldest first.
+    const MAX_UNPROVEN = 50;
+    const unprovenCount = await getMany<{ count: string }>(
+      `SELECT COUNT(*) as count FROM alpha_wallets
+       WHERE active = TRUE
+         AND COALESCE(our_total_trades, 0) = 0
+         AND COALESCE(shadow_total_trades, 0) = 0`,
+    );
+    const currentUnproven = parseInt(unprovenCount[0]?.count || '0');
+    if (currentUnproven > MAX_UNPROVEN) {
+      const unprovenExcess = currentUnproven - MAX_UNPROVEN;
+      const unprovenResult = await query(
+        `UPDATE alpha_wallets SET active = FALSE
+         WHERE address IN (
+           SELECT address FROM alpha_wallets
+           WHERE active = TRUE
+             AND COALESCE(our_total_trades, 0) = 0
+             AND COALESCE(shadow_total_trades, 0) = 0
+           ORDER BY discovered_at ASC
+           LIMIT $1
+         )
+         RETURNING address`,
+        [unprovenExcess],
+      );
+      const unprovenCut = unprovenResult.rowCount || 0;
+      if (unprovenCut > 0) {
+        reasons[`unproven cap (>${MAX_UNPROVEN})`] = unprovenCut;
+        totalRemoved += unprovenCut;
+        logger.info({ count: unprovenCut, cap: MAX_UNPROVEN }, 'Evicted oldest unproven wallets');
+      }
+    }
+
     if (totalRemoved > 0) {
       this.invalidateWalletCache();
       logger.info({ totalRemoved, reasons }, 'Auto-cleanup complete');
@@ -989,6 +1044,15 @@ export class WalletDiscovery {
            + CASE WHEN our_total_trades >= 3 THEN COALESCE(our_win_rate, 0) * 20 ELSE 0 END
            -- Our avg PnL (up to 10 points)
            + LEAST(GREATEST(COALESCE(our_avg_pnl_percent, 0) * 100, 0), 10)
+           -- Wallet EV bonus: trades × WR × avgPnL (rewards consistent performers, not lucky one-offs)
+           -- A wallet with 7t × 86% × 5% = 3.01 → 15 pts. 2t × 50% × 2% = 0.02 → 0 pts.
+           + LEAST(
+               GREATEST(
+                 COALESCE(our_total_trades, 0) * COALESCE(our_win_rate, 0) * GREATEST(COALESCE(our_avg_pnl_percent, 0) * 100, 0) * 5,
+                 0
+               ),
+               15
+             )
            -- Recent on-chain activity bonus (up to 20 points)
            + CASE
                WHEN last_active_at IS NULL THEN 0

@@ -14,11 +14,11 @@ import { LiveTracker } from './modules/positions/live-tracker.js';
 import { CapitalManager } from './modules/trading/capital-manager.js';
 import { SwapExecutor } from './modules/trading/swap-executor.js';
 import { TelegramService } from './modules/telegram/index.js';
-import { PumpFunTracker, validatePumpFunSignal, PumpPortalClient, PumpFunAlphaDiscovery, deriveBondingCurveAddress, MoversTracker, type MoverToken } from './modules/pumpfun/index.js';
+import { PumpFunTracker, validatePumpFunSignal, PumpPortalClient, PumpFunAlphaDiscovery, deriveBondingCurveAddress, MoversTracker, GraduationDiscovery, GraduatedTracker, type MoverToken, type GradSignal } from './modules/pumpfun/index.js';
 import { GraduationAnalyzer } from './modules/analysis/graduation-analyzer.js';
 import { runDailyAnalysis } from './modules/market-analyzer/index.js';
 import { fetchDexPair } from './modules/validation/dexscreener.js';
-import { SignalType, type ParsedSignal, type PositionView } from './types/index.js';
+import { SignalType, type ParsedSignal, type PositionView, type BlockedTokenMeta } from './types/index.js';
 
 /** Convert ShadowPosition to common PositionView */
 function shadowToView(p: ReturnType<ShadowTracker['getOpenPositions']>[number]): PositionView {
@@ -78,6 +78,43 @@ function liveToView(p: ReturnType<LiveTracker['getOpenPositions']>[number]): Pos
   };
 }
 
+/** Set-backed wallet slot manager — O(1) lookups/removals, prevents duplicates */
+class WalletSlotManager {
+  private set = new Set<string>();
+  add(addr: string): boolean {
+    if (this.set.has(addr)) return false;
+    this.set.add(addr);
+    return true;
+  }
+  remove(addr: string): boolean {
+    return this.set.delete(addr);
+  }
+  has(addr: string): boolean {
+    return this.set.has(addr);
+  }
+  replace(oldAddr: string, newAddr: string): void {
+    this.set.delete(oldAddr);
+    this.set.add(newAddr);
+  }
+  get size(): number {
+    return this.set.size;
+  }
+  get length(): number {
+    return this.set.size;
+  }
+  toArray(): string[] {
+    return Array.from(this.set);
+  }
+  [Symbol.iterator](): IterableIterator<string> {
+    return this.set[Symbol.iterator]();
+  }
+  static from(addresses: string[]): WalletSlotManager {
+    const mgr = new WalletSlotManager();
+    for (const addr of addresses) mgr.set.add(addr);
+    return mgr;
+  }
+}
+
 class RossyBotV2 {
   private wsManager: HeliusWebSocketManager;
   private txParser: TransactionParser;
@@ -87,7 +124,7 @@ class RossyBotV2 {
   private entryEngine: EntryEngine;
   private capitalManager: CapitalManager;
   private telegram: TelegramService;
-  private walletAddresses: string[] = [];
+  private walletAddresses = new WalletSlotManager();
   private dailySummaryInterval: ReturnType<typeof setInterval> | null = null;
 
   // Position tracking — one or the other based on mode
@@ -98,8 +135,8 @@ class RossyBotV2 {
   // Quick symbol cache for BUY/SELL notifications
   private symbolCache: Map<string, string> = new Map();
 
-  // Tokens we've closed/dropped — never re-buy in this session
-  private blockedTokens: Set<string> = new Set();
+  // Tokens we've closed/dropped — tracks exit metadata for conditional re-entry
+  private blockedTokens: Map<string, BlockedTokenMeta> = new Map();
 
   // Pump.fun position tracking (runs alongside standard tracker)
   private pumpFunTracker: PumpFunTracker;
@@ -107,11 +144,11 @@ class RossyBotV2 {
   // Throttle "slots full" Telegram messages — at most once per 2 minutes
   private lastSlotsFullMsgAt = 0;
 
-  // WS slot productivity tracking: wallet address → signal count since last rotation
-  private wsSignalCounts: Map<string, number> = new Map();
+  // WS slot productivity tracking: wallet address → signal quality since last rotation
+  private wsSignalQuality: Map<string, { count: number; passed: number; totalScore: number }> = new Map();
   private wsRotationInterval: ReturnType<typeof setInterval> | null = null;
   private static readonly WS_ROTATION_INTERVAL_MS = 10 * 60_000; // Rotate every 10 min
-  private static readonly WS_MIN_SIGNALS_FOR_KEEP = 1; // Must produce ≥1 signal per rotation window
+  private static readonly WS_MIN_QUALITY_FOR_KEEP = 1.0; // quality = passed*2 + totalScore/count
 
   // Pump.fun confluence tracking: multiple alpha wallets buying the same token
   private pumpFunConfluence: Map<string, { wallets: Set<string>; totalSol: number; firstSeen: number }> = new Map();
@@ -131,6 +168,9 @@ class RossyBotV2 {
     lastCurveFill: number;
   }> = new Map();
 
+  // Rate-limit mover detector "no alpha signal" logs: mint → last log timestamp
+  private moverLogThrottle: Map<string, number> = new Map();
+
   // Real-time curve state cache from PumpPortal (avoids 200-400ms RPC call in validation)
   // Key: tokenMint, Value: { vSol (virtual), realSol, updatedAt }
   private pumpFunCurveCache: Map<string, { vSol: number; realSol: number; updatedAt: number }> = new Map();
@@ -147,7 +187,8 @@ class RossyBotV2 {
   private walletQualityCache: Map<string, {
     label: string; our_total_trades: number; our_win_rate: number;
     our_avg_pnl_percent: number; consecutive_losses: number;
-    avg_buy_size_sol: number; cachedAt: number;
+    avg_buy_size_sol: number; short_term_alpha_score: number;
+    round_trips_analyzed: number; cachedAt: number;
   } | null> = new Map();
   private static readonly WALLET_QUALITY_CACHE_TTL_MS = 30 * 60_000; // 30 min
 
@@ -160,6 +201,10 @@ class RossyBotV2 {
 
   // Graduation retroanalysis — discovers wallets that buy early on tokens that graduate
   private graduationAnalyzer: GraduationAnalyzer;
+
+  // Graduation bounce discovery — monitors freshly graduated tokens for dip/recovery pattern
+  private graduationDiscovery: GraduationDiscovery;
+  private graduatedTracker: GraduatedTracker;
 
   private get isLive(): boolean {
     return !config.shadowMode && this.liveTracker !== null;
@@ -190,6 +235,8 @@ class RossyBotV2 {
     this.pumpFunAlphaDiscovery = new PumpFunAlphaDiscovery();
     this.moversTracker = new MoversTracker();
     this.graduationAnalyzer = new GraduationAnalyzer();
+    this.graduationDiscovery = new GraduationDiscovery();
+    this.graduatedTracker = new GraduatedTracker();
 
     // Initialize position tracker based on mode
     if (!config.shadowMode && config.wallet.privateKey) {
@@ -197,7 +244,9 @@ class RossyBotV2 {
       this.liveTracker = new LiveTracker(this.swapExecutor);
       // Wire pump.fun tracker for live trading too
       this.pumpFunTracker.setSwapExecutor(this.swapExecutor);
-      logger.info('LIVE mode — Jupiter swap execution enabled (standard + pump.fun)');
+      // Wire graduated tracker for live trading
+      this.graduatedTracker.setSwapExecutor(this.swapExecutor);
+      logger.info('LIVE mode — Jupiter swap execution enabled (standard + pump.fun + graduation)');
     } else {
       this.shadowTracker = new ShadowTracker();
       logger.info('SHADOW mode — simulated positions only');
@@ -216,6 +265,40 @@ class RossyBotV2 {
 
   private hasPosition(tokenMint: string): boolean {
     return this.liveTracker?.hasPosition(tokenMint) ?? this.shadowTracker!.hasPosition(tokenMint);
+  }
+
+  /**
+   * Check if a blocked token is eligible for re-entry.
+   * Returns true if re-entry conditions are met, false if still hard-blocked.
+   */
+  private isReentryEligible(tokenMint: string, tierCfg: import('./types/index.js').TierConfig): boolean {
+    const meta = this.blockedTokens.get(tokenMint);
+    if (!meta) return true; // Not blocked at all
+
+    // Hard-blocked tokens (stop loss, hard kill, manual sell) are never re-entered
+    if (meta.hardBlocked) return false;
+
+    // Re-entry disabled for this tier
+    if (!tierCfg.reentryEnabled) return false;
+
+    // Max re-entries reached
+    if (meta.reentryCount >= tierCfg.reentryMaxPerToken) return false;
+
+    // Cooldown not elapsed
+    const cooldownMs = tierCfg.reentryCooldownMins * 60 * 1000;
+    if (Date.now() - meta.closedAt < cooldownMs) return false;
+
+    return true;
+  }
+
+  /**
+   * Mark a blocked token as re-entered (increment count, update metadata).
+   */
+  private markReentry(tokenMint: string): void {
+    const meta = this.blockedTokens.get(tokenMint);
+    if (meta) {
+      meta.reentryCount += 1;
+    }
   }
 
   /** Quick symbol lookup — cached, 2s timeout, falls back to mint prefix */
@@ -280,12 +363,12 @@ class RossyBotV2 {
     const allActiveWallets = await this.walletDiscovery.getActiveWallets(isPumpFunOnlyMode);
 
     // Helius WS monitors top N wallets (tier-limited)
-    this.walletAddresses = allActiveWallets.slice(0, tierCfg.walletsMonitored);
-    logger.info({ subscribed: this.walletAddresses.length, total: allActiveWallets.length }, 'Active wallets loaded');
+    this.walletAddresses = WalletSlotManager.from(allActiveWallets.slice(0, tierCfg.walletsMonitored));
+    logger.info({ subscribed: this.walletAddresses.size, total: allActiveWallets.length }, 'Active wallets loaded');
 
     // 4. Update parsers (subscribed wallets for WS detection)
-    this.txParser.updateWallets(this.walletAddresses);
-    this.fallbackPoller.updateWallets(this.walletAddresses);
+    this.txParser.updateWallets(this.walletAddresses.toArray());
+    this.fallbackPoller.updateWallets(this.walletAddresses.toArray());
 
     // Give entry engine ALL tracked wallets for on-chain confluence checks
     this.entryEngine.updateAllTrackedWallets(allActiveWallets);
@@ -303,10 +386,18 @@ class RossyBotV2 {
       const closedMints = await dbGetMany<{ token_address: string }>(
         `SELECT DISTINCT token_address FROM positions WHERE status = 'CLOSED' AND closed_at > NOW() - INTERVAL '24 hours'
          UNION
-         SELECT DISTINCT token_address FROM pumpfun_positions WHERE status = 'CLOSED' AND closed_at > NOW() - INTERVAL '24 hours'`,
+         SELECT DISTINCT token_address FROM pumpfun_positions WHERE status = 'CLOSED' AND closed_at > NOW() - INTERVAL '24 hours'
+         UNION
+         SELECT DISTINCT token_address FROM graduated_positions WHERE status = 'CLOSED' AND closed_at > NOW() - INTERVAL '24 hours'`,
       );
       for (const row of closedMints) {
-        this.blockedTokens.add(row.token_address);
+        this.blockedTokens.set(row.token_address, {
+          closedAt: Date.now(), // Approximate — loaded from DB
+          pnlPercent: 0,
+          exitReason: 'loaded from DB',
+          reentryCount: 0,
+          hardBlocked: true, // Conservative: hard-block DB-loaded tokens (no exit context)
+        });
       }
       if (this.blockedTokens.size > 0) {
         logger.info({ count: this.blockedTokens.size }, 'Loaded blocked tokens from recent closed positions');
@@ -319,7 +410,7 @@ class RossyBotV2 {
     this.wireCallbacks();
 
     // 7. Connect Helius WebSocket (THE CRITICAL STEP)
-    await this.wsManager.connect(this.walletAddresses);
+    await this.wsManager.connect(this.walletAddresses.toArray());
 
     // 8. Start position price monitoring
     if (this.liveTracker) {
@@ -332,15 +423,46 @@ class RossyBotV2 {
     await this.pumpFunTracker.loadOpenPositions();
     this.pumpFunTracker.start();
 
+    // 8d. Start graduation bounce discovery + tracker
+    if (config.graduationDiscovery.enabled) {
+      await this.graduatedTracker.loadOpenPositions();
+      this.graduatedTracker.setCloseCallback((pos) => {
+        const emoji = pos.pnl_percent > 0 ? '🟢' : '🔴';
+        this.telegram.send(
+          `${emoji} GRAD CLOSE · ${pos.token_symbol || pos.token_address.slice(0, 8)}\n` +
+          `├ PnL: ${(pos.pnl_percent * 100).toFixed(1)}% · ${pos.net_pnl_sol.toFixed(4)} SOL\n` +
+          `├ Dip: ${(pos.dip_pct * 100).toFixed(0)}% · Recovery at entry: +${(pos.recovery_at_entry * 100).toFixed(0)}%\n` +
+          `├ Hold: ${pos.hold_time_mins}min · Reason: ${pos.exit_reason}\n` +
+          `└ ${this.graduatedTracker.isLive ? 'LIVE' : 'SHADOW'}`,
+        ).catch(() => {});
+      });
+      this.graduatedTracker.setSwapFailedCallback((symbol, error, type) => {
+        this.telegram.send(`⚠️ GRAD ${type} FAILED · ${symbol} · ${error}`).catch(() => {});
+      });
+      this.graduatedTracker.setBalanceRefreshCallback(async () => {
+        await this.capitalManager.refreshBalance();
+      });
+      this.graduatedTracker.start();
+
+      // Wire graduation discovery signal → open position
+      this.graduationDiscovery.setSignalCallback((signal: GradSignal) => {
+        this.handleGradSignal(signal).catch((err) =>
+          logger.error({ err, token: signal.mint.slice(0, 8) }, 'Graduation signal handler error'),
+        );
+      });
+      this.graduationDiscovery.start();
+      logger.info('Graduation bounce discovery ENABLED');
+    }
+
     // 8c. Start PumpPortal — real-time pump.fun trade stream for alpha wallet discovery
     this.pumpFunAlphaDiscovery.setNewAlphaCallback((address) => {
       // Respect WS slot cap — only subscribe if we have room
       const tierCfg = getTierConfig(this.capitalManager.tier);
-      if (this.walletAddresses.length < tierCfg.walletsMonitored) {
-        this.walletAddresses.push(address);
+      if (this.walletAddresses.size < tierCfg.walletsMonitored && !this.walletAddresses.has(address)) {
+        this.walletAddresses.add(address);
         this.txParser.addWallet(address);
         this.wsManager.addWallet(address);
-        logger.info({ address: address.slice(0, 8), total: this.walletAddresses.length }, 'PumpPortal alpha discovered — added to Helius WS');
+        logger.info({ address: address.slice(0, 8), total: this.walletAddresses.size }, 'PumpPortal alpha discovered — added to Helius WS');
       } else {
         logger.info({ address: address.slice(0, 8) }, 'PumpPortal alpha discovered — WS slots full, added for on-chain confluence only');
       }
@@ -411,6 +533,15 @@ class RossyBotV2 {
       }
     });
 
+    // Wire PumpPortal migration (graduation) events → graduation bounce discovery
+    if (config.graduationDiscovery.enabled) {
+      this.pumpPortal.on('migration', (migration) => {
+        this.graduationDiscovery.onGraduation(migration.mint).catch((err) =>
+          logger.error({ err, mint: migration.mint?.slice(0, 8) }, 'Graduation discovery error'),
+        );
+      });
+    }
+
     this.pumpPortal.connect().catch((err) =>
       logger.error({ err }, 'PumpPortal connection failed — alpha discovery will not run'),
     );
@@ -420,13 +551,16 @@ class RossyBotV2 {
       const ppStats = this.pumpPortal.stats;
       const adStats = this.pumpFunAlphaDiscovery.getStats();
       if (ppStats.tradeCount > 0 || ppStats.createCount > 0) {
+        const gdStats = config.graduationDiscovery.enabled ? this.graduationDiscovery.getStats() : null;
         logger.info({
           connected: ppStats.connected,
           trades: ppStats.tradeCount,
           creates: ppStats.createCount,
+          migrations: ppStats.migrationCount,
           tokens: ppStats.subscribedTokens,
           tracked: adStats.tracked,
           promoted: adStats.promoted,
+          ...(gdStats ? { gradMonitored: gdStats.monitored, gradSignals: gdStats.signalsFired } : {}),
         }, 'PumpPortal alpha discovery stats');
       }
     }, 5 * 60 * 1000); // every 5 min
@@ -534,10 +668,23 @@ class RossyBotV2 {
           // Route signals: pumpfun_only wallets skip standard pipeline
           const isPumpFunOnly = walletRow?.pumpfun_only === true;
 
+          // Block deployer wallets — they buy their own token creations, not real alpha
+          const walletLabel = walletRow?.label || '';
+          const isDeployer = /deployer|token creator/i.test(walletLabel);
+          if (isDeployer && signal.type === SignalType.BUY && !signal.isPumpFun) {
+            logger.info({
+              wallet: signal.walletAddress.slice(0, 8),
+              label: walletLabel,
+              token: signal.tokenMint.slice(0, 8),
+            }, 'Skipping deployer wallet — self-dealing, not alpha');
+            continue;
+          }
+
           if (signal.type === SignalType.BUY) {
-            // Track actionable signal for WS rotation (only count buys that reach handlers)
-            const actionCount = this.wsSignalCounts.get(signal.walletAddress) || 0;
-            this.wsSignalCounts.set(signal.walletAddress, actionCount + 1);
+            // Track signal for WS rotation quality scoring
+            const sq = this.wsSignalQuality.get(signal.walletAddress) || { count: 0, passed: 0, totalScore: 0 };
+            sq.count++;
+            this.wsSignalQuality.set(signal.walletAddress, sq);
 
             if (signal.isPumpFun) {
               await this.handlePumpFunBuy(signal);
@@ -592,7 +739,7 @@ class RossyBotV2 {
         logger.info('Fallback mode DEACTIVATED');
         this.fallbackPoller.stop();
         await this.telegram.sendWebSocketAlert('restored', {
-          wallets: this.walletAddresses.length,
+          wallets: this.walletAddresses.size,
           downtime: 'recovered',
         });
       } catch (err) {
@@ -646,6 +793,15 @@ class RossyBotV2 {
         // Send signal log with actual scoring outcome (not just validation pass/fail)
         const minScore = signal.tierConfig.minSignalScore;
         const scorePassed = score.total >= minScore && !score.walletRejected;
+
+        // Update WS rotation quality tracking with scoring results
+        for (const walletAddr of signal.walletAddresses) {
+          const sq = this.wsSignalQuality.get(walletAddr);
+          if (sq) {
+            if (scorePassed) sq.passed++;
+            sq.totalScore += score.total;
+          }
+        }
         try {
           const dex = signal.validation.dexData;
           await this.telegram.sendSignalLog({
@@ -665,7 +821,7 @@ class RossyBotV2 {
                 nansenPnlUsd: stats?.nansenPnlUsd || 0,
               };
             }),
-            totalMonitored: this.walletAddresses.length,
+            totalMonitored: this.walletAddresses.size,
             safety: signal.validation.safety,
             liquidity: signal.validation.liquidity,
             momentum: signal.validation.momentum,
@@ -747,12 +903,60 @@ class RossyBotV2 {
           return;
         }
 
+        // Check if token is blocked — allow re-entry if conditions are met
+        let isReentry = false;
         if (this.blockedTokens.has(signal.tokenMint)) {
-          logger.info({ token: signal.tokenMint.slice(0, 8) }, 'Skipping signal — token was previously closed/dropped');
-          return;
+          if (this.isReentryEligible(signal.tokenMint, signal.tierConfig)) {
+            isReentry = true;
+            const meta = this.blockedTokens.get(signal.tokenMint)!;
+            const cooldownMins = Math.round((Date.now() - meta.closedAt) / 60000);
+            logger.info({
+              token: signal.tokenMint.slice(0, 8),
+              prevExit: meta.exitReason,
+              prevPnl: `${(meta.pnlPercent * 100).toFixed(1)}%`,
+              cooldownMins,
+              reentryNum: meta.reentryCount + 1,
+            }, 'RE-ENTRY eligible — previously closed token, fresh alpha signal');
+          } else {
+            logger.info({ token: signal.tokenMint.slice(0, 8) }, 'Skipping signal — token was previously closed/dropped');
+            return;
+          }
         }
 
         let positionSize = this.capitalManager.getPositionSize();
+
+        // Re-entry: reduce position size for risk management
+        if (isReentry) {
+          positionSize = positionSize * signal.tierConfig.reentrySizeMultiplier;
+          logger.info({
+            token: signal.tokenMint.slice(0, 8),
+            multiplier: signal.tierConfig.reentrySizeMultiplier,
+            adjustedSize: positionSize.toFixed(3),
+          }, 'Re-entry — reduced position size');
+        }
+
+        // Bid-size matching: scale position relative to alpha wallet's buy size.
+        // If the alpha spent 2 SOL and we have 6.5 SOL, don't blindly use 20% (1.3 SOL).
+        // Instead, cap our position to a reasonable ratio of their bid so we don't
+        // over-size on small-cap tokens where the alpha was cautious.
+        if (signal.alphaSolSpent > 0) {
+          const capitalSol = this.capitalManager.capital;
+          // Our max should be proportional: we spend at most (our capital / alpha capital estimate) × their bid
+          // Use their avg buy size if known, otherwise use this signal's spend
+          const alphaBid = signal.alphaSolSpent;
+          // Cap: don't exceed 50% of the alpha's bid (we're smaller, ride their wave)
+          // Floor: don't go below the tier minimum
+          const bidCapped = Math.min(positionSize, alphaBid * 0.50);
+          if (bidCapped < positionSize && bidCapped >= signal.tierConfig.minPositionSol) {
+            logger.info({
+              token: signal.tokenMint.slice(0, 8),
+              alphaBid: alphaBid.toFixed(3),
+              tierSize: positionSize.toFixed(3),
+              bidCapped: bidCapped.toFixed(3),
+            }, 'Bid-size matching — capped position to alpha bid ratio');
+            positionSize = bidCapped;
+          }
+        }
 
         // Scale position size down for dip entries — less capital at risk
         const entryMomentum = signal.validation.dexData?.priceChange?.h24 ?? 0;
@@ -780,6 +984,7 @@ class RossyBotV2 {
           // LIVE: Execute real swap
           const pos = await this.liveTracker.openPosition(signal, positionSize);
           if (!pos) return; // Swap failed — already logged
+          if (isReentry) pos.reentry_count = (this.blockedTokens.get(signal.tokenMint)?.reentryCount || 0) + 1;
           posView = liveToView(pos);
 
           // Refresh balance after trade
@@ -787,7 +992,15 @@ class RossyBotV2 {
         } else {
           // SHADOW: Simulated
           const pos = await this.shadowTracker!.openPosition(signal, positionSize);
+          if (isReentry) pos.reentry_count = (this.blockedTokens.get(signal.tokenMint)?.reentryCount || 0) + 1;
           posView = shadowToView(pos);
+        }
+
+        // Track re-entry in blocked tokens metadata
+        if (isReentry) {
+          this.markReentry(signal.tokenMint);
+          // Remove from blocked tokens so it's treated as a live position
+          this.blockedTokens.delete(signal.tokenMint);
         }
 
         // Send Telegram alert
@@ -798,7 +1011,7 @@ class RossyBotV2 {
           tier: signal.tierConfig.tier,
           wallets: signal.walletAddresses,
           walletCount: signal.walletCount,
-          totalMonitored: this.walletAddresses.length,
+          totalMonitored: this.walletAddresses.size,
           walletEv: signal.walletAddresses.map((addr) => {
             const stats = walletEvMap.get(addr);
             return {
@@ -806,6 +1019,9 @@ class RossyBotV2 {
               trades: stats?.trades || 0,
               winRate: stats?.winRate || 0,
               avgPnl: stats?.avgPnl || 0,
+              nansenRoi: stats?.nansenRoi || 0,
+              nansenPnlUsd: stats?.nansenPnlUsd || 0,
+              nansenTrades: stats?.nansenTrades || 0,
             };
           }),
           signalScore: scoreDisplay,
@@ -835,8 +1051,34 @@ class RossyBotV2 {
 
     // --- Position close callback (works for both trackers) ---
     const handlePositionClose = async (posView: PositionView) => {
-      // Block token from being re-bought this session
-      this.blockedTokens.add(posView.token_address);
+      // Track exit metadata for conditional re-entry
+      const existingMeta = this.blockedTokens.get(posView.token_address);
+      const reentryCount = existingMeta ? existingMeta.reentryCount : 0;
+      // Hard-block tokens that exited due to hard kill / stop loss (bad fundamentals, don't re-enter)
+      const hardBlockReasons = ['Hard kill', 'Stop loss', 'Hard time kill', 'Force close', 'Manual sell'];
+      const isHardBlock = hardBlockReasons.some(r => (posView.exit_reason || '').includes(r));
+      this.blockedTokens.set(posView.token_address, {
+        closedAt: Date.now(),
+        pnlPercent: posView.pnl_percent,
+        exitReason: posView.exit_reason || 'unknown',
+        reentryCount,
+        hardBlocked: isHardBlock,
+      });
+
+      // If not hard-blocked and re-entry is possible, clear the token in the entry engine
+      // so fresh alpha signals can be processed for this token
+      if (!isHardBlock) {
+        const tierCfg = getTierConfig(this.capitalManager.tier);
+        if (tierCfg.reentryEnabled && reentryCount < tierCfg.reentryMaxPerToken) {
+          this.entryEngine.allowReentry(posView.token_address);
+          logger.info({
+            token: posView.token_address.slice(0, 8),
+            exitReason: posView.exit_reason,
+            cooldownMins: tierCfg.reentryCooldownMins,
+          }, 'Token eligible for re-entry — cleared in entry engine');
+        }
+      }
+
       try {
         const pnl = posView.pnl_percent;
         if (pnl >= 0) {
@@ -875,10 +1117,14 @@ class RossyBotV2 {
         const { getMany: dbGetMany } = await import('./db/database.js');
         const walletRows = await dbGetMany<{
           address: string; label: string; our_total_trades: number; our_win_rate: number; our_avg_pnl_percent: number;
+          nansen_roi_percent: number; nansen_pnl_usd: number; nansen_trade_count: number;
         }>(
           `SELECT address, label, COALESCE(our_total_trades, 0) as our_total_trades,
                   COALESCE(our_win_rate, 0) as our_win_rate,
-                  COALESCE(our_avg_pnl_percent, 0) as our_avg_pnl_percent
+                  COALESCE(our_avg_pnl_percent, 0) as our_avg_pnl_percent,
+                  COALESCE(nansen_roi_percent, 0) as nansen_roi_percent,
+                  COALESCE(nansen_pnl_usd, 0) as nansen_pnl_usd,
+                  COALESCE(nansen_trade_count, 0) as nansen_trade_count
              FROM alpha_wallets WHERE address = ANY($1)`,
           [posView.signal_wallets],
         );
@@ -906,6 +1152,8 @@ class RossyBotV2 {
               trades: Number(w?.our_total_trades || 0),
               winRate: Number(w?.our_win_rate || 0),
               avgPnl: Number(w?.our_avg_pnl_percent || 0),
+              nansenRoi: Number(w?.nansen_roi_percent || 0),
+              nansenPnlUsd: Number(w?.nansen_pnl_usd || 0),
             };
           }),
           entryTime: posView.entry_time.toISOString().replace('T', ' ').slice(0, 19) + ' UTC',
@@ -975,7 +1223,14 @@ class RossyBotV2 {
     });
 
     this.pumpFunTracker.setCloseCallback(async (pos) => {
-      this.blockedTokens.add(pos.token_address);
+      // Pump.fun positions are always hard-blocked (curve scalps don't benefit from re-entry)
+      this.blockedTokens.set(pos.token_address, {
+        closedAt: Date.now(),
+        pnlPercent: pos.pnl_percent,
+        exitReason: pos.exit_reason || 'unknown',
+        reentryCount: 0,
+        hardBlocked: true,
+      });
       try {
         const pnl = pos.pnl_percent;
         const isWin = pnl > 0;
@@ -1040,14 +1295,14 @@ class RossyBotV2 {
         );
 
         const tierCfg = getTierConfig(this.capitalManager.tier);
-        if (this.walletAddresses.length >= tierCfg.walletsMonitored) {
-          logger.info({ address: address.slice(0, 8) }, 'New wallet added for on-chain confluence (WS slots full)');
+        if (this.walletAddresses.size >= tierCfg.walletsMonitored || this.walletAddresses.has(address)) {
+          logger.info({ address: address.slice(0, 8) }, 'New wallet added for on-chain confluence (WS slots full or duplicate)');
           return;
         }
-        this.walletAddresses.push(address);
+        this.walletAddresses.add(address);
         this.txParser.addWallet(address);
         await this.wsManager.addWallet(address);
-        logger.info({ address: address.slice(0, 8), total: this.walletAddresses.length }, 'New wallet subscribed via Helius');
+        logger.info({ address: address.slice(0, 8), total: this.walletAddresses.size }, 'New wallet subscribed via Helius');
       } catch (err) {
         logger.error({ err, address: address?.slice(0, 8) }, 'Error in new wallet callback');
       }
@@ -1150,7 +1405,7 @@ class RossyBotV2 {
         return;
       }
 
-      // Skip tokens we've previously closed/dropped
+      // Skip tokens we've previously closed/dropped (pump.fun = no re-entry)
       if (this.blockedTokens.has(mint)) {
         logger.info({ token: mint.slice(0, 8) }, 'Pump.fun skip — token was previously closed/dropped');
         return;
@@ -1184,9 +1439,12 @@ class RossyBotV2 {
         const dbRow = await (await import('./db/database.js')).getOne<{
           label: string; our_total_trades: number; our_win_rate: number;
           our_avg_pnl_percent: number; consecutive_losses: number; avg_buy_size_sol: number;
+          short_term_alpha_score: number; round_trips_analyzed: number;
         }>(
           `SELECT label, our_total_trades, our_win_rate, our_avg_pnl_percent, consecutive_losses,
-                  COALESCE(avg_buy_size_sol, 0) as avg_buy_size_sol
+                  COALESCE(avg_buy_size_sol, 0) as avg_buy_size_sol,
+                  COALESCE(short_term_alpha_score, 0) as short_term_alpha_score,
+                  COALESCE(round_trips_analyzed, 0) as round_trips_analyzed
            FROM alpha_wallets WHERE address = $1`, [signal.walletAddress],
         );
         walletRow = dbRow ? { ...dbRow, cachedAt: Date.now() } : null;
@@ -1197,9 +1455,12 @@ class RossyBotV2 {
           const dbRow = await (await import('./db/database.js')).getOne<{
             label: string; our_total_trades: number; our_win_rate: number;
             our_avg_pnl_percent: number; consecutive_losses: number; avg_buy_size_sol: number;
+            short_term_alpha_score: number; round_trips_analyzed: number;
           }>(
             `SELECT label, our_total_trades, our_win_rate, our_avg_pnl_percent, consecutive_losses,
-                    COALESCE(avg_buy_size_sol, 0) as avg_buy_size_sol
+                    COALESCE(avg_buy_size_sol, 0) as avg_buy_size_sol,
+                    COALESCE(short_term_alpha_score, 0) as short_term_alpha_score,
+                    COALESCE(round_trips_analyzed, 0) as round_trips_analyzed
              FROM alpha_wallets WHERE address = $1`, [signal.walletAddress],
           );
           this.walletQualityCache.set(signal.walletAddress, dbRow ? { ...dbRow, cachedAt: Date.now() } : null);
@@ -1207,17 +1468,34 @@ class RossyBotV2 {
       }
       const walletLabel = walletRow?.label || signal.walletAddress.slice(0, 8);
 
-      // Skip wallets with proven bad track records (3+ trades, <30% WR or 2+ consecutive losses)
+      // Skip wallets with proven bad track records — tighter thresholds:
+      // 1. 3+ trades: <45% WR, 2+ consecutive losses, or avg PnL below -3%
+      // 2. 3+ rounds analyzed: alpha score <15 (not profitable in our exit windows)
+      // Data: bottom 5 wallets lost -1.41◎ combined. Tighter gates = fewer bad trades.
       if (walletRow && walletRow.our_total_trades >= 3) {
         const wr = walletRow.our_win_rate;
         const consLosses = walletRow.consecutive_losses || 0;
-        if (wr < 0.30 || consLosses >= 2) {
+        const avgPnl = walletRow.our_avg_pnl_percent || 0;
+        if (wr < 0.45 || consLosses >= 2 || avgPnl < -0.03) {
           logger.info({
             token: mint.slice(0, 8), wallet: walletLabel,
-            winRate: `${(wr * 100).toFixed(0)}%`, consLosses,
+            winRate: `${(wr * 100).toFixed(0)}%`, consLosses, avgPnl: `${(avgPnl * 100).toFixed(1)}%`,
           }, 'Pump.fun REJECTED — wallet quality too low');
           return;
         }
+      }
+      // Alpha score gate: if we have hold-time analysis data, reject low-alpha wallets
+      // Raised from 15 → 20: data shows low-alpha wallets are net negative
+      if (walletRow && walletRow.round_trips_analyzed >= 3 && walletRow.short_term_alpha_score < 20) {
+        logger.info({
+          token: mint.slice(0, 8), wallet: walletLabel,
+          alpha: walletRow.short_term_alpha_score, rounds: walletRow.round_trips_analyzed,
+        }, 'Pump.fun REJECTED — alpha score too low');
+        await this.telegram.send(
+          `⛔ SKIP · ${mint.slice(0, 8)} · Low alpha\n` +
+          `└ ${walletLabel} · Alpha ${walletRow.short_term_alpha_score}/100 · ${walletRow.round_trips_analyzed} rounds`,
+        );
+        return;
       }
 
       // Update wallet's avg buy size from observed buys (exponential moving average)
@@ -1421,13 +1699,19 @@ class RossyBotV2 {
   private async handleMoverDetected(mover: MoverToken): Promise<void> {
     const deferred = this.deferredEntries.get(mover.mint);
     if (!deferred) {
-      // No deferred entry — log for awareness but don't enter without alpha signal
-      logger.info({
-        token: mover.mint.slice(0, 8),
-        velocity: `${mover.velocitySolPerMin.toFixed(2)} SOL/min`,
-        curveFill: `${(mover.curveFillPct * 100).toFixed(0)}%`,
-        buyers: mover.uniqueBuyers,
-      }, 'Mover detected — no deferred entry (no alpha signal)');
+      // Rate-limit: only log first occurrence per token per 5-minute window
+      const now = Date.now();
+      const lastSeen = this.moverLogThrottle?.get(mover.mint) ?? 0;
+      if (now - lastSeen > 5 * 60_000) {
+        if (!this.moverLogThrottle) this.moverLogThrottle = new Map();
+        this.moverLogThrottle.set(mover.mint, now);
+        logger.info({
+          token: mover.mint.slice(0, 8),
+          velocity: `${mover.velocitySolPerMin.toFixed(2)} SOL/min`,
+          curveFill: `${(mover.curveFillPct * 100).toFixed(0)}%`,
+          buyers: mover.uniqueBuyers,
+        }, 'Mover detected — no deferred entry (no alpha signal)');
+      }
       return;
     }
 
@@ -1602,6 +1886,76 @@ class RossyBotV2 {
     );
   }
 
+  /**
+   * Handle a graduation bounce signal — a freshly graduated token that dipped and is recovering.
+   * This is a NEW signal source: no alpha wallet needed, the pattern itself is the signal.
+   */
+  private async handleGradSignal(signal: GradSignal): Promise<void> {
+    try {
+      const cfg = config.graduationDiscovery;
+      const mint = signal.mint;
+
+      // Pre-flight: skip if we already hold this token anywhere
+      if (this.hasPosition(mint) || this.pumpFunTracker.hasPosition(mint) || this.graduatedTracker.hasPosition(mint)) {
+        logger.info({ token: mint.slice(0, 8) }, 'Grad signal skip — already holding');
+        return;
+      }
+
+      if (this.blockedTokens.has(mint)) {
+        logger.info({ token: mint.slice(0, 8) }, 'Grad signal skip — blocked token');
+        return;
+      }
+
+      if (this.graduatedTracker.getOpenCount() >= cfg.maxPositions) {
+        logger.info({ open: this.graduatedTracker.getOpenCount(), max: cfg.maxPositions },
+          'Grad signal skip — max positions reached');
+        return;
+      }
+
+      // Position sizing: use tier size * graduation multiplier
+      const tierSize = this.capitalManager.getPositionSize();
+      const posSize = tierSize * cfg.positionSizeMultiplier;
+
+      if (posSize < getTierConfig(this.capitalManager.tier).minPositionSol) {
+        logger.info({ posSize, token: mint.slice(0, 8) }, 'Grad signal skip — position too small');
+        return;
+      }
+
+      // Open the position
+      const pos = await this.graduatedTracker.openPosition(signal, posSize);
+
+      if (!pos) {
+        await this.telegram.send(
+          `⚠️ GRAD BUY FAILED · ${signal.symbol || mint.slice(0, 8)} · ${posSize.toFixed(4)} SOL`,
+        );
+        return;
+      }
+
+      this.blockedTokens.set(mint, {
+        closedAt: Date.now(),
+        pnlPercent: 0,
+        exitReason: 'graduation_entry',
+        reentryCount: 0,
+        hardBlocked: true,
+      }); // Don't re-enter this session
+
+      const mode = this.graduatedTracker.isLive ? 'LIVE' : 'SHADOW';
+      await this.telegram.send(
+        `🎓 GRAD BUY · ${signal.symbol || mint.slice(0, 8)} · ${posSize.toFixed(4)} SOL\n` +
+        `├ Dip: ${(signal.dipPct * 100).toFixed(0)}% from grad · Recovery: +${(signal.recoveryPct * 100).toFixed(0)}%\n` +
+        `├ MCap: $${signal.mcap.toLocaleString()} · Liq: $${signal.liquidity.toLocaleString()}\n` +
+        `├ Buy ratio: ${(signal.buyRatio * 100).toFixed(0)}% · ${signal.timeSinceGradMins.toFixed(0)}min post-grad\n` +
+        `├ TP +${(cfg.profitTarget * 100).toFixed(0)}% · SL ${(cfg.stopLoss * 100).toFixed(0)}% · Trail ${(cfg.trailingStopPct * 100).toFixed(0)}%\n` +
+        (pos.entry_tx ? `├ TX: ${pos.entry_tx.slice(0, 16)}...\n` : '') +
+        `└ <a href="https://dexscreener.com/solana/${mint}">dex</a> · <a href="https://pump.fun/coin/${mint}">pump.fun</a> · ${mode}`,
+        { parse_mode: 'HTML' },
+      );
+
+    } catch (err) {
+      logger.error({ err, token: signal.mint?.slice(0, 8) }, 'Error in graduation signal handler');
+    }
+  }
+
   /** Handle sell signals from alpha wallets */
   private async handleSellSignal(signal: ParsedSignal): Promise<void> {
     const openPositions = this.getOpenPositions();
@@ -1653,71 +2007,96 @@ class RossyBotV2 {
     const tierCfg = getTierConfig(this.capitalManager.tier);
     const maxSlots = tierCfg.walletsMonitored;
 
-    // Find zero-signal wallets currently holding WS slots (exclude first 10 min after startup)
-    const deadWeight: string[] = [];
+    // Get noise stats from the transaction parser — wallets producing tons of TXs but no signals
+    const noiseStats = this.txParser.getWalletNoiseStats();
+    const noiseMap = new Map(noiseStats.map((n) => [n.wallet, n]));
+
+    // Find low-quality wallets: quality = passed*2 + avgScore (normalized) - noisePenalty
+    const deadWeight: { addr: string; quality: number }[] = [];
     for (const addr of this.walletAddresses) {
-      const count = this.wsSignalCounts.get(addr) || 0;
-      if (count < RossyBotV2.WS_MIN_SIGNALS_FOR_KEEP) {
-        deadWeight.push(addr);
+      const sq = this.wsSignalQuality.get(addr);
+      let quality = sq
+        ? sq.passed * 2 + (sq.count > 0 ? sq.totalScore / sq.count / 20 : 0) // normalize score (0-100) to 0-5 range
+        : 0; // no signals at all = 0 quality
+
+      // Noise penalty: wallets with terrible skip:signal ratios are burning WS slots
+      // Real alpha wallets have >5% signal rate; anything <1% is pure noise
+      const noise = noiseMap.get(addr.slice(0, 8));
+      if (noise && noise.skipped > 500 && noise.ratio < 0.005) {
+        quality = -10; // Force evict — catastrophically noisy (e.g. 10K skips, <0.5% signal)
+      } else if (noise && noise.skipped > 200 && noise.ratio < 0.01) {
+        quality -= 3; // Heavy penalty — very noisy, almost no signal
+      } else if (noise && noise.skipped > 100 && noise.ratio < 0.03) {
+        quality -= 1; // Moderate penalty
+      }
+
+      if (quality < RossyBotV2.WS_MIN_QUALITY_FOR_KEEP) {
+        deadWeight.push({ addr, quality });
       }
     }
 
     if (deadWeight.length === 0) {
-      // Reset counters for next window
-      this.wsSignalCounts.clear();
+      this.wsSignalQuality.clear();
       return;
     }
+    // Sort by quality ascending — evict worst first
+    deadWeight.sort((a, b) => a.quality - b.quality);
 
     // Get current ranked wallets to find better candidates
     const isPfOnly = this.capitalManager.capital < config.minCapitalForStandardTrading;
     const rankedWallets = await this.walletDiscovery.getActiveWallets(isPfOnly);
 
     // Find unsubscribed wallets that rank higher than dead weight
-    const subscribedSet = new Set(this.walletAddresses);
-    const candidates = rankedWallets.filter((w) => !subscribedSet.has(w));
+    const candidates = rankedWallets.filter((w) => !this.walletAddresses.has(w));
 
     if (candidates.length === 0) {
-      this.wsSignalCounts.clear();
+      this.wsSignalQuality.clear();
       return;
     }
 
-    // Evict up to half the dead-weight wallets per rotation (gradual, not aggressive)
-    const maxEvictions = Math.max(1, Math.floor(deadWeight.length / 2));
+    // Cap at 5 evictions per cycle — prevents full-roster churn and signal gaps
+    const maxEvictions = Math.min(5, Math.max(1, Math.floor(deadWeight.length / 2)));
     const toEvict = deadWeight.slice(0, maxEvictions);
     const toAdd = candidates.slice(0, toEvict.length);
 
     for (let i = 0; i < toEvict.length && i < toAdd.length; i++) {
-      const evictAddr = toEvict[i];
+      const evictAddr = toEvict[i].addr;
       const addAddr = toAdd[i];
 
       // Remove old wallet from WS
-      this.walletAddresses = this.walletAddresses.filter((a) => a !== evictAddr);
+      this.walletAddresses.remove(evictAddr);
       this.txParser.removeWallet(evictAddr);
       this.wsManager.removeWallet(evictAddr);
 
       // Add new wallet to WS
-      this.walletAddresses.push(addAddr);
+      this.walletAddresses.add(addAddr);
       this.txParser.addWallet(addAddr);
       await this.wsManager.addWallet(addAddr);
 
+      const sq = this.wsSignalQuality.get(evictAddr);
+      const noise = noiseMap.get(evictAddr.slice(0, 8));
       logger.info({
         evicted: evictAddr.slice(0, 8),
         added: addAddr.slice(0, 8),
-        signals: this.wsSignalCounts.get(evictAddr) || 0,
-      }, 'WS slot rotated — evicted zero-signal wallet');
+        signals: sq?.count || 0,
+        passed: sq?.passed || 0,
+        quality: toEvict[i].quality.toFixed(1),
+        skippedTxs: noise?.skipped || 0,
+      }, 'WS slot rotated — low-quality wallet evicted');
     }
 
     if (toEvict.length > 0) {
       logger.info({
         evicted: toEvict.length,
         added: toAdd.length,
-        totalSlots: this.walletAddresses.length,
+        totalSlots: this.walletAddresses.size,
         maxSlots,
+        deadWeightRemaining: deadWeight.length - toEvict.length,
       }, 'WS rotation complete');
     }
 
-    // Reset counters for next window
-    this.wsSignalCounts.clear();
+    // Reset quality tracking for next window
+    this.wsSignalQuality.clear();
   }
 
   private scheduleDailySummary(): void {
@@ -1762,20 +2141,35 @@ class RossyBotV2 {
       const walletRows = await (await import('./db/database.js')).getMany<{
         address: string; label: string; tier: string; helius_subscribed: boolean;
         source: string; nansen_roi_percent: number; nansen_pnl_usd: number;
+        nansen_trade_count: number; avg_buy_size_sol: number;
         our_total_trades: number; our_win_rate: number; our_avg_pnl_percent: number;
+        our_avg_hold_time_mins: number; short_term_alpha_score: number;
         consecutive_losses: number; last_active_at: string | null;
-      }>(`SELECT address, label, tier, helius_subscribed, source,
-              COALESCE(nansen_roi_percent, 0) as nansen_roi_percent,
-              COALESCE(nansen_pnl_usd, 0) as nansen_pnl_usd,
-              COALESCE(our_total_trades, 0) as our_total_trades,
-              COALESCE(our_win_rate, 0) as our_win_rate,
-              COALESCE(our_avg_pnl_percent, 0) as our_avg_pnl_percent,
-              COALESCE(consecutive_losses, 0) as consecutive_losses,
-              last_active_at
-         FROM alpha_wallets WHERE active = TRUE
+        pumpfun_only: boolean; dex_signals: number;
+      }>(`SELECT w.address, w.label, w.tier, w.helius_subscribed, w.source,
+              COALESCE(w.nansen_roi_percent, 0) as nansen_roi_percent,
+              COALESCE(w.nansen_pnl_usd, 0) as nansen_pnl_usd,
+              COALESCE(w.nansen_trade_count, 0) as nansen_trade_count,
+              COALESCE(w.avg_buy_size_sol, 0) as avg_buy_size_sol,
+              COALESCE(w.our_total_trades, 0) as our_total_trades,
+              COALESCE(w.our_win_rate, 0) as our_win_rate,
+              COALESCE(w.our_avg_pnl_percent, 0) as our_avg_pnl_percent,
+              COALESCE(w.our_avg_hold_time_mins, 0) as our_avg_hold_time_mins,
+              COALESCE(w.short_term_alpha_score, 0) as short_term_alpha_score,
+              COALESCE(w.consecutive_losses, 0) as consecutive_losses,
+              COALESCE(w.pumpfun_only, FALSE) as pumpfun_only,
+              w.last_active_at,
+              COALESCE(d.dex_count, 0) as dex_signals
+         FROM alpha_wallets w
+         LEFT JOIN (
+           SELECT unnest(signal_wallets) as wallet, COUNT(*) as dex_count
+           FROM shadow_positions GROUP BY wallet
+         ) d ON d.wallet = w.address
+         WHERE w.active = TRUE
          ORDER BY
-           CASE WHEN source = 'NANSEN_SEED' THEN 0 ELSE 1 END ASC,
-           tier ASC, nansen_roi_percent DESC`);
+           CASE WHEN COALESCE(w.pumpfun_only, FALSE) = FALSE THEN 0 ELSE 1 END,
+           COALESCE(d.dex_count, 0) DESC,
+           w.nansen_pnl_usd DESC`);
 
       const today = new Date().toISOString().split('T')[0];
       const signalRow = await (await import('./db/database.js')).getOne<{ count: string }>(
@@ -1795,6 +2189,331 @@ class RossyBotV2 {
         tokens_screened: number; wallets_added: number;
       }>(`SELECT tokens_screened, wallets_added FROM wallet_discovery_log ORDER BY run_at DESC LIMIT 1`);
 
+      // --- Performance aggregate queries (run in parallel for speed) ---
+      const db = await import('./db/database.js');
+      const [
+        pfOverall, pfExits, pfCurveZones, pfEntryTypes,
+        signalFunnel, signalRejections,
+        topWallets, bottomWallets,
+        recentTrend, tierHistory,
+        pfGraduation, pfHoldBuckets, pfHourly, pfEdge,
+      ] = await Promise.all([
+        // 1. Pump.fun overall performance
+        db.getOne<Record<string, unknown>>(
+          `SELECT COUNT(*) as total,
+                  COUNT(*) FILTER (WHERE pnl_percent > 0) as wins,
+                  COALESCE(AVG(pnl_percent), 0) as avg_pnl,
+                  COALESCE(AVG(pnl_percent) FILTER (WHERE pnl_percent > 0), 0) as avg_win,
+                  COALESCE(AVG(pnl_percent) FILTER (WHERE pnl_percent <= 0), 0) as avg_loss,
+                  COALESCE(SUM(net_pnl_sol), 0) as net_sol,
+                  COALESCE(SUM(fees_paid_sol), 0) as total_fees,
+                  COALESCE(AVG(hold_time_mins), 0) as avg_hold,
+                  COALESCE(AVG(EXTRACT(EPOCH FROM (entry_time - alpha_buy_time))), 0) as avg_lag,
+                  COALESCE(SUM(net_pnl_sol) FILTER (WHERE pnl_percent > 0), 0) as gross_wins,
+                  COALESCE(ABS(SUM(net_pnl_sol) FILTER (WHERE pnl_percent <= 0)), 0) as gross_losses
+           FROM pumpfun_positions WHERE status = 'CLOSED'`,
+        ),
+        // 2. Exit reason breakdown
+        db.getMany<Record<string, unknown>>(
+          `SELECT exit_reason,
+                  COUNT(*) as total,
+                  COUNT(*) FILTER (WHERE pnl_percent > 0) as wins,
+                  COALESCE(AVG(pnl_percent), 0) as avg_pnl,
+                  COALESCE(SUM(net_pnl_sol), 0) as net_sol
+           FROM pumpfun_positions WHERE status = 'CLOSED'
+           GROUP BY exit_reason ORDER BY total DESC`,
+        ),
+        // 3. Curve entry zone performance
+        db.getMany<Record<string, unknown>>(
+          `SELECT
+             CASE
+               WHEN curve_fill_pct_at_entry < 0.20 THEN '0-20%'
+               WHEN curve_fill_pct_at_entry < 0.30 THEN '20-30%'
+               WHEN curve_fill_pct_at_entry < 0.35 THEN '30-35%'
+               WHEN curve_fill_pct_at_entry < 0.40 THEN '35-40%'
+               ELSE '40%+'
+             END as zone,
+             COUNT(*) as total,
+             COUNT(*) FILTER (WHERE pnl_percent > 0) as wins,
+             COALESCE(AVG(pnl_percent), 0) as avg_pnl,
+             COALESCE(SUM(net_pnl_sol), 0) as net_sol
+           FROM pumpfun_positions WHERE status = 'CLOSED' AND curve_fill_pct_at_entry > 0
+           GROUP BY zone ORDER BY zone`,
+        ),
+        // 4. Entry type breakdown (DIRECT vs DEFERRED vs MOVER)
+        db.getMany<Record<string, unknown>>(
+          `SELECT COALESCE(entry_type, 'DIRECT') as entry_type,
+                  COUNT(*) as total,
+                  COUNT(*) FILTER (WHERE pnl_percent > 0) as wins,
+                  COALESCE(AVG(pnl_percent), 0) as avg_pnl,
+                  COALESCE(SUM(net_pnl_sol), 0) as net_sol
+           FROM pumpfun_positions WHERE status = 'CLOSED'
+           GROUP BY entry_type ORDER BY total DESC`,
+        ),
+        // 5. Signal funnel
+        db.getOne<Record<string, unknown>>(
+          `SELECT
+             COUNT(*) as total,
+             COUNT(*) FILTER (WHERE action_taken = 'EXECUTED') as executed,
+             COUNT(*) FILTER (WHERE action_taken = 'SKIPPED_VALIDATION') as skipped_validation,
+             COUNT(*) FILTER (WHERE action_taken = 'SKIPPED_MAX_POSITIONS') as skipped_max_pos,
+             COUNT(*) FILTER (WHERE action_taken = 'SKIPPED_DAILY_LIMIT') as skipped_daily
+           FROM signal_events`,
+        ),
+        // 6. Rejection reasons
+        db.getMany<Record<string, unknown>>(
+          `SELECT validation_result, COUNT(*) as total
+           FROM signal_events WHERE validation_result != 'PASSED'
+           GROUP BY validation_result ORDER BY total DESC LIMIT 5`,
+        ),
+        // 7. Top 5 wallets by SOL (combined pump.fun + standard DEX)
+        db.getMany<Record<string, unknown>>(
+          `WITH combined AS (
+             SELECT signal_wallets[1] as wallet, net_pnl_sol, pnl_percent, 'PF' as src
+             FROM pumpfun_positions WHERE status = 'CLOSED'
+             UNION ALL
+             SELECT signal_wallets[1] as wallet, pnl_percent * simulated_entry_sol as net_pnl_sol, pnl_percent, 'DEX' as src
+             FROM shadow_positions WHERE status = 'CLOSED'
+           )
+           SELECT
+             COALESCE(w.label, c.wallet) as label,
+             COUNT(*) as trades,
+             COUNT(*) FILTER (WHERE c.pnl_percent > 0) as wins,
+             COALESCE(SUM(c.net_pnl_sol), 0) as net_sol,
+             COALESCE(AVG(c.pnl_percent), 0) as avg_pnl,
+             COUNT(*) FILTER (WHERE c.src = 'DEX') as dex_trades
+           FROM combined c
+           LEFT JOIN alpha_wallets w ON w.address = c.wallet
+           GROUP BY COALESCE(w.label, c.wallet)
+           HAVING COUNT(*) >= 2
+           ORDER BY net_sol DESC LIMIT 5`,
+        ),
+        // 8. Bottom 5 wallets by SOL (combined pump.fun + standard DEX)
+        db.getMany<Record<string, unknown>>(
+          `WITH combined AS (
+             SELECT signal_wallets[1] as wallet, net_pnl_sol, pnl_percent, 'PF' as src
+             FROM pumpfun_positions WHERE status = 'CLOSED'
+             UNION ALL
+             SELECT signal_wallets[1] as wallet, pnl_percent * simulated_entry_sol as net_pnl_sol, pnl_percent, 'DEX' as src
+             FROM shadow_positions WHERE status = 'CLOSED'
+           )
+           SELECT
+             COALESCE(w.label, c.wallet) as label,
+             COUNT(*) as trades,
+             COUNT(*) FILTER (WHERE c.pnl_percent > 0) as wins,
+             COALESCE(SUM(c.net_pnl_sol), 0) as net_sol,
+             COALESCE(AVG(c.pnl_percent), 0) as avg_pnl,
+             COUNT(*) FILTER (WHERE c.src = 'DEX') as dex_trades
+           FROM combined c
+           LEFT JOIN alpha_wallets w ON w.address = c.wallet
+           GROUP BY COALESCE(w.label, c.wallet)
+           HAVING COUNT(*) >= 2
+           ORDER BY net_sol ASC LIMIT 5`,
+        ),
+        // 9. Recent 7d vs prior 7d trend
+        db.getOne<Record<string, unknown>>(
+          `SELECT
+             COUNT(*) FILTER (WHERE closed_at > NOW() - INTERVAL '7 days') as recent_trades,
+             COUNT(*) FILTER (WHERE pnl_percent > 0 AND closed_at > NOW() - INTERVAL '7 days') as recent_wins,
+             COALESCE(SUM(net_pnl_sol) FILTER (WHERE closed_at > NOW() - INTERVAL '7 days'), 0) as recent_sol,
+             COUNT(*) FILTER (WHERE closed_at BETWEEN NOW() - INTERVAL '14 days' AND NOW() - INTERVAL '7 days') as prior_trades,
+             COUNT(*) FILTER (WHERE pnl_percent > 0 AND closed_at BETWEEN NOW() - INTERVAL '14 days' AND NOW() - INTERVAL '7 days') as prior_wins,
+             COALESCE(SUM(net_pnl_sol) FILTER (WHERE closed_at BETWEEN NOW() - INTERVAL '14 days' AND NOW() - INTERVAL '7 days'), 0) as prior_sol
+           FROM pumpfun_positions WHERE status = 'CLOSED'`,
+        ),
+        // 10. Capital tier change history
+        db.getMany<Record<string, unknown>>(
+          `SELECT old_tier, new_tier, capital_at_change, changed_at
+           FROM capital_tier_changes ORDER BY changed_at DESC LIMIT 3`,
+        ),
+        // 11. Graduation funnel — on-curve vs graduated outcomes
+        db.getOne<Record<string, unknown>>(
+          `SELECT
+             COUNT(*) as total,
+             COUNT(*) FILTER (WHERE graduated = TRUE) as graduated,
+             COUNT(*) FILTER (WHERE graduated = FALSE AND status = 'CLOSED') as curve_exits,
+             COUNT(*) FILTER (WHERE graduated = FALSE AND pnl_percent > 0) as curve_wins,
+             COALESCE(SUM(net_pnl_sol) FILTER (WHERE graduated = FALSE), 0) as curve_sol,
+             COUNT(*) FILTER (WHERE graduated = TRUE AND pnl_percent > 0) as grad_wins,
+             COALESCE(SUM(net_pnl_sol) FILTER (WHERE graduated = TRUE), 0) as grad_sol,
+             COALESCE(AVG(pnl_percent) FILTER (WHERE graduated = FALSE), 0) as curve_avg_pnl,
+             COALESCE(AVG(pnl_percent) FILTER (WHERE graduated = TRUE), 0) as grad_avg_pnl
+           FROM pumpfun_positions WHERE status = 'CLOSED'`,
+        ),
+        // 12. Hold time buckets
+        db.getMany<Record<string, unknown>>(
+          `SELECT
+             CASE
+               WHEN hold_time_mins < 2 THEN '<2m'
+               WHEN hold_time_mins < 5 THEN '2-5m'
+               WHEN hold_time_mins < 15 THEN '5-15m'
+               WHEN hold_time_mins < 60 THEN '15-60m'
+               ELSE '60m+'
+             END as bucket,
+             COUNT(*) as total,
+             COUNT(*) FILTER (WHERE pnl_percent > 0) as wins,
+             COALESCE(AVG(pnl_percent), 0) as avg_pnl,
+             COALESCE(SUM(net_pnl_sol), 0) as net_sol
+           FROM pumpfun_positions WHERE status = 'CLOSED' AND hold_time_mins IS NOT NULL
+           GROUP BY bucket
+           ORDER BY MIN(hold_time_mins)`,
+        ),
+        // 13. Hourly performance (6h blocks)
+        db.getMany<Record<string, unknown>>(
+          `SELECT
+             CASE
+               WHEN EXTRACT(HOUR FROM entry_time) BETWEEN 0 AND 5 THEN '00-06'
+               WHEN EXTRACT(HOUR FROM entry_time) BETWEEN 6 AND 11 THEN '06-12'
+               WHEN EXTRACT(HOUR FROM entry_time) BETWEEN 12 AND 17 THEN '12-18'
+               ELSE '18-24'
+             END as block,
+             COUNT(*) as total,
+             COUNT(*) FILTER (WHERE pnl_percent > 0) as wins,
+             COALESCE(SUM(net_pnl_sol), 0) as net_sol,
+             COALESCE(AVG(pnl_percent), 0) as avg_pnl
+           FROM pumpfun_positions WHERE status = 'CLOSED'
+           GROUP BY block ORDER BY block`,
+        ),
+        // 14. Edge metrics — largest win/loss, streaks, fee drag
+        db.getOne<Record<string, unknown>>(
+          `SELECT
+             MAX(net_pnl_sol) as best_trade,
+             MIN(net_pnl_sol) as worst_trade,
+             MAX(pnl_percent) as best_pct,
+             MIN(pnl_percent) as worst_pct,
+             COALESCE(SUM(fees_paid_sol), 0) as total_fees,
+             COALESCE(SUM(simulated_entry_sol), 0) as total_deployed,
+             (SELECT COUNT(*) FROM (
+               SELECT pnl_percent > 0 as is_win,
+                      ROW_NUMBER() OVER (ORDER BY closed_at DESC) as rn
+               FROM pumpfun_positions WHERE status = 'CLOSED' ORDER BY closed_at DESC LIMIT 20
+             ) sub WHERE is_win = (SELECT pnl_percent > 0 FROM pumpfun_positions WHERE status = 'CLOSED' ORDER BY closed_at DESC LIMIT 1)
+               AND rn <= 20
+             ) as current_streak,
+             (SELECT pnl_percent > 0 FROM pumpfun_positions WHERE status = 'CLOSED' ORDER BY closed_at DESC LIMIT 1) as streak_winning
+           FROM pumpfun_positions WHERE status = 'CLOSED'`,
+        ),
+      ]);
+
+      // Build performance data object
+      const pfTotal = Number(pfOverall?.total || 0);
+      const pfWins = Number(pfOverall?.wins || 0);
+      const grossWins = Number(pfOverall?.gross_wins || 0);
+      const grossLosses = Number(pfOverall?.gross_losses || 0);
+
+      const performance = {
+        pumpFun: {
+          total: pfTotal,
+          wins: pfWins,
+          wr: pfTotal > 0 ? pfWins / pfTotal : 0,
+          avgWinPct: Number(pfOverall?.avg_win || 0),
+          avgLossPct: Number(pfOverall?.avg_loss || 0),
+          netSol: Number(pfOverall?.net_sol || 0),
+          totalFees: Number(pfOverall?.total_fees || 0),
+          avgHoldMins: Number(pfOverall?.avg_hold || 0),
+          avgLagSecs: Number(pfOverall?.avg_lag || 0),
+          profitFactor: grossLosses > 0 ? grossWins / grossLosses : 0,
+          expectancySol: pfTotal > 0 ? Number(pfOverall?.net_sol || 0) / pfTotal : 0,
+        },
+        exitReasons: pfExits.map((r) => ({
+          reason: String(r.exit_reason || 'Unknown'),
+          total: Number(r.total),
+          wins: Number(r.wins),
+          avgPnl: Number(r.avg_pnl),
+          netSol: Number(r.net_sol),
+        })),
+        curveZones: pfCurveZones.map((r) => ({
+          zone: String(r.zone),
+          total: Number(r.total),
+          wins: Number(r.wins),
+          avgPnl: Number(r.avg_pnl),
+          netSol: Number(r.net_sol),
+        })),
+        entryTypes: pfEntryTypes.map((r) => ({
+          type: String(r.entry_type),
+          total: Number(r.total),
+          wins: Number(r.wins),
+          avgPnl: Number(r.avg_pnl),
+          netSol: Number(r.net_sol),
+        })),
+        signalFunnel: {
+          total: Number(signalFunnel?.total || 0),
+          executed: Number(signalFunnel?.executed || 0),
+          skippedValidation: Number(signalFunnel?.skipped_validation || 0),
+          skippedMaxPos: Number(signalFunnel?.skipped_max_pos || 0),
+          skippedDaily: Number(signalFunnel?.skipped_daily || 0),
+        },
+        rejections: signalRejections.map((r) => ({
+          reason: String(r.validation_result).replace('FAILED_', ''),
+          count: Number(r.total),
+        })),
+        topWallets: topWallets.map((w) => ({
+          label: String(w.label || '').slice(0, 12),
+          trades: Number(w.trades),
+          wins: Number(w.wins),
+          netSol: Number(w.net_sol),
+          avgPnl: Number(w.avg_pnl),
+          dexTrades: Number(w.dex_trades || 0),
+        })),
+        bottomWallets: bottomWallets.map((w) => ({
+          label: String(w.label || '').slice(0, 12),
+          trades: Number(w.trades),
+          wins: Number(w.wins),
+          netSol: Number(w.net_sol),
+          avgPnl: Number(w.avg_pnl),
+          dexTrades: Number(w.dex_trades || 0),
+        })),
+        trend: {
+          recentTrades: Number(recentTrend?.recent_trades || 0),
+          recentWins: Number(recentTrend?.recent_wins || 0),
+          recentSol: Number(recentTrend?.recent_sol || 0),
+          priorTrades: Number(recentTrend?.prior_trades || 0),
+          priorWins: Number(recentTrend?.prior_wins || 0),
+          priorSol: Number(recentTrend?.prior_sol || 0),
+        },
+        tierChanges: tierHistory.map((t) => ({
+          from: String(t.old_tier),
+          to: String(t.new_tier),
+          capital: Number(t.capital_at_change),
+          at: new Date(t.changed_at as string),
+        })),
+        graduation: {
+          total: Number(pfGraduation?.total || 0),
+          graduated: Number(pfGraduation?.graduated || 0),
+          curveExits: Number(pfGraduation?.curve_exits || 0),
+          curveWins: Number(pfGraduation?.curve_wins || 0),
+          curveSol: Number(pfGraduation?.curve_sol || 0),
+          curveAvgPnl: Number(pfGraduation?.curve_avg_pnl || 0),
+          gradWins: Number(pfGraduation?.grad_wins || 0),
+          gradSol: Number(pfGraduation?.grad_sol || 0),
+          gradAvgPnl: Number(pfGraduation?.grad_avg_pnl || 0),
+        },
+        holdBuckets: pfHoldBuckets.map((r) => ({
+          bucket: String(r.bucket),
+          total: Number(r.total),
+          wins: Number(r.wins),
+          avgPnl: Number(r.avg_pnl),
+          netSol: Number(r.net_sol),
+        })),
+        hourly: pfHourly.map((r) => ({
+          block: String(r.block),
+          total: Number(r.total),
+          wins: Number(r.wins),
+          netSol: Number(r.net_sol),
+          avgPnl: Number(r.avg_pnl),
+        })),
+        edge: {
+          bestTrade: Number(pfEdge?.best_trade || 0),
+          worstTrade: Number(pfEdge?.worst_trade || 0),
+          bestPct: Number(pfEdge?.best_pct || 0),
+          worstPct: Number(pfEdge?.worst_pct || 0),
+          totalFees: Number(pfEdge?.total_fees || 0),
+          totalDeployed: Number(pfEdge?.total_deployed || 0),
+          currentStreak: Number(pfEdge?.current_streak || 0),
+          streakWinning: !!pfEdge?.streak_winning,
+        },
+      };
+
       const tierCfg = this.capitalManager.tierConfig;
       const wsStatus = this.wsManager.getStatus();
 
@@ -1809,17 +2528,23 @@ class RossyBotV2 {
           address: w.address,
           label: w.label,
           tier: w.tier,
-          subscribed: this.walletAddresses.includes(w.address),
+          subscribed: this.walletAddresses.has(w.address),
           nansenRoi: Number(w.nansen_roi_percent) || 0,
           nansenPnl: Number(w.nansen_pnl_usd) || 0,
+          nansenTrades: Number(w.nansen_trade_count) || 0,
+          avgBuySizeSol: Number(w.avg_buy_size_sol) || 0,
           ourTrades: Number(w.our_total_trades) || 0,
           ourWinRate: Number(w.our_win_rate) || 0,
           ourAvgPnl: Number(w.our_avg_pnl_percent) || 0,
+          ourAvgHoldMins: Number(w.our_avg_hold_time_mins) || 0,
+          alphaScore: Number(w.short_term_alpha_score) || 0,
           consecutiveLosses: Number(w.consecutive_losses) || 0,
+          pumpfunOnly: !!w.pumpfun_only,
+          dexSignals: Number(w.dex_signals) || 0,
           source: w.source,
-          lastActiveAgo: w.last_active_at
-            ? `${Math.round((Date.now() - new Date(w.last_active_at).getTime()) / 3600000)}h`
-            : undefined,
+          lastActiveHours: w.last_active_at
+            ? Math.round((Date.now() - new Date(w.last_active_at).getTime()) / 3600000)
+            : null,
         })),
         wsConnected: wsStatus.connected,
         wsFallbackActive: wsStatus.fallbackMode,
@@ -1854,6 +2579,17 @@ class RossyBotV2 {
         tradesAllTime: parseInt(tradeRow?.count || '0'),
         discoveryTokens: discoveryRow?.tokens_screened || 0,
         discoveryWalletsAdded: discoveryRow?.wallets_added || 0,
+        performance,
+        // Active config for tuning context
+        activeConfig: {
+          minSignalScore: tierCfg.minSignalScore,
+          positionSizePct: tierCfg.positionSizePct,
+          curveEntryMin: config.pumpFun.curveEntryMin,
+          curveEntryMax: config.pumpFun.curveEntryMax,
+          curveVelocityMin: config.pumpFun.curveVelocityMin,
+          deferredEntryEnabled: config.pumpFun.deferredEntryEnabled,
+          deferredEntryMaxWaitMs: config.pumpFun.deferredEntryMaxWaitMs,
+        },
       });
     } catch (err) {
       console.error('Failed to send startup diagnostics:', err);

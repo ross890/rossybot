@@ -2,9 +2,6 @@ import { logger } from '../../utils/logger.js';
 import { query, getOne, testConnection } from '../../db/database.js';
 import {
   fetchGraduatedTokens24h,
-  fetchGraduatedViaHelius,
-  parseGraduationTxs,
-  enrichTokenWithDex,
   type GraduatedToken,
 } from './graduated-fetcher.js';
 import { findEarlyBuyersEnhanced, type EarlyBuyer } from './early-buyer-analyzer.js';
@@ -24,14 +21,88 @@ import { sendDailyReport } from './report-generator.js';
 /** Minimum confluence score to consider a wallet a "new discovery" */
 const NEW_DISCOVERY_MIN_SCORE = 25;
 
+/** Ensure market analyzer tables exist (idempotent) */
+let tablesEnsured = false;
+async function ensureTables(): Promise<void> {
+  if (tablesEnsured) return;
+  await query(`CREATE EXTENSION IF NOT EXISTS "uuid-ossp"`);
+  await query(`
+    CREATE TABLE IF NOT EXISTS ma_graduated_tokens (
+      id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+      mint TEXT NOT NULL, symbol TEXT, name TEXT,
+      pair_address TEXT, dex_id TEXT, graduated_at TIMESTAMPTZ, created_at_estimate TIMESTAMPTZ,
+      time_to_graduate_mins INT,
+      mcap_usd DECIMAL DEFAULT 0, liquidity_usd DECIMAL DEFAULT 0, volume_24h_usd DECIMAL DEFAULT 0, price_usd DECIMAL DEFAULT 0,
+      txns_24h_buys INT DEFAULT 0, txns_24h_sells INT DEFAULT 0, buy_sell_ratio DECIMAL DEFAULT 0,
+      price_change_h1 DECIMAL DEFAULT 0, price_change_h6 DECIMAL DEFAULT 0, price_change_h24 DECIMAL DEFAULT 0,
+      total_early_buyers INT DEFAULT 0, known_alpha_buyers INT DEFAULT 0, known_alpha_addresses TEXT[] DEFAULT '{}',
+      analysis_date DATE NOT NULL, analyzed_at TIMESTAMPTZ DEFAULT NOW(),
+      UNIQUE(mint, analysis_date)
+    )`);
+  await query(`
+    CREATE TABLE IF NOT EXISTS ma_early_buyers (
+      id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+      graduated_token_id UUID REFERENCES ma_graduated_tokens(id) ON DELETE CASCADE,
+      mint TEXT NOT NULL, wallet_address TEXT NOT NULL, tx_signature TEXT,
+      buy_time TIMESTAMPTZ, estimated_sol_spent DECIMAL DEFAULT 0,
+      is_known_alpha BOOLEAN DEFAULT FALSE, alpha_wallet_label TEXT,
+      analysis_date DATE NOT NULL,
+      UNIQUE(mint, wallet_address, analysis_date)
+    )`);
+  await query(`
+    CREATE TABLE IF NOT EXISTS ma_wallet_confluence (
+      id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+      wallet_address TEXT NOT NULL, analysis_date DATE NOT NULL,
+      graduated_tokens_bought INT DEFAULT 0, total_graduated_tokens_analyzed INT DEFAULT 0, hit_rate DECIMAL DEFAULT 0,
+      avg_buy_time_before_grad_mins DECIMAL DEFAULT 0,
+      token_mints TEXT[] DEFAULT '{}',
+      is_tracked_alpha BOOLEAN DEFAULT FALSE, alpha_wallet_label TEXT,
+      confluence_score DECIMAL DEFAULT 0,
+      UNIQUE(wallet_address, analysis_date)
+    )`);
+  await query(`
+    CREATE TABLE IF NOT EXISTS ma_daily_summary (
+      analysis_date DATE PRIMARY KEY, started_at TIMESTAMPTZ DEFAULT NOW(), completed_at TIMESTAMPTZ,
+      total_graduated INT DEFAULT 0, tokens_analyzed INT DEFAULT 0, tokens_failed INT DEFAULT 0,
+      avg_time_to_graduate_mins DECIMAL DEFAULT 0, median_mcap_at_graduation DECIMAL DEFAULT 0,
+      avg_liquidity_usd DECIMAL DEFAULT 0, avg_volume_24h DECIMAL DEFAULT 0,
+      total_unique_early_buyers INT DEFAULT 0, known_alpha_overlap_count INT DEFAULT 0, known_alpha_overlap_pct DECIMAL DEFAULT 0,
+      new_high_confluence_wallets INT DEFAULT 0,
+      top_confluence_wallets JSONB DEFAULT '[]', graduation_hour_distribution JSONB DEFAULT '{}',
+      avg_buy_sell_ratio DECIMAL DEFAULT 0, duration_seconds INT DEFAULT 0
+    )`);
+  await query(`CREATE INDEX IF NOT EXISTS idx_ma_grad_tokens_date ON ma_graduated_tokens(analysis_date)`);
+  await query(`CREATE INDEX IF NOT EXISTS idx_ma_grad_tokens_mint ON ma_graduated_tokens(mint)`);
+  await query(`CREATE INDEX IF NOT EXISTS idx_ma_early_buyers_wallet ON ma_early_buyers(wallet_address)`);
+  await query(`CREATE INDEX IF NOT EXISTS idx_ma_early_buyers_date ON ma_early_buyers(analysis_date)`);
+  await query(`CREATE INDEX IF NOT EXISTS idx_ma_confluence_wallet ON ma_wallet_confluence(wallet_address)`);
+  await query(`CREATE INDEX IF NOT EXISTS idx_ma_confluence_date ON ma_wallet_confluence(analysis_date)`);
+  await query(`CREATE INDEX IF NOT EXISTS idx_ma_confluence_score ON ma_wallet_confluence(confluence_score DESC)`);
+  tablesEnsured = true;
+  logger.info('Market analyzer tables ensured');
+}
+
 /**
  * Run the full daily market analysis pipeline.
  *
  * This is the main entry point — designed to run once per day (end of day UTC).
  * It analyzes EVERY graduated pump.fun token from the last 24 hours.
  */
-export async function runDailyAnalysis(opts?: { force?: boolean }): Promise<void> {
+export interface AnalysisResult {
+  status: 'skipped' | 'empty' | 'complete';
+  message: string;
+  totalGraduated: number;
+  tokensAnalyzed: number;
+  newDiscoveries: number;
+  durationSeconds: number;
+}
+
+export async function runDailyAnalysis(opts?: { force?: boolean }): Promise<AnalysisResult> {
   const startTime = Date.now();
+
+  // Auto-create tables on first run
+  await ensureTables();
+
   const analysisDate = new Date().toISOString().split('T')[0]; // YYYY-MM-DD
 
   logger.info({ analysisDate }, 'Starting daily pump.fun market analysis');
@@ -43,7 +114,7 @@ export async function runDailyAnalysis(opts?: { force?: boolean }): Promise<void
   );
   if (existing && !opts?.force) {
     logger.warn({ analysisDate }, 'Analysis already run today — skipping (use force to re-run)');
-    return;
+    return { status: 'skipped', message: 'Already run today — use /market force to re-run', totalGraduated: 0, tokensAnalyzed: 0, newDiscoveries: 0, durationSeconds: 0 };
   }
   if (existing && opts?.force) {
     // Delete previous run so we can re-analyze
@@ -62,49 +133,19 @@ export async function runDailyAnalysis(opts?: { force?: boolean }): Promise<void
   );
 
   // ===== PHASE 1: Fetch graduated tokens =====
-  logger.info('Phase 1: Fetching graduated tokens...');
+  // Primary: Helius on-chain graduation sigs → enrich with DexScreener
+  // Secondary: DexScreener token-boosts for any missed
+  logger.info('Phase 1: Fetching graduated tokens (Helius + DexScreener)...');
 
-  let graduatedTokens: GraduatedToken[] = [];
-
-  // Strategy A: DexScreener search for pumpswap/raydium pairs
-  const dexTokens = await fetchGraduatedTokens24h();
-  for (const t of dexTokens) {
-    graduatedTokens.push(t);
-  }
-
-  // Strategy B: Helius on-chain graduation signatures
-  // This catches tokens DexScreener might miss
-  const gradSigs = await fetchGraduatedViaHelius();
-  if (gradSigs.length > 0) {
-    const heliusMints = await parseGraduationTxs(gradSigs.slice(0, 50));
-    const existingMints = new Set(graduatedTokens.map((t) => t.mint));
-
-    for (const mint of heliusMints) {
-      if (existingMints.has(mint)) continue;
-
-      const enriched = await enrichTokenWithDex(mint);
-      if (enriched) {
-        graduatedTokens.push(enriched);
-        existingMints.add(mint);
-      }
-    }
-  }
-
-  // Deduplicate by mint
-  const uniqueTokens = new Map<string, GraduatedToken>();
-  for (const t of graduatedTokens) {
-    if (!uniqueTokens.has(t.mint)) {
-      uniqueTokens.set(t.mint, t);
-    }
-  }
-  graduatedTokens = Array.from(uniqueTokens.values());
+  const graduatedTokens = await fetchGraduatedTokens24h();
 
   logger.info({ count: graduatedTokens.length }, 'Phase 1 complete: graduated tokens fetched');
 
   if (graduatedTokens.length === 0) {
     logger.warn('No graduated tokens found — ending analysis');
     await updateSummary(analysisDate, 0, 0, 0, startTime);
-    return;
+    const dur = Math.round((Date.now() - startTime) / 1000);
+    return { status: 'empty', message: 'No graduated tokens found in last 24h — Helius may be rate-limited or no tokens graduated', totalGraduated: 0, tokensAnalyzed: 0, newDiscoveries: 0, durationSeconds: dur };
   }
 
   // ===== PHASE 2: Save graduated tokens & analyze early buyers =====
@@ -294,6 +335,15 @@ export async function runDailyAnalysis(opts?: { force?: boolean }): Promise<void
     durationSeconds,
     newDiscoveries,
   }, 'Daily market analysis complete');
+
+  return {
+    status: 'complete',
+    message: `Analyzed ${tokensAnalyzed} graduated tokens, found ${newDiscoveries} new high-confluence wallets`,
+    totalGraduated: graduatedTokens.length,
+    tokensAnalyzed,
+    newDiscoveries,
+    durationSeconds,
+  };
 }
 
 async function updateSummary(

@@ -46,6 +46,7 @@ export enum ValidationResult {
   FAILED_MCAP = 'FAILED_MCAP',
   FAILED_AGE = 'FAILED_AGE',
   FAILED_WALLET_COUNT = 'FAILED_WALLET_COUNT',
+  NO_DEX_DATA = 'NO_DEX_DATA',
 }
 
 export enum SignalAction {
@@ -158,6 +159,10 @@ export interface Position {
   closed_at: Date | null;
   hold_time_mins: number | null;
   sell_retry_count: number;
+  /** Track momentum extensions per time-kill window index (window index → extension count) */
+  momentum_extensions: Map<number, number>;
+  /** How many times this token has been re-entered this session */
+  reentry_count: number;
 }
 
 export interface AlphaWalletExit {
@@ -211,6 +216,20 @@ export interface TierConfig {
   confluenceWindow: number; // minutes
   timeKills: { hours: number; minPnlPct: number }[];
   hardTimeHours: number;
+  /** Allow extending time kills when momentum is strong. Max extensions per window. */
+  momentumExtensionEnabled: boolean;
+  /** How many hours to extend each time kill window when momentum is positive */
+  momentumExtensionHours: number;
+  /** Max times a single time kill window can be extended */
+  momentumExtensionMaxPerWindow: number;
+  /** Minimum PnL to qualify for momentum extension (must be positive / near breakeven) */
+  momentumExtensionMinPnl: number;
+  /** Minutes after entry during which only hard kill fires (SL is suppressed). Protects against early volatility dips. */
+  stopLossGuardMins: number;
+  /** MCap threshold below which SL is widened (multiplied by stopLossWidenFactor). 0 = disabled. */
+  stopLossWidenMcapThreshold: number;
+  /** Factor to widen SL for micro-cap tokens (e.g. 1.5 = -20% becomes -30%). Only applies when mcap < threshold. */
+  stopLossWidenFactor: number;
   mcapMin: number;
   mcapMax: number;
   liquidityMin: number;
@@ -220,6 +239,14 @@ export interface TierConfig {
   volumeMultiplierMin: number;
   tokenMaxAgeDays: number | null;
   minSignalScore: number; // minimum score (0-100) to enter a trade
+  /** Allow re-entry into tokens previously closed in this session */
+  reentryEnabled: boolean;
+  /** Minimum cooldown in minutes after exit before re-entry is allowed */
+  reentryCooldownMins: number;
+  /** Maximum re-entries per token per session */
+  reentryMaxPerToken: number;
+  /** Position size multiplier for re-entries (e.g. 0.6 = 60% of normal size) */
+  reentrySizeMultiplier: number;
 }
 
 // --- Helius Types ---
@@ -388,6 +415,21 @@ export interface PumpFunConfig {
   slippageBps: number;
 }
 
+// --- Re-entry: metadata stored for blocked tokens ---
+
+export interface BlockedTokenMeta {
+  /** When the position was closed */
+  closedAt: number;
+  /** Final PnL when closed */
+  pnlPercent: number;
+  /** Reason for exit */
+  exitReason: string;
+  /** How many times this token has been re-entered this session */
+  reentryCount: number;
+  /** Whether this token is permanently blocked (hard block) */
+  hardBlocked: boolean;
+}
+
 // --- Common position view for Telegram/UI (works with both Shadow & Live) ---
 
 export interface PositionView {
@@ -434,4 +476,8 @@ export interface ShadowPosition {
   closed_at: Date | null;
   hold_time_mins: number | null;
   partial_exits: { time: Date; pct: number; price: number; reason: string }[];
+  /** Track momentum extensions per time-kill window index */
+  momentum_extensions: Map<number, number>;
+  /** How many times this token has been re-entered this session */
+  reentry_count: number;
 }

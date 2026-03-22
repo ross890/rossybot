@@ -165,14 +165,12 @@ export class HeliusWebSocketManager extends EventEmitter {
         if (typeof msg.result === 'number') {
           this.activeSubscriptionIds.push(msg.result);
         }
-        // Only log milestone confirmations to avoid spam with many wallets
-        if (this.activeSubscriptionIds.length <= 3 ||
-            this.activeSubscriptionIds.length === this.subscribedWallets.size) {
+        // Only log when all subscriptions are confirmed — single summary line
+        if (this.activeSubscriptionIds.length >= this.subscribedWallets.size) {
           logger.info({
-            subscriptionId: msg.result,
             confirmed: this.activeSubscriptionIds.length,
             total: this.subscribedWallets.size,
-          }, 'logsSubscribe confirmed');
+          }, 'All logsSubscribe confirmed');
         }
         return;
       }
@@ -267,7 +265,29 @@ export class HeliusWebSocketManager extends EventEmitter {
         };
         this.emit('transaction', result);
       } else {
-        logger.warn({ sig: signature.slice(0, 12), error: resp.data?.error }, 'getTransaction returned null — tx may not be confirmed yet');
+        // TX may not be confirmed yet — wait 500ms and retry once
+        await new Promise((r) => setTimeout(r, 500));
+        const retry = await axios.post(config.helius.rpcUrl, {
+          jsonrpc: '2.0',
+          id: `getTx-retry-${signature.slice(0, 12)}`,
+          method: 'getTransaction',
+          params: [signature, {
+            encoding: 'jsonParsed',
+            commitment: 'confirmed',
+            maxSupportedTransactionVersion: 0,
+          }],
+        }, { timeout: 10_000 });
+
+        if (retry.data?.result) {
+          const result = {
+            signature,
+            slot: slot || retry.data.result.slot,
+            transaction: retry.data.result,
+          };
+          this.emit('transaction', result);
+        } else {
+          logger.warn({ sig: signature.slice(0, 12), error: resp.data?.error }, 'getTransaction returned null after retry — tx dropped or not confirmed');
+        }
       }
     } catch (err) {
       logger.debug({ err, sig: signature.slice(0, 12) }, 'Failed to fetch transaction for log notification');

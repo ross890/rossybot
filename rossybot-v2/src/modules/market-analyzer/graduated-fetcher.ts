@@ -41,149 +41,153 @@ async function rateLimitedGet<T>(url: string, delayMs = 2200): Promise<T | null>
 /**
  * Fetch graduated pump.fun tokens from the last 24 hours.
  *
- * Strategy: Use DexScreener's token-profiles/latest endpoint to find new pumpswap pairs,
- * combined with the search API to find recently created pumpswap/raydium pairs.
- *
- * DexScreener doesn't have a direct "graduated pump.fun" endpoint, so we:
- * 1. Search for pumpswap pairs sorted by creation time
- * 2. Filter to pairs created in the last 24h
- * 3. Deduplicate by base token mint
+ * PRIMARY strategy: Helius on-chain graduation signatures (most reliable)
+ * SECONDARY strategy: DexScreener token-boosts/latest for trending graduated tokens
  */
 export async function fetchGraduatedTokens24h(): Promise<GraduatedToken[]> {
-  const now = Date.now();
-  const cutoff24h = now - 24 * 60 * 60 * 1000;
   const graduated: Map<string, GraduatedToken> = new Map();
 
   logger.info('Fetching graduated tokens from last 24h...');
 
-  // Strategy 1: DexScreener search for pumpswap pairs
-  // The /pairs endpoint with chainId lets us get pairs from specific DEXes
-  // We'll paginate through recent pumpswap pairs
-  await fetchPumpswapPairs(graduated, cutoff24h);
+  // Strategy 1 (PRIMARY): Helius on-chain — query PumpSwap migration program
+  const heliusMints = await fetchMintsViaHelius();
+  logger.info({ count: heliusMints.length }, 'Helius: found graduation mints');
 
-  // Strategy 2: Also check for raydium migrations (legacy path)
-  await fetchRaydiumMigrations(graduated, cutoff24h);
+  // Enrich each mint with DexScreener data (batch to avoid rate limits)
+  for (let i = 0; i < heliusMints.length; i++) {
+    const mint = heliusMints[i];
+    if (graduated.has(mint)) continue;
+
+    const enriched = await enrichTokenWithDex(mint);
+    if (enriched) {
+      graduated.set(mint, enriched);
+    }
+
+    // Progress log every 20 tokens
+    if ((i + 1) % 20 === 0) {
+      logger.info({ progress: `${i + 1}/${heliusMints.length}`, found: graduated.size }, 'Enriching mints...');
+    }
+  }
+
+  // Strategy 2 (SECONDARY): DexScreener token-boosts for any we missed
+  await fetchFromTokenBoosts(graduated);
 
   const tokens = Array.from(graduated.values());
-  logger.info({ count: tokens.length }, 'Graduated tokens fetched');
+  logger.info({ count: tokens.length, heliusMints: heliusMints.length }, 'Graduated tokens fetched');
   return tokens;
 }
 
 /**
- * Fetch recent pumpswap pairs from DexScreener.
- * PumpSwap is pump.fun's own AMM — tokens migrate here after bonding curve completion.
+ * Fetch graduated token mints via Helius on-chain data.
+ * Queries the PumpSwap migration authority for recent graduation transactions,
+ * then parses token mints from those transactions.
  */
-async function fetchPumpswapPairs(
-  graduated: Map<string, GraduatedToken>,
-  cutoff24h: number,
-): Promise<void> {
-  // DexScreener search endpoint: search by "pumpswap" returns recent pumpswap pairs
-  // We paginate by searching with different terms that cover graduated tokens
-  const searchTerms = ['pumpswap'];
+async function fetchMintsViaHelius(): Promise<string[]> {
+  const sigs = await fetchGraduatedViaHelius();
+  if (sigs.length === 0) return [];
 
-  for (const term of searchTerms) {
-    const url = `https://api.dexscreener.com/latest/dex/search?q=${term}`;
-    const data = await rateLimitedGet<{ pairs: DexPairRaw[] }>(url);
-    if (!data?.pairs) continue;
+  // Parse up to 100 recent graduation txs
+  const mints = await parseGraduationTxs(sigs.slice(0, 100));
+  return mints;
+}
 
-    for (const pair of data.pairs) {
-      if (pair.chainId !== 'solana') continue;
-      if (pair.dexId !== 'pumpswap' && pair.dexId !== 'pump_swap') continue;
-      if (!pair.pairCreatedAt || pair.pairCreatedAt < cutoff24h) continue;
+/**
+ * Fetch token-boosts/latest from DexScreener — these are recently trending tokens.
+ * Filter for Solana pumpswap/raydium pairs as a supplemental source.
+ */
+async function fetchFromTokenBoosts(graduated: Map<string, GraduatedToken>): Promise<void> {
+  const now = Date.now();
+  const cutoff24h = now - 24 * 60 * 60 * 1000;
 
-      addPairToMap(graduated, pair);
-    }
-  }
+  try {
+    const profileUrl = 'https://api.dexscreener.com/token-boosts/latest/v1';
+    const profiles = await rateLimitedGet<Array<{ chainId: string; tokenAddress: string }>>(profileUrl);
+    if (!profiles || !Array.isArray(profiles)) return;
 
-  // DexScreener /dex/pairs/solana/pumpswap — get pairs directly by dex
-  // This may not exist as a public endpoint, but try it
-  const dexUrl = `https://api.dexscreener.com/latest/dex/pairs/solana`;
-  // Not directly queryable by dex name — we use token profiles instead
-
-  // Strategy: fetch the latest token profiles and cross-reference
-  const profileUrl = 'https://api.dexscreener.com/token-profiles/latest/v1';
-  const profiles = await rateLimitedGet<Array<{ chainId: string; tokenAddress: string }>>(profileUrl);
-  if (profiles && Array.isArray(profiles)) {
-    // Batch lookup tokens from profiles
     const solanaMints = profiles
       .filter((p) => p.chainId === 'solana')
       .map((p) => p.tokenAddress)
-      .slice(0, 30); // Limit to avoid rate limiting
+      .filter((m) => !graduated.has(m))
+      .slice(0, 20);
 
-    for (let i = 0; i < solanaMints.length; i += 5) {
-      const batch = solanaMints.slice(i, i + 5);
-      for (const mint of batch) {
-        const tokenUrl = `${DEXSCREENER_BASE}/tokens/${mint}`;
-        const tokenData = await rateLimitedGet<{ pairs: DexPairRaw[] }>(tokenUrl);
-        if (!tokenData?.pairs) continue;
+    logger.info({ count: solanaMints.length }, 'DexScreener token-boosts: checking Solana tokens');
 
-        for (const pair of tokenData.pairs) {
-          if (pair.chainId !== 'solana') continue;
-          if (pair.dexId !== 'pumpswap' && pair.dexId !== 'pump_swap') continue;
-          if (!pair.pairCreatedAt || pair.pairCreatedAt < cutoff24h) continue;
+    for (const mint of solanaMints) {
+      const tokenUrl = `${DEXSCREENER_BASE}/tokens/${mint}`;
+      const tokenData = await rateLimitedGet<{ pairs: DexPairRaw[] }>(tokenUrl);
+      if (!tokenData?.pairs) continue;
 
-          addPairToMap(graduated, pair);
-        }
+      for (const pair of tokenData.pairs) {
+        if (pair.chainId !== 'solana') continue;
+        // Accept pumpswap (post-March 2025) or raydium (legacy graduation)
+        if (!isPumpGraduatedPair(pair)) continue;
+        if (!pair.pairCreatedAt || pair.pairCreatedAt < cutoff24h) continue;
+
+        addPairToMap(graduated, pair);
       }
     }
+  } catch (err) {
+    logger.warn({ err }, 'DexScreener token-boosts fetch failed — continuing with Helius data');
   }
 }
 
 /**
- * Fetch recently graduated tokens that migrated to Raydium (legacy migration path).
+ * Check if a DexScreener pair represents a graduated pump.fun token.
  */
-async function fetchRaydiumMigrations(
-  graduated: Map<string, GraduatedToken>,
-  cutoff24h: number,
-): Promise<void> {
-  // Search for recent Raydium pairs that could be pump.fun graduations
-  // These typically have very small initial liquidity and pair with SOL
-  const url = `https://api.dexscreener.com/latest/dex/search?q=raydium`;
-  const data = await rateLimitedGet<{ pairs: DexPairRaw[] }>(url);
-  if (!data?.pairs) return;
-
-  for (const pair of data.pairs) {
-    if (pair.chainId !== 'solana') continue;
-    if (pair.dexId !== 'raydium') continue;
-    if (!pair.pairCreatedAt || pair.pairCreatedAt < cutoff24h) continue;
-
-    // Raydium pairs from pump.fun graduation typically:
-    // - Quote token is SOL
-    // - Relatively low initial liquidity
-    // - Young pair age
-    if (pair.quoteToken?.symbol === 'SOL' || pair.quoteToken?.symbol === 'WSOL') {
-      addPairToMap(graduated, pair);
-    }
-  }
+function isPumpGraduatedPair(pair: DexPairRaw): boolean {
+  const dex = (pair.dexId || '').toLowerCase();
+  return dex === 'pumpswap' || dex === 'pump_swap' || dex === 'raydium';
 }
 
 /**
- * Fetch graduated tokens using Helius DAS API for recently created pumpswap pools.
- * This is an alternative strategy that queries on-chain data directly.
+ * Fetch graduated tokens using Helius — query the PumpSwap migration authority
+ * for recent graduation transactions.
+ *
+ * Known migration authorities / programs:
+ * - 39azUYFWPz3VHgKCf3VChUwbpURdCHRxjWVowf5jUJjg (PumpSwap migration authority)
+ * - BSfD6SHZigAfDWSjzD5Q41jw8LmKwtmjskCH9CKW2bRQ (pump.fun fee account)
  */
 export async function fetchGraduatedViaHelius(): Promise<string[]> {
-  try {
-    // Use Helius getSignaturesForAddress on the PumpSwap migration program
-    // to find recent graduation transactions
-    const resp = await axios.post(config.helius.rpcUrl, {
-      jsonrpc: '2.0',
-      id: 1,
-      method: 'getSignaturesForAddress',
-      params: [
-        // PumpSwap migration authority — this address receives LP when tokens graduate
-        '39azUYFWPz3VHgKCf3VChUwbpURdCHRxjWVowf5jUJjg',
-        { limit: 100 },
-      ],
-    }, { timeout: 15_000 });
+  // Try multiple known addresses to maximize coverage
+  const migrationAddresses = [
+    '39azUYFWPz3VHgKCf3VChUwbpURdCHRxjWVowf5jUJjg', // PumpSwap migration authority
+    'BSfD6SHZigAfDWSjzD5Q41jw8LmKwtmjskCH9CKW2bRQ', // pump.fun fee account
+  ];
 
-    const sigs = resp.data?.result || [];
-    return sigs
-      .filter((s: { err: unknown }) => !s.err)
-      .map((s: { signature: string }) => s.signature);
-  } catch (err) {
-    logger.error({ err }, 'Failed to fetch graduation signatures via Helius');
-    return [];
+  const allSigs: string[] = [];
+  const seen = new Set<string>();
+
+  for (const address of migrationAddresses) {
+    try {
+      const resp = await axios.post(config.helius.rpcUrl, {
+        jsonrpc: '2.0',
+        id: 1,
+        method: 'getSignaturesForAddress',
+        params: [
+          address,
+          { limit: 200 },
+        ],
+      }, { timeout: 20_000 });
+
+      const sigs = resp.data?.result || [];
+      const validSigs = sigs
+        .filter((s: { err: unknown }) => !s.err)
+        .map((s: { signature: string }) => s.signature);
+
+      for (const sig of validSigs) {
+        if (!seen.has(sig)) {
+          seen.add(sig);
+          allSigs.push(sig);
+        }
+      }
+
+      logger.info({ address: address.slice(0, 8), sigs: validSigs.length }, 'Helius: fetched graduation signatures');
+    } catch (err) {
+      logger.error({ err, address: address.slice(0, 8) }, 'Failed to fetch graduation signatures via Helius');
+    }
   }
+
+  return allSigs;
 }
 
 /**
@@ -226,6 +230,7 @@ export async function parseGraduationTxs(signatures: string[]): Promise<string[]
     }
   }
 
+  logger.info({ signatures: signatures.length, uniqueMints: mints.size }, 'Parsed graduation tx mints');
   return Array.from(mints);
 }
 
@@ -237,12 +242,11 @@ export async function enrichTokenWithDex(mint: string): Promise<GraduatedToken |
   const data = await rateLimitedGet<{ pairs: DexPairRaw[] }>(url, 2500);
   if (!data?.pairs?.length) return null;
 
-  // Find the pumpswap or raydium pair
-  const pair = data.pairs.find((p) =>
-    p.dexId === 'pumpswap' || p.dexId === 'pump_swap',
-  ) || data.pairs.find((p) =>
-    p.dexId === 'raydium',
-  );
+  // Find the pumpswap or raydium pair (graduated pair)
+  const pair = data.pairs.find((p) => isPumpGraduatedPair(p))
+    // Fallback: if no pumpswap/raydium pair, take the first Solana pair
+    // (dexId naming may vary — e.g. 'pumpfun' for post-migration pairs)
+    || data.pairs.find((p) => p.chainId === 'solana');
 
   if (!pair) return null;
 

@@ -362,6 +362,35 @@ async function migrate() {
     )
   `);
 
+  // 11. graduated_positions — positions from graduation bounce discovery strategy
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS graduated_positions (
+      id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+      token_address TEXT NOT NULL,
+      token_symbol TEXT,
+      pair_address TEXT,
+      entry_sol DECIMAL NOT NULL,
+      entry_price_usd DECIMAL NOT NULL,
+      entry_time TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      status TEXT NOT NULL DEFAULT 'OPEN',
+      graduation_price_usd DECIMAL DEFAULT 0,
+      dip_pct DECIMAL DEFAULT 0,
+      recovery_at_entry DECIMAL DEFAULT 0,
+      time_to_entry_mins DECIMAL DEFAULT 0,
+      buy_ratio_at_entry DECIMAL DEFAULT 0,
+      current_price_usd DECIMAL DEFAULT 0,
+      peak_price_usd DECIMAL DEFAULT 0,
+      pnl_percent DECIMAL DEFAULT 0,
+      peak_pnl_percent DECIMAL DEFAULT 0,
+      exit_reason TEXT,
+      closed_at TIMESTAMPTZ,
+      hold_time_mins INT,
+      entry_tx TEXT,
+      fees_paid_sol DECIMAL DEFAULT 0,
+      net_pnl_sol DECIMAL DEFAULT 0
+    )
+  `);
+
   console.log('✅ All migrations complete');
   await pool.end();
 }

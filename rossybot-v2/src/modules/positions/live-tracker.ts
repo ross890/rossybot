@@ -119,6 +119,8 @@ export class LiveTracker {
       closed_at: null,
       sell_retry_count: 0,
       hold_time_mins: null,
+      momentum_extensions: new Map(),
+      reentry_count: 0,
     };
 
     this.positions.set(pos.id, pos);
@@ -323,9 +325,26 @@ export class LiveTracker {
       return;
     }
 
-    // Hard kill and stop loss from config
+    // Hard kill — always fires, no guard period
     if (pnl <= tierCfg.hardKill) { await this.closePosition(pos, `Hard kill (${(pnl * 100).toFixed(1)}%)`); return; }
-    if (pnl <= tierCfg.stopLoss) { await this.closePosition(pos, `Stop loss (${(pnl * 100).toFixed(1)}%)`); return; }
+
+    // Stop loss — with hold-time guard and dynamic widening for micro-cap tokens
+    // During the guard period, only hard kill fires (SL is suppressed to ride through early volatility)
+    if (holdMins >= tierCfg.stopLossGuardMins) {
+      let effectiveSL = tierCfg.stopLoss;
+
+      // Widen SL for micro-cap tokens (high initial volatility)
+      const mcapAtEntry = (pos.momentum_at_entry as { mcap?: number })?.mcap || 0;
+      if (tierCfg.stopLossWidenMcapThreshold > 0 && mcapAtEntry > 0 && mcapAtEntry < tierCfg.stopLossWidenMcapThreshold) {
+        effectiveSL = tierCfg.stopLoss * tierCfg.stopLossWidenFactor; // e.g. -0.20 * 1.5 = -0.30
+      }
+
+      if (pnl <= effectiveSL) {
+        const tag = effectiveSL !== tierCfg.stopLoss ? ` [widened from ${(tierCfg.stopLoss * 100).toFixed(0)}%]` : '';
+        await this.closePosition(pos, `Stop loss (${(pnl * 100).toFixed(1)}%${tag})`);
+        return;
+      }
+    }
 
     // Profit target (MICRO/SMALL — non-partial tiers)
     if (!tierCfg.partialExitsEnabled && pnl >= tierCfg.profitTarget) {
@@ -363,9 +382,32 @@ export class LiveTracker {
     }
 
     // Time kills from config — use the tier's configured windows
-    for (const tk of tierCfg.timeKills) {
-      if (holdMins >= tk.hours * 60 && pnl < tk.minPnlPct) {
-        await this.closePosition(pos, `Time kill ${tk.hours}h (<${(tk.minPnlPct * 100).toFixed(0)}%)`);
+    for (let i = 0; i < tierCfg.timeKills.length; i++) {
+      const tk = tierCfg.timeKills[i];
+      const extensionCount = pos.momentum_extensions.get(i) || 0;
+      const effectiveHours = tk.hours + (extensionCount * tierCfg.momentumExtensionHours);
+
+      if (holdMins >= effectiveHours * 60 && pnl < tk.minPnlPct) {
+        // Check if momentum extension is allowed
+        if (tierCfg.momentumExtensionEnabled &&
+            extensionCount < tierCfg.momentumExtensionMaxPerWindow &&
+            pnl >= tierCfg.momentumExtensionMinPnl &&
+            pos.current_price > pos.entry_price * 0.95 && // Price near or above entry
+            pos.peak_price > pos.entry_price) { // Has shown upward movement
+          // Extend this window
+          pos.momentum_extensions.set(i, extensionCount + 1);
+          logger.info({
+            id: pos.id.slice(0, 8),
+            token: pos.token_symbol,
+            window: `${tk.hours}h`,
+            extension: extensionCount + 1,
+            pnl: `${(pnl * 100).toFixed(1)}%`,
+            newDeadline: `${effectiveHours + tierCfg.momentumExtensionHours}h`,
+          }, 'Momentum extension — time kill deferred');
+          continue; // Skip this time kill, check next window
+        }
+
+        await this.closePosition(pos, `Time kill ${effectiveHours}h (<${(tk.minPnlPct * 100).toFixed(0)}%)`);
         return;
       }
     }
@@ -578,6 +620,8 @@ export class LiveTracker {
         closed_at: null,
         hold_time_mins: null,
         sell_retry_count: 0,
+        momentum_extensions: new Map(),
+        reentry_count: 0,
       };
       this.positions.set(pos.id, pos);
     }

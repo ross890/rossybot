@@ -43,17 +43,17 @@ export class PumpFunAlphaDiscovery {
   private cleanupInterval: ReturnType<typeof setInterval> | null = null;
   private onNewAlpha: ((address: string) => void) | null = null;
 
-  // --- Promotion thresholds ---
-  /** Minimum completed round-trips to evaluate */
-  private static readonly MIN_TRADES = 5;
-  /** Minimum win rate to promote */
-  private static readonly MIN_WIN_RATE = 0.60;
-  /** Minimum average PnL % per trade */
-  private static readonly MIN_AVG_PNL = 0.10; // 10%
-  /** Max average hold time (ms) — reject bag-holders at discovery time */
-  private static readonly MAX_AVG_HOLD_MS = 30 * 60 * 1000; // 30 minutes
-  /** Max wallets to track in memory (evict oldest) */
-  private static readonly MAX_TRACKED = 10_000;
+  // --- Promotion thresholds (relaxed for more discoveries) ---
+  /** Minimum completed round-trips to evaluate (was 5 — 3 is enough signal) */
+  private static readonly MIN_TRADES = 3;
+  /** Minimum win rate to promote (was 60% — 45% is good for memecoins) */
+  private static readonly MIN_WIN_RATE = 0.45;
+  /** Minimum average PnL % per trade (was 10% — 5% catches consistent small winners) */
+  private static readonly MIN_AVG_PNL = 0.05; // 5%
+  /** Max average hold time (ms) — reject bag-holders at discovery time (was 30min — 60min to catch slower scalpers) */
+  private static readonly MAX_AVG_HOLD_MS = 60 * 60 * 1000; // 60 minutes
+  /** Max wallets to track in memory (evict oldest) (was 10K — 20K for broader coverage) */
+  private static readonly MAX_TRACKED = 20_000;
   /** Evict wallets not seen in this many ms */
   private static readonly EVICT_AFTER_MS = 4 * 60 * 60 * 1000; // 4 hours
 

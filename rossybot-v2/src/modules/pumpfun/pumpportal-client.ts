@@ -18,9 +18,21 @@ export interface PumpPortalTrade {
   vTokensInBondingCurve: number;
 }
 
+/**
+ * Migration (graduation) event from PumpPortal.
+ * Fired when a token's bonding curve completes and liquidity migrates to PumpSwap.
+ */
+export interface PumpPortalMigration {
+  mint: string;
+  signature?: string;
+  /** Timestamp of the migration transaction */
+  timestamp?: number;
+}
+
 export interface PumpPortalEvents {
   trade: (trade: PumpPortalTrade) => void;
   newToken: (trade: PumpPortalTrade) => void;
+  migration: (migration: PumpPortalMigration) => void;
   connected: () => void;
   disconnected: () => void;
 }
@@ -41,6 +53,7 @@ export class PumpPortalClient {
   private listeners = new Map<string, Set<Function>>();
   private tradeCount = 0;
   private createCount = 0;
+  private migrationCount = 0;
   private lastTradeAt = 0;
 
   // Track subscribed tokens to avoid duplicates and manage memory
@@ -74,6 +87,7 @@ export class PumpPortalClient {
   get stats(): {
     tradeCount: number;
     createCount: number;
+    migrationCount: number;
     lastTradeAt: number;
     connected: boolean;
     subscribedTokens: number;
@@ -81,6 +95,7 @@ export class PumpPortalClient {
     return {
       tradeCount: this.tradeCount,
       createCount: this.createCount,
+      migrationCount: this.migrationCount,
       lastTradeAt: this.lastTradeAt,
       connected: this.connected,
       subscribedTokens: this.subscribedTokens.size,
@@ -100,6 +115,9 @@ export class PumpPortalClient {
 
         // Subscribe to new token creation events — we'll auto-subscribe to their trades
         this.ws!.send(JSON.stringify({ method: 'subscribeNewToken' }));
+
+        // Subscribe to migration (graduation) events — tokens moving from bonding curve to PumpSwap
+        this.ws!.send(JSON.stringify({ method: 'subscribeMigration' }));
 
         // Start token eviction loop
         this.evictInterval = setInterval(() => this.evictStaleTokens(), 60_000);
@@ -158,16 +176,35 @@ export class PumpPortalClient {
 
   private handleMessage(data: WebSocket.Data): void {
     try {
-      const msg = JSON.parse(data.toString()) as PumpPortalTrade;
+      const msg = JSON.parse(data.toString());
 
       // Skip non-trade messages (subscription confirmations, etc.)
-      if (!msg.txType || !msg.mint) return;
+      if (!msg.mint) return;
+
+      // Migration (graduation) event — token moved from bonding curve to PumpSwap
+      // PumpPortal sends these with txType absent or as a separate event structure
+      if (msg.txType === 'migration' || msg.pool || (msg.signature && !msg.txType && !msg.traderPublicKey)) {
+        this.migrationCount++;
+        const migration: PumpPortalMigration = {
+          mint: msg.mint,
+          signature: msg.signature,
+          timestamp: msg.timestamp || Date.now(),
+        };
+        this.emit('migration', migration);
+
+        // Also detect graduation from high curve fill in trade events
+        // Remove from tracked tokens since it graduated
+        this.subscribedTokens.delete(msg.mint);
+        return;
+      }
+
+      if (!msg.txType) return;
 
       if (msg.txType === 'create') {
         this.createCount++;
         // New token created — auto-subscribe to its trades for alpha discovery
         this.autoSubscribeToken(msg.mint);
-        this.emit('newToken', msg);
+        this.emit('newToken', msg as PumpPortalTrade);
         return;
       }
 
@@ -177,11 +214,31 @@ export class PumpPortalClient {
       this.tradeCount++;
       this.lastTradeAt = Date.now();
 
-      this.emit('trade', msg);
+      // Detect graduation from curve fill: if vSol exceeds graduation threshold (~85 SOL real),
+      // emit a synthetic migration event. This catches graduations even if the explicit
+      // subscribeMigration event is delayed or missing.
+      const trade = msg as PumpPortalTrade;
+      if (trade.vSolInBondingCurve) {
+        const realSol = Math.max(0, trade.vSolInBondingCurve - 30);
+        if (realSol >= 82 && !this.emittedGraduations.has(trade.mint)) {
+          this.emittedGraduations.add(trade.mint);
+          this.migrationCount++;
+          this.emit('migration', {
+            mint: trade.mint,
+            signature: trade.signature,
+            timestamp: Date.now(),
+          } as PumpPortalMigration);
+        }
+      }
+
+      this.emit('trade', trade);
     } catch {
       // Ignore parse errors (subscription confirmations, etc.)
     }
   }
+
+  // Track graduations detected from curve fill to avoid duplicate events
+  private emittedGraduations = new Set<string>();
 
   /**
    * Auto-subscribe to trades on a newly created token.
@@ -229,6 +286,10 @@ export class PumpPortalClient {
         this.subscribedTokens.delete(mint);
         evicted++;
       }
+    }
+    // Cap emitted graduations set to prevent unbounded growth
+    if (this.emittedGraduations.size > 2000) {
+      this.emittedGraduations.clear();
     }
     if (evicted > 0) {
       logger.debug({ evicted, remaining: this.subscribedTokens.size }, 'PumpPortal: evicted stale token subscriptions');

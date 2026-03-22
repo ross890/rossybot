@@ -4,6 +4,7 @@ import { logger } from '../../utils/logger.js';
 import type { GraduationPatterns } from './pattern-analyzer.js';
 import type { WalletConfluenceResult } from './wallet-confluence.js';
 import type { GraduatedToken } from './graduated-fetcher.js';
+import type { RejectionAnalysisResult } from './signal-rejection-tracker.js';
 
 const TG_API = `https://api.telegram.org/bot${config.telegram.botToken}`;
 const CHAT_ID = config.telegram.chatId;
@@ -33,11 +34,12 @@ export async function sendDailyReport(params: {
   mcapSegments: Array<{ range: string; count: number; avgPriceChangeH24: number; profitRate: number }>;
   newDiscoveries: number;
   durationSeconds: number;
+  rejectionAnalysis: RejectionAnalysisResult | null;
 }): Promise<void> {
   const {
     analysisDate, totalGraduated, tokensAnalyzed, patterns,
     topConfluenceWallets, alphaOverlap, profitability,
-    mcapSegments, newDiscoveries, durationSeconds,
+    mcapSegments, newDiscoveries, durationSeconds, rejectionAnalysis,
   } = params;
 
   // Build report sections
@@ -146,6 +148,38 @@ export async function sendDailyReport(params: {
     sections.push(`Common words: ${top5Words.join(', ')}`);
   }
   sections.push(``);
+
+  // Rejection Analysis (post-hoc)
+  if (rejectionAnalysis && rejectionAnalysis.totalRejections > 0) {
+    sections.push(
+      `<b>SIGNAL FUNNEL (POST-HOC)</b>`,
+      `Rejected signals analyzed: <b>${rejectionAnalysis.totalRejections}</b>`,
+      `Graduated after rejection: <b>${rejectionAnalysis.graduatedCount}</b> (${rejectionAnalysis.totalRejections > 0 ? ((rejectionAnalysis.graduatedCount / rejectionAnalysis.totalRejections) * 100).toFixed(0) : 0}%)`,
+      `Profitable grads missed: <b>${rejectionAnalysis.profitableCount}</b>`,
+    );
+
+    // Breakdown by reason
+    if (rejectionAnalysis.byReason.length > 0) {
+      sections.push(`Rejection breakdown:`);
+      for (const r of rejectionAnalysis.byReason.slice(0, 5)) {
+        const gradPct = r.count > 0 ? ((r.graduated / r.count) * 100).toFixed(0) : '0';
+        sections.push(
+          `  ${r.reason}: ${r.count}x (${gradPct}% graduated${r.graduated > 0 ? `, avg ${formatPct(r.avgPriceChangeH24)}` : ''})`,
+        );
+      }
+    }
+
+    // Top missed opportunities
+    if (rejectionAnalysis.topMissed.length > 0) {
+      sections.push(`Top missed opportunities:`);
+      for (const m of rejectionAnalysis.topMissed.slice(0, 5)) {
+        sections.push(
+          `  ${m.symbol} ${formatPct(m.priceChangeH24)} (rejected: ${m.reason}, curve ${(m.curveFillAtRejection * 100).toFixed(0)}%)`,
+        );
+      }
+    }
+    sections.push(``);
+  }
 
   // Risk
   sections.push(

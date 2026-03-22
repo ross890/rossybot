@@ -17,6 +17,11 @@ import {
   segmentByMcap,
 } from './pattern-analyzer.js';
 import { sendDailyReport } from './report-generator.js';
+import {
+  ensureRejectionTable,
+  analyzeRejectedSignals,
+  type RejectionAnalysisResult,
+} from './signal-rejection-tracker.js';
 
 /** Minimum confluence score to consider a wallet a "new discovery" */
 const NEW_DISCOVERY_MIN_SCORE = 25;
@@ -78,6 +83,8 @@ async function ensureTables(): Promise<void> {
   await query(`CREATE INDEX IF NOT EXISTS idx_ma_confluence_wallet ON ma_wallet_confluence(wallet_address)`);
   await query(`CREATE INDEX IF NOT EXISTS idx_ma_confluence_date ON ma_wallet_confluence(analysis_date)`);
   await query(`CREATE INDEX IF NOT EXISTS idx_ma_confluence_score ON ma_wallet_confluence(confluence_score DESC)`);
+  // Signal rejection tracking table
+  await ensureRejectionTable();
   tablesEnsured = true;
   logger.info('Market analyzer tables ensured');
 }
@@ -303,7 +310,21 @@ export async function runDailyAnalysis(opts?: { force?: boolean }): Promise<Anal
     recurringHighConfluence: recurringWallets.length,
   }, 'Phase 4 complete');
 
-  // ===== PHASE 5: Update summary & send report =====
+  // ===== PHASE 5: Rejected signal post-hoc analysis =====
+  logger.info('Phase 5: Analyzing rejected signals (post-hoc)...');
+  let rejectionAnalysis: RejectionAnalysisResult | null = null;
+  try {
+    rejectionAnalysis = await analyzeRejectedSignals(48);
+    logger.info({
+      rejections: rejectionAnalysis.totalRejections,
+      graduated: rejectionAnalysis.graduatedCount,
+      profitable: rejectionAnalysis.profitableCount,
+    }, 'Phase 5 complete: rejection analysis');
+  } catch (err) {
+    logger.error({ err }, 'Phase 5 failed: rejection analysis (non-fatal)');
+  }
+
+  // ===== PHASE 6: Update summary & send report =====
   const durationSeconds = Math.round((Date.now() - startTime) / 1000);
 
   await updateSummary(analysisDate, graduatedTokens.length, tokensAnalyzed, tokensFailed, startTime, {
@@ -325,6 +346,7 @@ export async function runDailyAnalysis(opts?: { force?: boolean }): Promise<Anal
     mcapSegments,
     newDiscoveries,
     durationSeconds,
+    rejectionAnalysis,
   });
 
   logger.info({

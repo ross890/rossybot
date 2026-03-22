@@ -458,6 +458,11 @@ export class PumpFunTracker {
 
         // --- CURVE SCALP EXITS (highest priority — take profit before graduation) ---
 
+        // Peak regression detection: if curve fill has dropped >5% from peak, the token is dumping.
+        // Don't fire TP into a dump — let SL/hardKill handle the exit instead.
+        const curveRegressing = pos.peak_curve_fill_pct > 0 &&
+          pos.current_curve_fill_pct < pos.peak_curve_fill_pct * 0.95;
+
         // 2a. Curve hard exit — NEVER hold through graduation (force-exit at 45%)
         if (pos.current_curve_fill_pct >= cfg.curveHardExit) {
           await this.closePosition(pos, 'Curve hard exit (pre-graduation)');
@@ -465,13 +470,16 @@ export class PumpFunTracker {
         }
 
         // 2b. PnL-based take profit — must hold ≥30s to avoid false TP on first tick
-        if (holdMins >= 0.5 && pos.pnl_percent >= cfg.profitTarget) {
+        //     Skip TP if curve is regressing from peak (selling into dump = phantom TP → actual loss)
+        if (holdMins >= 0.5 && pos.pnl_percent >= cfg.profitTarget && !curveRegressing) {
           await this.closePosition(pos, 'Take profit');
           return;
         }
 
         // 2c. Curve fill TP fallback — sell at curve target regardless of PnL calc
-        if (pos.current_curve_fill_pct >= cfg.curveProfitTarget) {
+        //     Guard: require estimated PnL > 0 (prevents phantom TPs where sqrt estimate shows profit
+        //     but actual swap output after slippage+fees would be a loss)
+        if (pos.current_curve_fill_pct >= cfg.curveProfitTarget && pos.pnl_percent > 0 && !curveRegressing) {
           await this.closePosition(pos, 'Curve target hit');
           return;
         }
@@ -667,8 +675,15 @@ export class PumpFunTracker {
     }
 
     // Shadow mode: simulate net PnL from curve-estimated pnl_percent
+    // Apply slippage discount so shadow PnL reflects realistic execution costs.
+    // sqrt PnL estimate overestimates actual returns — selling on the bonding curve moves the price down,
+    // plus there's slippage (4%) and fees. Without this, shadow mode shows phantom profits.
     if (!this.swapExecutor) {
-      pos.net_pnl_sol = pos.entry_price_sol * pos.pnl_percent;
+      const slippageDiscount = config.pumpFun.slippageBps / 10_000; // e.g. 400bps = 4%
+      const adjustedPnl = pos.pnl_percent > 0
+        ? pos.pnl_percent * (1 - slippageDiscount) - slippageDiscount  // Winning: reduce by slippage twice (buy + sell)
+        : pos.pnl_percent; // Losing: no further discount needed (already pessimistic)
+      pos.net_pnl_sol = pos.entry_price_sol * adjustedPnl;
     }
 
     pos.status = PositionStatus.CLOSED;
@@ -890,6 +905,11 @@ export class PumpFunTracker {
 
       // --- INSTANT CURVE SCALP EXITS ---
 
+      // Peak regression detection: if curve fill has dropped >5% from peak, the token is dumping.
+      // Don't fire TP into a dump — let SL/hardKill handle the exit instead.
+      const curveRegressing = pos.peak_curve_fill_pct > 0 &&
+        pos.current_curve_fill_pct < pos.peak_curve_fill_pct * 0.95;
+
       // Hard exit at curve hard exit threshold
       if (pos.current_curve_fill_pct >= cfg.curveHardExit) {
         await this.closePosition(pos, 'Curve hard exit (pre-graduation)');
@@ -897,13 +917,14 @@ export class PumpFunTracker {
       }
 
       // PnL-based take profit — must hold ≥30s to avoid false TP on first tick
-      if (holdMins >= 0.5 && pos.pnl_percent >= cfg.profitTarget) {
+      //     Skip TP if curve is regressing from peak (selling into dump = phantom TP → actual loss)
+      if (holdMins >= 0.5 && pos.pnl_percent >= cfg.profitTarget && !curveRegressing) {
         await this.closePosition(pos, 'Take profit');
         return;
       }
 
-      // Curve fill TP at target
-      if (pos.current_curve_fill_pct >= cfg.curveProfitTarget) {
+      // Curve fill TP at target — require PnL > 0 to prevent phantom TPs
+      if (pos.current_curve_fill_pct >= cfg.curveProfitTarget && pos.pnl_percent > 0 && !curveRegressing) {
         await this.closePosition(pos, 'Curve target hit');
         return;
       }

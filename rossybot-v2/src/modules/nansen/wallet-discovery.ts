@@ -381,9 +381,11 @@ export class WalletDiscovery {
       });
     }
 
-    // Filter out wallets below PnL minimum — lowered to $500 to catch more early-stage profitable traders
-    const MIN_PNL_USD = 500;
-    const qualifiedCandidates = candidates.filter((c) => c.totalVolumeUsd >= MIN_PNL_USD);
+    // Filter: $1K PnL minimum (was $500 — too many lucky one-hit wallets passing)
+    // AND require 2+ tokens traded (single-token luck ≠ skill)
+    const MIN_PNL_USD = 1_000;
+    const MIN_TOKENS_TRADED = 2;
+    const qualifiedCandidates = candidates.filter((c) => c.totalVolumeUsd >= MIN_PNL_USD && c.tokensTraded >= MIN_TOKENS_TRADED);
     logger.info({
       total: candidates.length,
       qualified: qualifiedCandidates.length,
@@ -479,8 +481,9 @@ export class WalletDiscovery {
     const candidates: WalletCandidate[] = [];
     for (const [addr, data] of walletActivity) {
       const tokensTraded = data.tokensTraded.size;
-      // Require: 1+ trades across 1+ different tokens, $200+ total volume (was 2/2/$500 — catch more active wallets)
-      if (data.tradeCount < 1 || tokensTraded < 1 || data.totalValueUsd < 200) continue;
+      // Require: 2+ trades across 2+ different tokens, $500+ total volume
+      // (was 1/1/$200 — too loose, accepting noise wallets with single lucky trades)
+      if (data.tradeCount < 2 || tokensTraded < 2 || data.totalValueUsd < 500) continue;
 
       // Compute average mcap — prefer wallets trading smaller caps (our sweet spot)
       const avgMcap = data.tradeCount > 0 ? data.mcapSum / data.tradeCount : 0;
@@ -504,9 +507,9 @@ export class WalletDiscovery {
 
     candidates.sort((a, b) => b.score - a.score);
 
-    // Add top candidates (cap at 40 per cycle — was 20, more aggressive discovery)
+    // Add top candidates (cap at 20 per cycle — was 40, quality over quantity)
     let added = 0;
-    for (const c of candidates.slice(0, 40)) {
+    for (const c of candidates.slice(0, 20)) {
       if (await this.addWallet(c)) added++;
     }
 
@@ -582,7 +585,7 @@ export class WalletDiscovery {
     // Step 3: Score and add — lower PnL bar since these are flow-based (early accumulation)
     const candidates: WalletCandidate[] = [];
     for (const [addr, data] of walletScores) {
-      if (data.totalPnl < 200) continue; // $200 min (lower than PnL discovery — these are early signals)
+      if (data.totalPnl < 500 || data.tokensFound < 2) continue; // $500 min + 2 tokens (was $200/1 — too loose)
 
       const pnlScore = Math.min(Math.log10(Math.max(data.totalPnl, 1)) / 5, 1) * 0.35;
       const tradeScore = Math.min(data.totalTrades / 15, 1) * 0.30;
@@ -601,7 +604,7 @@ export class WalletDiscovery {
 
     candidates.sort((a, b) => b.score - a.score);
     let added = 0;
-    for (const c of candidates.slice(0, 30)) {
+    for (const c of candidates.slice(0, 15)) {
       if (await this.addWallet(c)) added++;
     }
 
@@ -962,6 +965,23 @@ export class WalletDiscovery {
         totalRemoved += capCount;
         logger.info({ count: capCount, cap: MAX_ACTIVE_WALLETS }, 'Removed lowest-scoring wallets to enforce cap');
       }
+    }
+
+    // PF-only wallet cleanup: deactivate PF-only wallets that are also bad at pump.fun.
+    // If a wallet is PF-only AND has 3+ trades with <35% WR, it's useless everywhere — cut it.
+    const pfCleanup = await query(
+      `UPDATE alpha_wallets SET active = FALSE
+       WHERE active = TRUE
+         AND pumpfun_only = TRUE
+         AND COALESCE(our_total_trades, 0) >= 3
+         AND COALESCE(our_win_rate, 0) < 0.35
+       RETURNING address`,
+    );
+    const pfCut = pfCleanup.rowCount || 0;
+    if (pfCut > 0) {
+      reasons['pf-only poor performer'] = pfCut;
+      totalRemoved += pfCut;
+      logger.info({ count: pfCut }, 'Deactivated PF-only wallets with <35% WR on 3+ trades');
     }
 
     // Cap unproven wallets (0 our_total_trades + 0 shadow_total_trades) at 50.

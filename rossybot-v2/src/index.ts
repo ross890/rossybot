@@ -202,6 +202,10 @@ class RossyBotV2 {
   // Graduation retroanalysis — discovers wallets that buy early on tokens that graduate
   private graduationAnalyzer: GraduationAnalyzer;
 
+  // Hold-time enforcement deduplication: only send Telegram messages when wallet lists change
+  private previousHoldTimeDeactivated: Set<string> = new Set();
+  private previousHoldTimeDemoted: Set<string> = new Set();
+
   // Graduation bounce discovery — monitors freshly graduated tokens for dip/recovery pattern
   private graduationDiscovery: GraduationDiscovery;
   private graduatedTracker: GraduatedTracker;
@@ -1354,24 +1358,37 @@ class RossyBotV2 {
       });
     }
 
-    // Hold-time enforcement alerts
+    // Hold-time enforcement alerts (deduplicated — only send when wallet lists change)
     this.walletDiscovery.setHoldTimeCallback(async (results) => {
-      if (results.deactivated.length > 0) {
-        await this.telegram.send(
-          `🎰 HOLD-TIME ENFORCEMENT\n` +
-          `├ Pump.fun only: ${results.deactivated.length} wallet(s) — bag-holders for standard trades\n` +
-          `│  ${results.deactivated.map((a) => a.slice(0, 8)).join(', ')}\n` +
-          `└ Still active for pump.fun signals (short holds work there)`,
-        );
+      const newDeactivated = new Set(results.deactivated);
+      const newDemoted = new Set(results.demoted);
+
+      // Compute diffs against previous cycle
+      const addedDeactivated = results.deactivated.filter(a => !this.previousHoldTimeDeactivated.has(a));
+      const removedDeactivated = [...this.previousHoldTimeDeactivated].filter(a => !newDeactivated.has(a));
+      const addedDemoted = results.demoted.filter(a => !this.previousHoldTimeDemoted.has(a));
+      const removedDemoted = [...this.previousHoldTimeDemoted].filter(a => !newDemoted.has(a));
+
+      const deactivatedChanged = addedDeactivated.length > 0 || removedDeactivated.length > 0;
+      const demotedChanged = addedDemoted.length > 0 || removedDemoted.length > 0;
+
+      if (deactivatedChanged && newDeactivated.size > 0) {
+        const lines = [`🎰 HOLD-TIME ENFORCEMENT · ${newDeactivated.size} wallet(s) PF-only`];
+        if (addedDeactivated.length > 0) lines.push(`├ +${addedDeactivated.length} added: ${addedDeactivated.map(a => a.slice(0, 8)).join(', ')}`);
+        if (removedDeactivated.length > 0) lines.push(`├ -${removedDeactivated.length} removed: ${removedDeactivated.map(a => a.slice(0, 8)).join(', ')}`);
+        lines.push(`└ Still active for pump.fun signals`);
+        await this.telegram.send(lines.join('\n'));
       }
-      if (results.demoted.length > 0) {
-        await this.telegram.send(
-          `⚠️ HOLD-TIME DEMOTION\n` +
-          `├ Demoted to Tier B: ${results.demoted.length} wallet(s)\n` +
-          `│  ${results.demoted.map((a) => a.slice(0, 8)).join(', ')}\n` +
-          `└ Poor short-term alpha — deprioritized in ranking`,
-        );
+      if (demotedChanged && newDemoted.size > 0) {
+        const lines = [`⚠️ HOLD-TIME DEMOTION · ${newDemoted.size} wallet(s) Tier B`];
+        if (addedDemoted.length > 0) lines.push(`├ +${addedDemoted.length} demoted: ${addedDemoted.map(a => a.slice(0, 8)).join(', ')}`);
+        if (removedDemoted.length > 0) lines.push(`├ -${removedDemoted.length} restored: ${removedDemoted.map(a => a.slice(0, 8)).join(', ')}`);
+        lines.push(`└ Poor short-term alpha — deprioritized in ranking`);
+        await this.telegram.send(lines.join('\n'));
       }
+
+      this.previousHoldTimeDeactivated = newDeactivated;
+      this.previousHoldTimeDemoted = newDemoted;
     });
   }
 
@@ -1491,10 +1508,6 @@ class RossyBotV2 {
           token: mint.slice(0, 8), wallet: walletLabel,
           alpha: walletRow.short_term_alpha_score, rounds: walletRow.round_trips_analyzed,
         }, 'Pump.fun REJECTED — alpha score too low');
-        await this.telegram.send(
-          `⛔ SKIP · ${mint.slice(0, 8)} · Low alpha\n` +
-          `└ ${walletLabel} · Alpha ${walletRow.short_term_alpha_score}/100 · ${walletRow.round_trips_analyzed} rounds`,
-        );
         return;
       }
 

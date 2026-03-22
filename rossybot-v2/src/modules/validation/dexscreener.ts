@@ -5,21 +5,115 @@ import type { DexScreenerPair, ValidationCheckResult, TierConfig } from '../../t
 
 const DEXSCREENER_BASE = config.dexScreener.baseUrl;
 
-export async function fetchDexPair(tokenMint: string): Promise<DexScreenerPair | null> {
-  try {
-    const resp = await axios.get(`${DEXSCREENER_BASE}/tokens/${tokenMint}`, {
-      timeout: 10_000,
-    });
+// ---------------------------------------------------------------------------
+// Rate limiter + cache + 429 backoff for DexScreener API
+// ---------------------------------------------------------------------------
 
-    const pairs: DexScreenerPair[] = resp.data?.pairs || [];
-    if (pairs.length === 0) return null;
+/** Short-lived cache: avoids duplicate requests for the same token within TTL */
+const pairCache = new Map<string, { data: DexScreenerPair | null; ts: number }>();
+const CACHE_TTL_MS = 10_000; // 10 seconds
 
-    // Return the pair with highest liquidity
-    return pairs.sort((a, b) => (b.liquidity?.usd || 0) - (a.liquidity?.usd || 0))[0];
-  } catch (err) {
-    logger.error({ err, mint: tokenMint }, 'DexScreener API error');
-    return null;
+/** Sequential request queue — max 1 in-flight, with delay between requests */
+const REQUEST_DELAY_MS = 350; // ~2.8 req/s — well under Cloudflare limits
+let requestQueue: Array<{ resolve: (v: DexScreenerPair | null) => void; mint: string }> = [];
+let processing = false;
+
+/** Global backoff state — when 429'd, pause ALL requests */
+let backoffUntil = 0;
+
+function sleep(ms: number): Promise<void> {
+  return new Promise((r) => setTimeout(r, ms));
+}
+
+async function processQueue(): Promise<void> {
+  if (processing) return;
+  processing = true;
+
+  while (requestQueue.length > 0) {
+    // Check global backoff
+    const now = Date.now();
+    if (now < backoffUntil) {
+      const waitMs = backoffUntil - now;
+      logger.warn({ waitMs, queueSize: requestQueue.length }, 'DexScreener rate-limited — backing off');
+      await sleep(waitMs);
+    }
+
+    const item = requestQueue.shift()!;
+
+    // Check cache before making request (may have been populated while queued)
+    const cached = pairCache.get(item.mint);
+    if (cached && Date.now() - cached.ts < CACHE_TTL_MS) {
+      item.resolve(cached.data);
+      continue;
+    }
+
+    try {
+      const resp = await axios.get(`${DEXSCREENER_BASE}/tokens/${item.mint}`, {
+        timeout: 10_000,
+      });
+
+      const pairs: DexScreenerPair[] = resp.data?.pairs || [];
+      const result = pairs.length === 0
+        ? null
+        : pairs.sort((a, b) => (b.liquidity?.usd || 0) - (a.liquidity?.usd || 0))[0];
+
+      pairCache.set(item.mint, { data: result, ts: Date.now() });
+      item.resolve(result);
+    } catch (err: any) {
+      const status = err?.response?.status || err?.status;
+
+      if (status === 429) {
+        // Exponential backoff: 30s first time, doubles up to 5 min
+        const retryAfter = parseInt(err?.response?.headers?.['retry-after'] || '0', 10);
+        const backoffMs = Math.max(retryAfter * 1000, 30_000);
+        backoffUntil = Date.now() + backoffMs;
+        logger.error({ backoffMs, retryAfter, queueSize: requestQueue.length },
+          'DexScreener 429 — global backoff activated');
+
+        // Put this request back at front of queue to retry after backoff
+        requestQueue.unshift(item);
+      } else {
+        logger.error({ status, mint: item.mint }, 'DexScreener API error');
+        item.resolve(null);
+      }
+    }
+
+    // Throttle between requests
+    if (requestQueue.length > 0) {
+      await sleep(REQUEST_DELAY_MS);
+    }
   }
+
+  processing = false;
+}
+
+/** Periodically evict stale cache entries */
+setInterval(() => {
+  const now = Date.now();
+  for (const [key, entry] of pairCache) {
+    if (now - entry.ts > CACHE_TTL_MS * 3) pairCache.delete(key);
+  }
+}, 30_000);
+
+export async function fetchDexPair(tokenMint: string): Promise<DexScreenerPair | null> {
+  // Return cached data if fresh
+  const cached = pairCache.get(tokenMint);
+  if (cached && Date.now() - cached.ts < CACHE_TTL_MS) {
+    return cached.data;
+  }
+
+  // Deduplicate: if this mint is already queued, return the same promise
+  const existing = requestQueue.find((q) => q.mint === tokenMint);
+  if (existing) {
+    return new Promise((resolve) => {
+      requestQueue.push({ resolve, mint: tokenMint });
+    });
+  }
+
+  return new Promise((resolve) => {
+    requestQueue.push({ resolve, mint: tokenMint });
+    processQueue();
+  });
 }
 
 export function checkLiquidity(pair: DexScreenerPair, tierCfg: TierConfig): ValidationCheckResult {

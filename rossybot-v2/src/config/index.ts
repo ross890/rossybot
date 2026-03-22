@@ -95,9 +95,9 @@ export const config = {
     curveHardExit: 0.45,              // Force-exit at 45% (unchanged — pre-graduation safety valve)
     curveEntryMin: 0.33,              // MINIMUM 33% curve fill (30-35% zone: 31%WR but -1.37 SOL net — 33%+ captures the stronger half)
     curveEntryMax: 0.38,              // Maximum 38% curve fill — above this no room for TP
-    curveVelocityMin: 0.5,            // Minimum 0.5 SOL/min velocity to enter (filter stalling tokens)
+    curveVelocityMin: 1.0,            // Minimum 1.0 SOL/min velocity to enter (was 0.5 — data: stalling tokens at 0.5 SOL/min are dead weight)
     graduationSellPct: 100,            // Sell 100% on any graduation (no lottery holds)
-    minConvictionSol: 1.25,            // Alpha must spend ≥1.25 SOL (was 0.75 — data: tiny buys <1 SOL = spray/noise, big losses)
+    minConvictionSol: 2.0,             // Alpha must spend ≥2.0 SOL (was 1.25 — data: 540t show spray buys <2 SOL = noise, net losers)
     minCurveVelocity: 0.1,            // 0.1 SOL/min curve velocity (legacy — curveVelocityMin is the active check)
     maxTokenAgeMins: 10,               // Only tokens <10min old (curve scalps resolve in 2-5min, stale tokens = stalls)
     maxPositions: 2,                   // Max 2 pump.fun positions (was 3 — fewer = more capital focus, faster exits)

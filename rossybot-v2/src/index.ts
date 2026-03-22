@@ -638,8 +638,8 @@ class RossyBotV2 {
     // 11. Schedule daily summary at UTC midnight
     this.scheduleDailySummary();
 
-    // 12. Send full startup diagnostics to Telegram
-    await this.sendStartupDiagnostics();
+    // 12. Send condensed startup diagnostics to Telegram (use /diagnostics for full dump)
+    await this.sendStartupDiagnostics({ summaryOnly: true });
 
     logger.info('=== ROSSYBOT V2 — Running ===');
   }
@@ -1337,6 +1337,7 @@ class RossyBotV2 {
     this.telegram.setMarketAnalysisCallback((force) => runDailyAnalysis({ force }));
     this.telegram.setPauseCallback(() => logger.info('Trading PAUSED via Telegram'));
     this.telegram.setResumeCallback(() => logger.info('Trading RESUMED via Telegram'));
+    this.telegram.setDiagnosticsCallback(() => this.sendStartupDiagnostics());
 
     // /kill command — live mode force close (sells token)
     // /drop command — remove from tracking without selling (for manually-sold tokens)
@@ -2149,7 +2150,7 @@ class RossyBotV2 {
     }
   }
 
-  private async sendStartupDiagnostics(): Promise<void> {
+  private async sendStartupDiagnostics(opts?: { summaryOnly?: boolean }): Promise<void> {
     try {
       const walletRows = await (await import('./db/database.js')).getMany<{
         address: string; label: string; tier: string; helius_subscribed: boolean;
@@ -2531,6 +2532,7 @@ class RossyBotV2 {
       const wsStatus = this.wsManager.getStatus();
 
       await this.telegram.sendStartupDiagnostics({
+        summaryOnly: opts?.summaryOnly ?? false,
         version: 'v2.0.0',
         shadowMode: config.shadowMode,
         capitalSol: this.capitalManager.capital,

@@ -1932,9 +1932,29 @@ class RossyBotV2 {
         return;
       }
 
-      // Position sizing: use tier size * graduation multiplier
-      const tierSize = this.capitalManager.getPositionSize();
-      const posSize = tierSize * cfg.positionSizeMultiplier;
+      // Position sizing: minimum 1 SOL floor, capped by pool liquidity impact
+      const tierSize = this.capitalManager.getPositionSize() * cfg.positionSizeMultiplier;
+      const minSize = cfg.minPositionSol; // 1.0 SOL
+
+      // Cap by liquidity: don't exceed maxLiquidityPct of pool (prevents excessive price impact).
+      // Rough SOL price ≈ $140 for estimation — exact value doesn't matter, this is a safety cap.
+      const solPriceEstimate = 140;
+      const maxByLiquidity = signal.liquidity > 0
+        ? (signal.liquidity * cfg.maxLiquidityPct) / solPriceEstimate
+        : minSize;
+
+      const posSize = Math.min(Math.max(minSize, tierSize), maxByLiquidity);
+
+      // Safety: don't deploy more than 60% of balance on a single grad trade
+      const balance = this.capitalManager.capital;
+      if (posSize > balance * 0.60) {
+        logger.info({
+          posSize: posSize.toFixed(4),
+          balance: balance.toFixed(4),
+          token: mint.slice(0, 8),
+        }, 'Grad signal skip — insufficient balance for min grad size');
+        return;
+      }
 
       if (posSize < getTierConfig(this.capitalManager.tier).minPositionSol) {
         logger.info({ posSize, token: mint.slice(0, 8) }, 'Grad signal skip — position too small');

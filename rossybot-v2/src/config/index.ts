@@ -138,7 +138,9 @@ export const config = {
     minEntryLiquidity: 5_000,            // $5K min liquidity at entry
     // --- Position management ---
     maxPositions: 2,                     // Max 2 concurrent graduation bounce positions
-    positionSizeMultiplier: 0.80,        // 80% of normal tier sizing (higher risk than alpha-led trades)
+    minPositionSol: 1.0,                 // Minimum 1 SOL per grad trade (these are the best edge — size up)
+    positionSizeMultiplier: 0.80,        // 80% of normal tier sizing (fallback if tier calc > 1 SOL)
+    maxLiquidityPct: 0.02,              // Max 2% of pool liquidity per trade (caps price impact)
     profitTarget: 0.50,                  // 50% take profit (graduated tokens can run big)
     stopLoss: -0.20,                     // 20% stop loss
     hardKill: -0.25,                     // 25% hard kill (was 30% — prevent NEMO-style -68% disasters)
@@ -147,6 +149,7 @@ export const config = {
     staleTimeMins: 20,                   // Cut losers after 20min (was 30 — winners resolve fast, losers at 20min rarely recover)
     hardTimeHours: 2,                    // 2h max hold (was 4h — NEMO held 7h for -68%, RETARD 5h for -17%)
     slippageBps: 300,                    // 3% slippage (freshly graduated = thin liquidity)
+    mevProtection: true,                 // Enable MEV-resistant execution (tighter slippage, priority boost, restricted routing)
   },
 } as const;
 

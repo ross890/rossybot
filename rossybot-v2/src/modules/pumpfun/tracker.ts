@@ -220,7 +220,7 @@ export class PumpFunTracker {
           params.tokenMint,
           params.solAmount,
           0, // liquidityUsd=0 forces thinLiquiditySlippageBps in SwapExecutor
-          attempt === 0 ? params.prefetchedQuote : undefined, // Only use prefetched quote on first attempt
+          { prefetchedQuote: attempt === 0 ? params.prefetchedQuote : undefined },
         );
 
         if (result.success) break;

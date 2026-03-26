@@ -146,6 +146,7 @@ export class GraduatedTracker {
         signal.mint,
         solAmount,
         signal.liquidity, // Use actual liquidity for slippage calc
+        { mevProtected: this.cfg.mevProtection },
       );
 
       if (!result.success) {

@@ -34,11 +34,28 @@ export class SwapExecutor {
   }
 
   /** Buy token with SOL */
-  async buyToken(tokenMint: string, solAmount: number, liquidityUsd: number, prefetchedQuote?: unknown): Promise<SwapResult> {
+  async buyToken(tokenMint: string, solAmount: number, liquidityUsd: number, opts?: {
+    prefetchedQuote?: unknown;
+    mevProtected?: boolean;
+  }): Promise<SwapResult> {
     const lamports = Math.round(solAmount * LAMPORTS_PER_SOL);
-    const slippageBps = liquidityUsd < 50_000
-      ? config.jupiter.thinLiquiditySlippageBps
-      : config.jupiter.defaultSlippageBps;
+
+    let slippageBps: number;
+    if (opts?.mevProtected && liquidityUsd > 0) {
+      // MEV-resistant slippage: scale by trade size relative to pool depth.
+      // Tighter slippage = less room for sandwich attacks.
+      // Rough SOL price ~$140 for impact estimation.
+      const tradeSizeUsd = solAmount * 140;
+      const impactPct = tradeSizeUsd / liquidityUsd;
+      if (impactPct < 0.005) slippageBps = 100;       // <0.5% of pool → 1% slippage
+      else if (impactPct < 0.01) slippageBps = 150;    // <1% of pool → 1.5%
+      else if (impactPct < 0.02) slippageBps = 200;    // <2% of pool → 2%
+      else slippageBps = 300;                           // >2% of pool → 3% (needs room)
+    } else {
+      slippageBps = liquidityUsd < 50_000
+        ? config.jupiter.thinLiquiditySlippageBps
+        : config.jupiter.defaultSlippageBps;
+    }
 
     return this.executeSwap({
       inputMint: SOL_MINT,
@@ -46,7 +63,8 @@ export class SwapExecutor {
       amount: lamports,
       slippageBps,
       isBuy: true,
-      prefetchedQuote,
+      prefetchedQuote: opts?.prefetchedQuote,
+      mevProtected: opts?.mevProtected,
     });
   }
 
@@ -121,8 +139,9 @@ export class SwapExecutor {
     slippageBps: number;
     isBuy: boolean;
     prefetchedQuote?: unknown;
+    mevProtected?: boolean;
   }): Promise<SwapResult> {
-    const { inputMint, outputMint, amount, slippageBps, isBuy, prefetchedQuote } = params;
+    const { inputMint, outputMint, amount, slippageBps, isBuy, prefetchedQuote, mevProtected } = params;
 
     // Get priority fee + quote in parallel (independent calls)
     const jupHeaders: Record<string, string> = {};
@@ -130,32 +149,43 @@ export class SwapExecutor {
       jupHeaders['x-api-key'] = config.jupiter.apiKey;
     }
 
+    // MEV protection: restrict routing to top-liquidity intermediate tokens only.
+    // This prevents sandwichers from using obscure pool routes to manipulate price.
+    const quoteParams: Record<string, string | boolean | number> = {
+      inputMint,
+      outputMint,
+      amount: amount.toString(),
+      slippageBps,
+      onlyDirectRoutes: false,
+    };
+    if (mevProtected) {
+      quoteParams.restrictIntermediateTokens = true;
+      quoteParams.maxAccounts = 20; // Fewer accounts = simpler route = harder to sandwich
+    }
+
     const [priorityFee, quoteResponse] = await Promise.all([
       this.getPriorityFee(),
       prefetchedQuote
         ? Promise.resolve({ data: prefetchedQuote })
         : axios.get(`${config.jupiter.apiUrl}/quote`, {
-            params: {
-              inputMint,
-              outputMint,
-              amount: amount.toString(),
-              slippageBps,
-              onlyDirectRoutes: false,
-            },
+            params: quoteParams,
             headers: jupHeaders,
             timeout: 10_000,
           }),
     ]);
 
+    // MEV protection: boost priority fee to outbid sandwichers in block ordering
+    const basePriorityFee = mevProtected ? Math.round(priorityFee * 1.5) : priorityFee;
+
     for (let attempt = 0; attempt <= config.jupiter.maxRetries; attempt++) {
       try {
-        const currentPriorityFee = attempt === 0 ? priorityFee : priorityFee * 2;
+        const currentPriorityFee = attempt === 0 ? basePriorityFee : basePriorityFee * 2;
 
         // On retry, re-fetch quote (price may have moved)
         let quote = quoteResponse.data;
         if (attempt > 0) {
           const retryQuote = await axios.get(`${config.jupiter.apiUrl}/quote`, {
-            params: { inputMint, outputMint, amount: amount.toString(), slippageBps, onlyDirectRoutes: false },
+            params: quoteParams,
             headers: jupHeaders,
             timeout: 10_000,
           });

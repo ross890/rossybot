@@ -79,6 +79,8 @@ export interface GradSignal {
   buyRatio: number;
   mcap: number;
   liquidity: number;
+  /** Signal quality score (0-100). Higher = better setup based on historical data. */
+  qualityScore: number;
 }
 
 /**
@@ -283,6 +285,44 @@ export class GraduationDiscovery {
     }
   }
 
+  /**
+   * Score a graduation signal based on historical data patterns.
+   * Data source: 32 shadow trades, Mar 22-26 2026.
+   *
+   * Factors (weighted by predictive power):
+   * - Dip depth: deeper dips = much higher WR (67% at -70%+ vs 25% at <-50%)
+   * - Buy ratio: higher = more demand-side recovery
+   * - MCap sweet spot: $20-65K performed best
+   */
+  private scoreSignal(dipPct: number, buyRatio: number, mcap: number): number {
+    let score = 0;
+
+    // Dip depth (0-40 pts) — strongest predictor
+    const absDip = Math.abs(dipPct);
+    if (absDip >= 0.80) score += 40;       // -80%+ → top tier (2, BOB = big wins)
+    else if (absDip >= 0.70) score += 35;  // -70-79% → 67% WR
+    else if (absDip >= 0.60) score += 25;  // -60-69% → 40% WR
+    else if (absDip >= 0.50) score += 15;  // -50-59% → 30% WR
+    else score += 5;                       // <50% → 25% WR (shouldn't reach here with minDipPct filter)
+
+    // Buy ratio (0-30 pts) — demand recovery signal
+    if (buyRatio >= 0.65) score += 30;     // Strong buy pressure (Gulpo 81% → instant TP)
+    else if (buyRatio >= 0.58) score += 25;
+    else if (buyRatio >= 0.55) score += 20;
+    else if (buyRatio >= 0.50) score += 15;
+    else score += 5;
+
+    // MCap sweet spot (0-20 pts) — $20-65K performed best
+    if (mcap >= 20_000 && mcap <= 65_000) score += 20;
+    else if (mcap > 65_000 && mcap <= 150_000) score += 10;
+    else score += 5;
+
+    // Stability bonus (0-10 pts) — recovery from a deep dip with good buy ratio is ideal
+    if (absDip >= 0.60 && buyRatio >= 0.55) score += 10;
+
+    return Math.min(100, score);
+  }
+
   private updatePhase(entry: MonitoredGrad, dexData: DexScreenerPair): void {
     const cfg = this.cfg;
     const ageMins = (Date.now() - entry.detectedAt) / 60_000;
@@ -322,6 +362,9 @@ export class GraduationDiscovery {
         ? (entry.lowestPriceUsd - entry.graduationPriceUsd) / entry.graduationPriceUsd
         : 0;
 
+      const mcap = dexData.marketCap || dexData.fdv || 0;
+      const qualityScore = this.scoreSignal(dipPct, entry.buyRatio, mcap);
+
       const signal: GradSignal = {
         mint: entry.mint,
         symbol: entry.symbol,
@@ -333,8 +376,9 @@ export class GraduationDiscovery {
         recoveryPct: entry.recoveryPct,
         timeSinceGradMins: ageMins,
         buyRatio: entry.buyRatio,
-        mcap: dexData.marketCap || dexData.fdv || 0,
+        mcap,
         liquidity: dexData.liquidity?.usd || 0,
+        qualityScore,
       };
 
       logger.info({
@@ -345,6 +389,7 @@ export class GraduationDiscovery {
         buyRatio: `${(entry.buyRatio * 100).toFixed(0)}%`,
         mcap: `$${signal.mcap.toLocaleString()}`,
         ageMins: ageMins.toFixed(0),
+        qualityScore,
       }, 'GRADUATION BOUNCE SIGNAL — dip/recovery pattern confirmed');
 
       this.onSignal?.(signal);

@@ -110,20 +110,28 @@ export const config = {
   // --- Graduation Bounce Discovery ---
   // Monitors freshly graduated pump.fun tokens for the post-graduation dip/recovery pattern.
   // Thesis: tokens dump 30-60% after graduation, then bounce 50-200% as new buyers enter.
+  //
+  // DATA-DRIVEN TUNING (32 shadow trades, Mar 22-26 2026):
+  //   Dip -70%+: 6W/3L = 67% WR (strong edge)
+  //   Dip -50-69%: 5W/10L = 33% WR (marginal)
+  //   Dip <50%: 2W/6L = 25% WR (losing money)
+  //   Trailing stop was giving back too much: fuckbonk peaked +41% → closed +2%
+  //   Long holds bleed: NEMO 408min → -68%, RETARD 295min → -17%
+  //   Best late entries: "2" at 210min (+52%), Coco 223min (+51%), BOB 249min (+22%)
   graduationDiscovery: {
     enabled: true,
     // --- Detection ---
     maxMonitored: 50,                    // Max tokens to monitor simultaneously
     priceCheckIntervalMs: 15_000,        // Check prices every 15s (DexScreener rate-friendly)
-    monitorWindowMins: 60,               // Monitor for up to 60 min post-graduation
+    monitorWindowMins: 600,              // 10h window (was 60 — best wins came from late entries at 200-500min post-grad)
     // --- Graduation filters ---
     minGraduationMcap: 30_000,           // $30K min mcap at graduation (most are ~$69K)
     minGraduationLiquidity: 5_000,       // $5K min liquidity
     // --- Dip/Recovery signal thresholds ---
-    minDipPct: 0.25,                     // Must dip at least 25% from graduation price
+    minDipPct: 0.50,                     // 50% dip required (was 25% — data: <50% dip = 25% WR vs 67% at 70%+)
     minRecoveryPct: 0.15,               // Must bounce at least 15% from the bottom
     minStabilityChecks: 2,               // 2 consecutive stable/rising price checks (~30s)
-    minBuyRatio: 0.45,                   // At least 45% of txns are buys (not still dumping)
+    minBuyRatio: 0.50,                   // 50% buy ratio (was 45% — tighter filter for quality signals)
     minTimeSinceGradMins: 3,             // Wait at least 3 min after graduation (let the initial dump play out)
     // --- Entry gate ---
     minEntryMcap: 20_000,               // $20K min mcap at entry (post-dip, may be lower than graduation)
@@ -133,11 +141,11 @@ export const config = {
     positionSizeMultiplier: 0.80,        // 80% of normal tier sizing (higher risk than alpha-led trades)
     profitTarget: 0.50,                  // 50% take profit (graduated tokens can run big)
     stopLoss: -0.20,                     // 20% stop loss
-    hardKill: -0.30,                     // 30% hard kill
-    trailingActivationPct: 0.25,         // Activate trailing stop at +25%
-    trailingStopPct: 0.15,              // Trail by 15% from peak (sell if drops 15% from highest PnL)
-    staleTimeMins: 30,                   // Cut if still losing after 30 min
-    hardTimeHours: 4,                    // 4h max hold (graduation bounces resolve within hours)
+    hardKill: -0.25,                     // 25% hard kill (was 30% — prevent NEMO-style -68% disasters)
+    trailingActivationPct: 0.15,         // Activate trailing at +15% (was 25% — capture gains earlier, PIXEL peaked +26% barely activated)
+    trailingStopPct: 0.10,              // Trail by 10% from peak (was 15% — data: fuckbonk gave back 39pp, SMRY gave back 23pp)
+    staleTimeMins: 20,                   // Cut losers after 20min (was 30 — winners resolve fast, losers at 20min rarely recover)
+    hardTimeHours: 2,                    // 2h max hold (was 4h — NEMO held 7h for -68%, RETARD 5h for -17%)
     slippageBps: 300,                    // 3% slippage (freshly graduated = thin liquidity)
   },
 } as const;

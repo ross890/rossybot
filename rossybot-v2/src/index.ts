@@ -1960,11 +1960,13 @@ class RossyBotV2 {
       }); // Don't re-enter this session
 
       const mode = this.graduatedTracker.isLive ? 'LIVE' : 'SHADOW';
+      const qualityEmoji = signal.qualityScore >= 70 ? '🟢' : signal.qualityScore >= 50 ? '🟡' : '🔴';
       await this.telegram.send(
         `🎓 GRAD BUY · ${signal.symbol || mint.slice(0, 8)} · ${posSize.toFixed(4)} SOL\n` +
         `├ Dip: ${(signal.dipPct * 100).toFixed(0)}% from grad · Recovery: +${(signal.recoveryPct * 100).toFixed(0)}%\n` +
         `├ MCap: $${signal.mcap.toLocaleString()} · Liq: $${signal.liquidity.toLocaleString()}\n` +
         `├ Buy ratio: ${(signal.buyRatio * 100).toFixed(0)}% · ${signal.timeSinceGradMins.toFixed(0)}min post-grad\n` +
+        `├ Quality: ${qualityEmoji} ${signal.qualityScore}/100\n` +
         `├ TP +${(cfg.profitTarget * 100).toFixed(0)}% · SL ${(cfg.stopLoss * 100).toFixed(0)}% · Trail ${(cfg.trailingStopPct * 100).toFixed(0)}%\n` +
         (pos.entry_tx ? `├ TX: ${pos.entry_tx.slice(0, 16)}...\n` : '') +
         `└ <a href="https://dexscreener.com/solana/${mint}">dex</a> · <a href="https://pump.fun/coin/${mint}">pump.fun</a> · ${mode}`,

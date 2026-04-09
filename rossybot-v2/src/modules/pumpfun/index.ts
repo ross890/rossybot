@@ -1,5 +1,5 @@
 export { detectPumpFunInteraction, deriveBondingCurveAddress, fetchCurveState, checkGraduation, estimateCurveFillPct } from './detector.js';
-export { validatePumpFunSignal, type PumpFunValidationResult } from './validation.js';
+export { validatePumpFunSignal, type PumpFunValidationResult, type CurveHint } from './validation.js';
 export { PumpFunTracker, type PumpFunPosition } from './tracker.js';
 export { PumpPortalClient, type PumpPortalTrade, type PumpPortalMigration } from './pumpportal-client.js';
 export { PumpFunAlphaDiscovery } from './alpha-discovery.js';
